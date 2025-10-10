@@ -17,6 +17,7 @@
 #include "circt/Dialect/AIG/AIGDialect.h"
 #include "circt/Dialect/Arc/ArcDialect.h"
 #include "circt/Dialect/Calyx/CalyxDialect.h"
+#include "circt/Dialect/Cmt2/Cmt2Dialect.h"
 #include "circt/Dialect/Comb/CombDialect.h"
 #include "circt/Dialect/DC/DCDialect.h"
 #include "circt/Dialect/Datapath/DatapathDialect.h"
@@ -63,6 +64,7 @@ inline void registerAllDialects(mlir::DialectRegistry &registry) {
     calyx::CalyxDialect,
     chirrtl::CHIRRTLDialect,
     comb::CombDialect,
+    cmt2::Cmt2Dialect,
     datapath::DatapathDialect,
     dc::DCDialect,
     debug::DebugDialect,
