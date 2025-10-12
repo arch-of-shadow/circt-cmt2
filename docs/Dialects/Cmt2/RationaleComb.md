@@ -16,13 +16,16 @@ In 5th Workshop on Languages, Tools, and Techniques for Accelerator Design (LATT
 
 - `cmt2.module`: Define a Cmt2 module. It includes signals for clock/reset, instances, rules, methods, and etc.
 - `cmt2.module.extern.hw`: Bind a `hw.module`
-- `cmt2.module.extern.firrtl`: Bind a `firrtl.module`
-- `cmt2.method`: define a method
+<!-- - `cmt2.module.extern.firrtl`: Bind a `firrtl.module` -->
+- `cmt2.method`: define an action method
+- `cmt2.value`: define a value method
 - `cmt2.rule`: define a rule
 - `cmt2.instance`: instantiate a module
 - `cmt2.call`: call a method
 - `cmt2.return`: return a value to caller
-- `cmt2.bind`: bind a signal to a method
+- `cmt2.interface`: declare an interface comprised of methods.
+- `cmt2.interface.def`: define an interface instance
+- `cmt2.interface.decl`: declare an interface instance
 
 ## Appendix
 

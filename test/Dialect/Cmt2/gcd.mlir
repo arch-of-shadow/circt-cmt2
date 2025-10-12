@@ -42,10 +42,30 @@ builtin.module {
             sequenceBefore = [[@read, @write]]
         }
         
+        // interface Read
+        cmt2.interface @Read {
+            cmt2.method @read: () -> (i32) {}{}
+        }
+
+        // a placeholder module to test interface
+        cmt2.module @placeholder {
+            cmt2.interface.decl @reader : @Read
+        }
+
         cmt2.module @gcd {
             ^bb0(%clk: i1, %rst: i1):
+            cmt2.interface.def @ReadX : @Read [
+                [@x, @read, @read]
+            ]
+
+            // instance to test interface
+            cmt2.instance @_ = @placeholder with [
+                [@ReadX, @reader]
+            ]
+
             cmt2.instance @x = @reg (%clk, %rst) : i1, i1
             cmt2.instance @y = @reg (%clk, %rst) : i1, i1
+
 
             cmt2.rule @swap {                
                 %0 = cmt2.call @x @read () : () -> (i32)

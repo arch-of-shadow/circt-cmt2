@@ -21,6 +21,7 @@
 //             "&$_op, $_self.cast<::mlir::FlatSymbolRefAttr>()))"
 //     >, "is module like">;
 
+// MethodSymbol is an attribute constraint. It has the form (instance, method).
 def CircuitOp : Cmt2Op<
   "circuit", [
     IsolatedFromAbove,
@@ -100,13 +101,13 @@ def ExtModuleHwOp : Cmt2Op<
   let regions = (region SizedRegion<1>:$body);
   let arguments = (ins 
     SymbolNameAttr:$sym_name,
-    SymbolRefAttr:$extModuleName
+    SymbolRefAttr:$ext_module_name
     // TypeAttrOf<FunctionType>:$function_type,
     // OptionalAttr<DictArrayAttr>:$arg_attrs,
     // OptionalAttr<DictArrayAttr>:$res_attrs
   );
   let assemblyFormat = [{
-    $sym_name `:` $extModuleName $body attr-dict
+    $sym_name `:` $ext_module_name $body attr-dict
   }];
 }
 
@@ -307,24 +308,28 @@ def InstanceOp : Cmt2Op<
     - `sym_name`: The name of the instance.
     - `args`: The list of signals (values) to be connected to the instance's
       input ports.
-    - `moduleName`: The symbol name of the module or external module to be
+    - `module_name`: The symbol name of the module or external module to be
       instantiated.
+    - `interface_binds`: (optional) The list of interface bindings, each is a tuple of (interface def name, interface decl name).
 
     Results: None
 
     Assembly format:
     ```mlir
-    cmt2.instance @inst1 of @mod1 ( %arg1, %arg2, ... ) : type attr-dict
+    cmt2.instance @inst1 of @mod1 ( %arg1, %arg2, ... : type1, type2, ... ) 
+      with [ [ @ifaceDef1, @ifaceDecl1 ], [ @ifaceDef2, @ifaceDecl2 ], ... ]
+      attr-dict
     ```
   }];
   // arguments which need to pass to non-scheduler modules.
   let arguments = (ins 
     SymbolNameAttr:$sym_name,
     Variadic<HWIntegerType>:$args,
-    FlatSymbolRefAttr:$moduleName
+    FlatSymbolRefAttr:$module_name,
+    OptionalAttr<ArrayAttr>:$interface_binds
   );
   let assemblyFormat = [{
-    $sym_name `=` $moduleName `(` $args `)` `:` type($args) attr-dict
+    $sym_name `=` $module_name  ( `(` $args^ `)` `:` type($args))?  (`with` $interface_binds^)? attr-dict
   }];
 }
 
@@ -409,7 +414,7 @@ def RuleOp : Cmt2Op<
 
 def ValueOp : Cmt2Op<
   "value", [
-    HasParent<"ModuleOp">,
+    ParentOneOf<["ModuleOp", "InterfaceOp"]>,
     IsolatedFromAbove,
     Symbol,
     // DeclareOpInterfaceMethods<Cmt2FunctionLike>,
@@ -457,7 +462,7 @@ def ValueOp : Cmt2Op<
 
 def MethodOp : Cmt2Op<
   "method", [
-    HasParent<"ModuleOp">,
+    ParentOneOf<["ModuleOp", "InterfaceOp"]>,
     // DeclareOpInterfaceMethods<Cmt2FunctionLike>,
     // DeclareOpInterfaceMethods<Cmt2MethodLike>,
     Symbol,
@@ -562,16 +567,110 @@ def CallOp : Cmt2Op<
   }];
 }
 
-def RulesToSchedule : Cmt2Op<
-  "scheduler.todo", [
+def InterfaceOp : Cmt2Op<
+  "interface", [
+    IsolatedFromAbove,
     SingleBlock,
+    Symbol,
     SymbolTable,
     NoTerminator,
-    NoRegionArguments,
-  ]
-  > {
-  let summary = "record a sequence of rules to schedule.";
+    NoRegionArguments
+  ]> {
+  let summary = "represent a Cmt2 interface.";
+  let description = [{
+    The `cmt2.interface` is a container to group methods.
+
+    Arguments:
+    - `sym_name`: The symbol name of the interface.
+
+    Results: None
+
+    Regions:
+    - `body`: This region holds the definitions of included methods.
+      
+    Assembly format:
+    ```mlir
+    cmt2.interface @iface1 {
+      cmt2.method @method1 { ... }
+      cmt2.value @value1 { ... }
+      ...
+    }
+    ```
+  }];
+  let arguments = (ins 
+    SymbolNameAttr:$sym_name
+  );
   let regions = (region SizedRegion<1>:$body);
+  let assemblyFormat = [{
+    $sym_name $body attr-dict
+  }];
+}
+
+def InterfaceDefOp : Cmt2Op<
+  "interface.def", [
+    HasParent<"ModuleOp">,
+    Symbol,
+    NoTerminator
+  ]> {
+  let summary = "Include an interface in a module.";
+  let description = [{
+    The `cmt2.interface.def` operation defines an interface instance in a Cmt2 module
+
+    Arguments:
+    - `interface`: The symbol name of the interface to be defined.
+    - `sym_name`: The symbol name of the interface instance.
+    - `methods`: The list of method instances, each is a tuple of (instance name, method name, interface method name)
+
+    Results: None
+
+    Assembly format:
+    ```mlir
+    cmt2.interface.def @sym_name : @interface [
+      ( @inst1, @method1, @ifaceMethod1 ),
+      ( @inst2, @method2, @ifaceMethod2 ),
+      ...
+    ] attr-dict
+    ```
+  }];
+  let arguments = (ins 
+    SymbolRefAttr:$interface,
+    SymbolNameAttr:$sym_name,
+    ArrayAttr:$methods
+  );
+  let assemblyFormat = [{
+    $sym_name `:` $interface $methods attr-dict
+  }];
+}
+
+def InterfaceDeclOp : Cmt2Op<
+  "interface.decl", [
+    HasParent<"ModuleOp">,
+    Symbol,
+    NoTerminator
+  ]> {
+  let summary = "Declare an interface instance in a module.";
+  let description = [{
+    The `cmt2.interface.decl` operation declares an interface instance in a Cmt2 module.
+    The instance can be bound during instantiation of the module or left unbound for a top module.
+
+    Arguments:
+    - `interface`: The symbol name of the interface to be declared.
+    - `sym_name`: The symbol name of the interface instance.
+
+    Results: None
+
+    Assembly format:
+    ```mlir
+    cmt2.interface.decl @sym_name : @interface attr-dict
+    ```
+  }];
+  let arguments = (ins 
+    SymbolRefAttr:$interface,
+    SymbolNameAttr:$sym_name
+  );
+  let assemblyFormat = [{
+    $sym_name `:` $interface attr-dict
+  }];
 }
 
 #endif // CIRCT_DIALECT_Cmt2_Cmt2OPS_TD
