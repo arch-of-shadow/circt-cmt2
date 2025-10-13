@@ -47,29 +47,104 @@ These utilities simplify code that needs to distinguish between methods and valu
 ### Cmt2FunctionLike Interface
 
 The `Cmt2FunctionLike` interface provides a common abstraction for function-like operations in the Cmt2 dialect that can be called. This includes:
-- `RuleOp`: Rules that define behavior
-- `MethodOp`: Action methods that can modify state
-- `ValueOp`: Value methods that read state
-- `BindMethodOp`: Bound methods from external hardware modules
-- `BindValueOp`: Bound values from external hardware modules
+- `RuleOp`: Rules that define behavior (two regions: guard and body)
+- `MethodOp`: Action methods that can modify state (two regions: guard and body)
+- `ValueOp`: Value methods that read state (two regions: guard and body)
+- `BindMethodOp`: Bound methods from external hardware modules (no regions)
+- `BindValueOp`: Bound values from external hardware modules (no regions)
 
 This interface enables uniform handling of all callable entities in the Cmt2 dialect, which is essential for analysis passes and transformations.
 
-**Required Methods:**
-- `getFunctionKind()`: Returns a `FunctionKind` enum indicating whether this is a Rule, Method, or Value
+**Design Philosophy:**
+
+The Cmt2FunctionLike interface provides comprehensive FunctionOpInterface-compatible features while supporting Cmt2's unique two-region design. Unlike MLIR's standard FunctionOpInterface, which requires single-region operations, Cmt2FunctionLike accommodates:
+1. Two-region operations (RuleOp, MethodOp, ValueOp) where guard and body regions share input arguments
+2. No-region operations (BindMethodOp, BindValueOp) that bind to external hardware
+
+**Interface Methods:**
+
+*Symbol Name Handling:*
 - `functionName()`: Get the function name as StringRef
 - `functionNameAttr()`: Get the function name as StringAttr
 
+*Function Kind:*
+- `getFunctionKind()`: Returns a `FunctionKind` enum (Rule, Method, or Value)
+
+*CallableOpInterface Compatibility:*
+- `getCallableRegion()`: Get the callable region (body region for two-region ops, nullptr for bind ops)
+- `getArgumentTypes()`: Get argument types from function type
+- `getResultTypes()`: Get result types from function type
+
+*Type Manipulation:*
+- `setFunctionTypeAttr(TypeAttr)`: Set the function type (unsafe, doesn't update attributes)
+- `cloneTypeWith(TypeRange inputs, TypeRange results)`: Clone function type with new inputs/outputs
+
+*Body and Region Handling:*
+- `isExternal()`: Returns true if operation has no body (always true for BindMethodOp/BindValueOp)
+- `getFunctionBody()`: Return the body region (should not be called for bind ops)
+
+*Argument and Result Counts:*
+- `getNumArguments()`: Returns the number of function arguments
+- `getNumResults()`: Returns the number of function results
+
+*Argument Attributes:*
+- `getAllArgAttrs()`: Return ArrayAttr containing all argument attribute dictionaries
+- `getArgAttrDict(index)`: Return attribute dictionary for argument at index
+- `getArgAttr(index, name)`: Return specified attribute for argument at index
+
+*Result Attributes:*
+- `getAllResAttrs()`: Return ArrayAttr containing all result attribute dictionaries
+- `getResAttrDict(index)`: Return attribute dictionary for result at index
+- `getResAttr(index, name)`: Return specified attribute for result at index
+
 **FunctionKind Enum:**
+
 The `FunctionKind` enum distinguishes between different types of callable entities:
 - `FunctionKind::Rule`: Represents a RuleOp
 - `FunctionKind::Method`: Represents a MethodOp or BindMethodOp
 - `FunctionKind::Value`: Represents a ValueOp or BindValueOp
 
 **Utility Functions:**
+
 The Cmt2 dialect provides utility functions in `Cmt2OpInterfaces.h`:
 - `isRuleOp(Operation*)`: Check if an operation is a RuleOp
 - `getFunctionKind(Operation*)`: Get the FunctionKind of an operation
+
+**Syntax:**
+
+Function-like operations use handshake.func-style syntax with shared arguments for both regions:
+```mlir
+// Method with shared arguments for guard and body
+cmt2.method @start(%a: i32, %b: i32) -> () {
+  // guard region with implicit access to %a, %b
+  %ready = ...
+  cmt2.return %ready : i1
+} {
+  // body region with implicit access to %a, %b
+  cmt2.call @x @write(%a) : (i32) -> ()
+  cmt2.call @y @write(%b) : (i32) -> ()
+}
+
+// Value returning data
+cmt2.value @result() -> (i32) {
+  // guard region
+  cmt2.return %ready : i1
+} {
+  // body region
+  %x = cmt2.call @x @read() : () -> (i32)
+  cmt2.return %x : i32
+}
+
+// Rule with no results
+cmt2.rule @swap() -> i1 {
+  // guard region computing rule condition
+  %can_fire = ...
+  cmt2.return %can_fire : i1
+} {
+  // body region with rule actions
+  ...
+}
+```
 
 These utilities simplify code that needs to distinguish between different types of callable entities, providing a uniform interface for working with rules, methods, and values.
 

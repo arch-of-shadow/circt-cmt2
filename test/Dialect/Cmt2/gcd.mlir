@@ -22,8 +22,7 @@ builtin.module {
     } : () -> ()
 
     cmt2.circuit {
-        cmt2.module.extern.hw @reg : @Reg32 {
-            ^bb0(%clk: i1, %rst: i1):
+        cmt2.module.extern.hw @reg : @Reg32(%clk: i1, %rst: i1) {
             // out-of-method gaa.bind bind the scheduling unrelated IOs.
             cmt2.bind.bare %clk, @clock : i1
             cmt2.bind.bare %rst, @reset : i1
@@ -44,7 +43,7 @@ builtin.module {
         
         // interface Read
         cmt2.interface @Read {
-            cmt2.method @read: () -> (i32) {}{}
+            cmt2.method @read() -> (i32) {}{}
         }
 
         // a placeholder module to test interface
@@ -52,8 +51,7 @@ builtin.module {
             cmt2.interface.decl @reader : @Read
         }
 
-        cmt2.module @gcd {
-            ^bb0(%clk: i1, %rst: i1):
+        cmt2.module @gcd(%clk: i1, %rst: i1) {
             cmt2.interface.def @ReadX : @Read [
                 [@x, @read, @read]
             ]
@@ -66,29 +64,29 @@ builtin.module {
             cmt2.instance @x = @reg (%clk, %rst) : i1, i1
             cmt2.instance @y = @reg (%clk, %rst) : i1, i1
 
-            cmt2.value @doing: () -> (i1) {} {
+            cmt2.value @doing() -> (i1) {} {
               %y = cmt2.call @y @read () : () -> (i32)
               %0 = hw.constant 0: i32
               %1 = comb.icmp ne %y, %0 : i32
               cmt2.return %1 : i1
             }
 
-            cmt2.rule @swap {                
+            cmt2.rule @swap() -> i1 {
                 %0 = cmt2.call @x @read () : () -> (i32)
                 %1 = cmt2.call @y @read () : () -> (i32)
                 %2 = "comb.icmp"(%0, %1) {predicate = 8 : i64} : (i32, i32) -> i1
                 %3 = cmt2.call @this @doing () : () -> (i1)
                 %4 = "comb.and"(%2, %3) : (i1, i1) -> i1
                 cmt2.return %4 : i1
-            } { 
+            } {
                 %0 = cmt2.call @x @read () : () -> (i32)
                 %1 = cmt2.call @y @read () : () -> (i32)
 
                 cmt2.call @x @write (%1) : (i32) -> ()
                 cmt2.call @y @write (%0) : (i32) -> ()
             }
-            
-            cmt2.rule @sub {
+
+            cmt2.rule @sub() -> i1 {
                 %0 = cmt2.call @x @read () : () -> (i32)
                 %1 = cmt2.call @y @read () : () -> (i32)
                 %2 = "comb.icmp"(%0, %1) {predicate = 2 : i64} : (i32, i32) -> i1
@@ -103,17 +101,16 @@ builtin.module {
                 cmt2.call @y @write (%2) : (i32) -> ()
             }
 
-            cmt2.method @start : () -> () {
+            cmt2.method @start(%a: i32, %b: i32) -> () {
                 %0 = cmt2.call @this @doing () : () -> (i1)
                 %c1_i1 = hw.constant 1 : i1
                 %2 = comb.xor %0, %c1_i1 : i1
                 cmt2.return %2 : i1
             } {
-                ^bb0(%a: i32, %b: i32):
                 cmt2.call @x @write (%a) : (i32) -> ()
                 cmt2.call @y @write (%b) : (i32) -> ()
             }
-            cmt2.value @result : () -> () {
+            cmt2.value @result() -> (i32) {
                 %0 = cmt2.call @this @doing () : () -> (i1)
                 %c1_i1 = hw.constant 1 : i1
                 %2 = comb.xor %0, %c1_i1 : i1

@@ -62,21 +62,19 @@ def ExtModuleHwOp : Cmt2Op<
     OpAsmOpInterface,
     DeclareOpInterfaceMethods<InstanceGraphModuleOpInterface>,
     Cmt2ModuleLike,
-    // FunctionOpInterface,
-    //DeclareOpInterfaceMethods<HWModuleLike>,
   ]> {
   let summary = "Binding a `hw.module` to Cmt2 ExtModule.";
   let description = [{
     The `cmt2.module.extern.hw` binds a `hw.module` to a Cmt2 external module.
-   
+
     Attributes:
     - `sequenceBefore` ('<'): A list of 2-tuples.
     - `conflict` ('<>'): A list of 2-tuples.
     - `conflictFree` ('/'): A list of 2-tuples.
 
-    Arguments: 
-    - `extHwModule`: The symbol name of the `hw.module` to bind to.
-    // TODO: port signals
+    Arguments:
+    - `ext_module_name`: The symbol name of the `hw.module` to bind to.
+    - Input ports (as block arguments): clock, reset, and other signals
 
     Results: None
 
@@ -85,28 +83,28 @@ def ExtModuleHwOp : Cmt2Op<
 
     Assembly format:
     ```mlir
-    cmt2.module.extern.hw @extmod1 : <@hwmod1> {
-      cmt2.bind.bare ...
+    cmt2.module.extern.hw @extmod1 : @hwmod1(in %clk: i1, in %rst: i1) {
+      cmt2.bind.bare %clk, @clock : i1
       cmt2.bind.value ...
       cmt2.bind.method ...
-    } { sequenceBefore = [ ... ], conflict = [ ... ], conflictFree = [ ... ] }
+    } {sequenceBefore = [...], conflict = [...], conflictFree = [...]}
     ```
   }];
   let regions = (region SizedRegion<1>:$body);
-  let arguments = (ins 
+  let arguments = (ins
     SymbolNameAttr:$sym_name,
-    SymbolRefAttr:$ext_module_name
-    // TypeAttrOf<FunctionType>:$function_type,
-    // OptionalAttr<DictArrayAttr>:$arg_attrs,
-    // OptionalAttr<DictArrayAttr>:$res_attrs
+    FlatSymbolRefAttr:$ext_module_name,
+    StrArrayAttr:$argNames
   );
-  let assemblyFormat = [{
-    $sym_name `:` $ext_module_name $body attr-dict
-  }];
+
+  let hasCustomAssemblyFormat = 1;
 
   let extraClassDeclaration = [{
     // Provide getNameAttr for ModuleOpInterface default implementation
     mlir::StringAttr getNameAttr() { return getSymNameAttr(); }
+
+    void getAsmBlockArgumentNames(mlir::Region &region,
+                                  mlir::OpAsmSetValueNameFn setNameFn);
   }];
 }
 
@@ -141,7 +139,7 @@ def BindBareOp : Cmt2Op<
 def BindValueOp : Cmt2Op<
   "bind.value", [
     HasParent<"ExtModuleHwOp">,
-    DeclareOpInterfaceMethods<Cmt2FunctionLike>,
+    DeclareOpInterfaceMethods<Cmt2FunctionLike, ["getCallableRegion", "getArgumentTypes", "getResultTypes", "isExternal", "getFunctionBody"]>,
     Symbol
   ]> {
   let summary = "Binding a value method";
@@ -167,11 +165,13 @@ def BindValueOp : Cmt2Op<
     ```
   }];
 
-  let arguments = (ins 
+  let arguments = (ins
     SymbolNameAttr:$sym_name,
     TypeAttrOf<FunctionType>:$function_type,
     OptionalAttr<FlatSymbolRefAttr>:$ready,
-    FlatSymbolRefArrayAttr:$data
+    FlatSymbolRefArrayAttr:$data,
+    OptionalAttr<ArrayAttr>:$arg_attrs,
+    OptionalAttr<ArrayAttr>:$res_attrs
   );
 
   let assemblyFormat = [{
@@ -188,7 +188,7 @@ def BindValueOp : Cmt2Op<
 def BindMethodOp : Cmt2Op<
   "bind.method", [
     HasParent<"ExtModuleHwOp">,
-    DeclareOpInterfaceMethods<Cmt2FunctionLike>,
+    DeclareOpInterfaceMethods<Cmt2FunctionLike, ["getCallableRegion", "getArgumentTypes", "getResultTypes", "isExternal", "getFunctionBody"]>,
     Symbol,
     NoTerminator,
     IsolatedFromAbove
@@ -219,13 +219,15 @@ def BindMethodOp : Cmt2Op<
     ```
   }];
 
-  let arguments = (ins 
+  let arguments = (ins
     SymbolNameAttr:$sym_name,
     TypeAttrOf<FunctionType>:$function_type,
     OptionalAttr<FlatSymbolRefAttr>:$enable,
     OptionalAttr<FlatSymbolRefAttr>:$ready,
     FlatSymbolRefArrayAttr:$inputs,
-    FlatSymbolRefArrayAttr:$outputs
+    FlatSymbolRefArrayAttr:$outputs,
+    OptionalAttr<ArrayAttr>:$arg_attrs,
+    OptionalAttr<ArrayAttr>:$res_attrs
   );
 
   let assemblyFormat = [{
@@ -253,9 +255,9 @@ def ModuleOp : Cmt2Op<
     Symbol,
     SymbolTable,
     NoTerminator,
+    OpAsmOpInterface,
     DeclareOpInterfaceMethods<InstanceGraphModuleOpInterface>,
     Cmt2ModuleLike,
-    //DeclareOpInterfaceMethods<HWModuleLike>,
   ]> {
   let summary = "Defining a Cmt2 Module.";
   let description = [{
@@ -270,7 +272,8 @@ def ModuleOp : Cmt2Op<
     - `conflict` ('<>'): A list of 2-tuples.
     - `conflictFree` ('/'): A list of 2-tuples.
 
-    Arguments: None
+    Arguments:
+    - Input ports (as block arguments): clock, reset, and other signals
 
     Results: None
 
@@ -280,29 +283,29 @@ def ModuleOp : Cmt2Op<
 
     Assembly format:
     ```mlir
-    cmt2.module @mod1 {
+    cmt2.module @mod1(in %clk: i1, in %rst: i1) {
       cmt2.rule @rule1 { ... }
       cmt2.method @method1 { ... }
       cmt2.value @value1 { ... }
       cmt2.instance @inst1 : @otherMod { ... }
       ...
-    } { sequenceBefore = [ ... ], conflict = [ ... ], conflictFree = [ ... ] }
+    } {sequenceBefore = [...], conflict = [...], conflictFree = [...]}
     ```
   }];
   let regions = (region SizedRegion<1>:$body);
   let arguments = (ins
-    SymbolNameAttr:$sym_name
-    // OptionalAttr<DictArrayAttr>:$arg_attrs,
-    // OptionalAttr<DictArrayAttr>:$res_attrs
+    SymbolNameAttr:$sym_name,
+    StrArrayAttr:$argNames
   );
 
-  let assemblyFormat = [{
-    $sym_name $body attr-dict
-  }];
+  let hasCustomAssemblyFormat = 1;
 
   let extraClassDeclaration = [{
     // Provide getNameAttr for ModuleOpInterface default implementation
     mlir::StringAttr getNameAttr() { return getSymNameAttr(); }
+
+    void getAsmBlockArgumentNames(mlir::Region &region,
+                                  mlir::OpAsmSetValueNameFn setNameFn);
   }];
 
 }
@@ -410,8 +413,9 @@ def RuleOp : Cmt2Op<
     IsolatedFromAbove,
     HasParent<"ModuleOp">,
     Symbol,
-    DeclareOpInterfaceMethods<Cmt2FunctionLike>,
+    DeclareOpInterfaceMethods<Cmt2FunctionLike, ["getCallableRegion", "getArgumentTypes", "getResultTypes", "isExternal", "getFunctionBody"]>,
     SingleBlockImplicitTerminator<"cmt2::ReturnOp">,
+    OpAsmOpInterface,
   ]> {
   let summary = "Define a rule";
   let description = [{
@@ -425,25 +429,41 @@ def RuleOp : Cmt2Op<
     - `explicit`: A boolean attribute indicating whether the rule is explicit.
       An explicit rule is one that have the `ready` signal registered and returned (as the first output).
 
-    Arguments: None
+    Arguments:
+    - `sym_name`: The symbol name of the rule being defined.
+    - `function_type`: The function type of the rule (typically no arguments).
+    - `argNames`: Names of the shared input arguments (typically empty for rules).
+    - `guardResName`: Optional name of the guard result (i1).
 
     Results: None
 
     Regions:
-    - `body`: This region holds the operations that define the behavior of the rule.
+    - `guard`: The guard region that determines when the rule can fire.
+    - `body`: The body region that contains the rule's actions.
 
     Assembly format:
     ```mlir
-    cmt2.rule @rule1 { ... }
+    cmt2.rule @rule1() -> (i1) { guard } { body }
     ```
   }];
-  let regions = (region 
+  let regions = (region
     SizedRegion<1>:$guard,
     SizedRegion<1>:$body
   );
-  let arguments = (ins SymbolNameAttr:$sym_name);
-  let assemblyFormat = [{
-    $sym_name $guard $body attr-dict
+  let arguments = (ins
+    SymbolNameAttr:$sym_name,
+    TypeAttrOf<FunctionType>:$function_type,
+    StrArrayAttr:$argNames,
+    OptionalAttr<StrAttr>:$guardResName,
+    OptionalAttr<ArrayAttr>:$arg_attrs,
+    OptionalAttr<ArrayAttr>:$res_attrs
+  );
+
+  let hasCustomAssemblyFormat = 1;
+
+  let extraClassDeclaration = [{
+    void getAsmBlockArgumentNames(mlir::Region &region,
+                                  mlir::OpAsmSetValueNameFn setNameFn);
   }];
 
   let extraClassDefinition = [{
@@ -459,8 +479,9 @@ def ValueOp : Cmt2Op<
     ParentOneOf<["ModuleOp", "InterfaceOp"]>,
     IsolatedFromAbove,
     Symbol,
-    DeclareOpInterfaceMethods<Cmt2FunctionLike>,
-    SingleBlockImplicitTerminator<"cmt2::ReturnOp">
+    DeclareOpInterfaceMethods<Cmt2FunctionLike, ["getCallableRegion", "getArgumentTypes", "getResultTypes", "isExternal", "getFunctionBody"]>,
+    SingleBlockImplicitTerminator<"cmt2::ReturnOp">,
+    OpAsmOpInterface,
   ]> {
   let summary = "Define a value method";
   let description = [{
@@ -476,28 +497,41 @@ def ValueOp : Cmt2Op<
 
     Arguments:
     - `sym_name`: The symbol name of the value method being defined.
-    - `function_type`: The function type of the value method.
-    
+    - `function_type`: The function type of the value method (shared arguments).
+    - `argNames`: Names of the shared input arguments.
+    - `guardResName`: Optional name of the guard result (i1).
+    - `bodyResNames`: Names of the body region results.
+
     Results: None
 
     Regions:
-    - `body`: This region holds the operations that define the behavior of the value method.
+    - `guard`: The guard region that determines when the value is ready.
+    - `body`: The body region that contains the value computation.
 
     Assembly format:
     ```mlir
-    cmt2.value @value1 :<function_type> { ... }
+    cmt2.value @value1(%arg0: i32) -> (i32) { guard } { body }
     ```
   }];
-  let regions = (region 
+  let regions = (region
     SizedRegion<1>:$guard,
     SizedRegion<1>:$body
   );
-  let arguments = (ins 
+  let arguments = (ins
     SymbolNameAttr:$sym_name,
-    TypeAttrOf<FunctionType>:$function_type
+    TypeAttrOf<FunctionType>:$function_type,
+    StrArrayAttr:$argNames,
+    OptionalAttr<StrAttr>:$guardResName,
+    StrArrayAttr:$bodyResNames,
+    OptionalAttr<ArrayAttr>:$arg_attrs,
+    OptionalAttr<ArrayAttr>:$res_attrs
   );
-  let assemblyFormat = [{
-    $sym_name `:` $function_type $guard $body attr-dict
+
+  let hasCustomAssemblyFormat = 1;
+
+  let extraClassDeclaration = [{
+    void getAsmBlockArgumentNames(mlir::Region &region,
+                                  mlir::OpAsmSetValueNameFn setNameFn);
   }];
 
   let extraClassDefinition = [{
@@ -510,70 +544,54 @@ def ValueOp : Cmt2Op<
 def MethodOp : Cmt2Op<
   "method", [
     ParentOneOf<["ModuleOp", "InterfaceOp"]>,
-    DeclareOpInterfaceMethods<Cmt2FunctionLike>,
+    DeclareOpInterfaceMethods<Cmt2FunctionLike, ["getCallableRegion", "getArgumentTypes", "getResultTypes", "isExternal", "getFunctionBody"]>,
     Symbol,
     SingleBlockImplicitTerminator<"ReturnOp">,
+    OpAsmOpInterface,
   ]> {
   let summary = "Define a method, can be used in both Cmt2 ExtModule and Module.";
   let description = [{
-    The "cmt2.method" defines an action method, which has the `ready`-`enable` contract. 
+    The "cmt2.method" defines an action method, which has the `ready`-`enable` contract.
 
     Attributes:
-    - `explicit`: A boolean attribute indicating whether the method is explicit. 
+    - `explicit`: A boolean attribute indicating whether the method is explicit.
     An explicit method should have a `enable` argument as the first input, and a `ready` output as the first output.
 
     Arguments:
     - `sym_name`: The symbol name of the method being defined.
-    - `function_type`: The function type of the method.
+    - `function_type`: The function type of the method (shared arguments).
+    - `argNames`: Names of the shared input arguments.
+    - `guardResName`: Optional name of the guard result (i1).
+    - `bodyResNames`: Names of the body region results.
 
     Results: None
 
     Assembly format:
     ```mlir
-    cmt2.method @method1 : <function_type> { ... }
+    cmt2.method @method1(%arg0: i32, %arg1: i32) -> () { guard } { body }
+    ```
   }];
 
-  let arguments = (ins 
+  let arguments = (ins
     SymbolNameAttr:$sym_name,
-    TypeAttrOf<FunctionType>:$function_type
+    TypeAttrOf<FunctionType>:$function_type,
+    StrArrayAttr:$argNames,
+    OptionalAttr<StrAttr>:$guardResName,
+    StrArrayAttr:$bodyResNames,
+    OptionalAttr<ArrayAttr>:$arg_attrs,
+    OptionalAttr<ArrayAttr>:$res_attrs
   );
 
-  let regions = (region 
+  let regions = (region
     SizedRegion<1>:$guard,
     SizedRegion<1>:$body
   );
 
-  let assemblyFormat = [{
-    $sym_name `:` $function_type $guard $body attr-dict
-  }];
+  let hasCustomAssemblyFormat = 1;
 
   let extraClassDeclaration = [{
-
-    // methods need to be defined by FunctionOpInterface
-
-    // using mlir::detail::FunctionOpInterfaceTrait<MethodOp>::front;
-    // using mlir::detail::FunctionOpInterfaceTrait<MethodOp>::getBody;
-
-    // /// Returns the type of this function.
-    // FunctionType getFunctionType() {
-    //   return getFunctionTypeAttr().getValue().cast<FunctionType>();
-    // }
-
-    // /// Returns the argument types of this function.
-    // ArrayRef<Type> getArgumentTypes() { return getFunctionType().getInputs(); }
-
-    // /// Returns the result types of this function.
-    // ArrayRef<Type> getResultTypes() { return getFunctionType().getResults(); }
-
-    // /// Verify the type attribute of this function. Returns failure and emits
-    // /// an error if the attribute is invalid.
-    // LogicalResult verifyType() {
-    //   auto type = getFunctionTypeAttr().getValue();
-    //   if (!type.isa<FunctionType>())
-    //     return emitOpError("requires '" + getTypeAttrName() +
-    //                        "' attribute of function type");
-    //   return success();
-    // }
+    void getAsmBlockArgumentNames(mlir::Region &region,
+                                  mlir::OpAsmSetValueNameFn setNameFn);
   }];
 
   let extraClassDefinition = [{

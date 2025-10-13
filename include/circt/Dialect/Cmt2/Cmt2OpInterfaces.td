@@ -19,6 +19,22 @@ def Cmt2FunctionLike : OpInterface<"Cmt2FunctionLike"> {
   let description = [{
     Provide common interface for function-like operations (Rule/Method/Value).
     This interface applies to RuleOp, MethodOp, ValueOp, BindMethodOp, and BindValueOp.
+
+    This interface provides FunctionOpInterface-compatible features for Cmt2 operations,
+    including:
+    - Symbol name handling (functionName, functionNameAttr)
+    - Function kind identification (getFunctionKind)
+    - CallableOpInterface compatibility (getCallableRegion)
+    - Type queries (getArgumentTypes, getResultTypes, getFunctionType)
+    - Type manipulation (setFunctionTypeAttr, cloneTypeWith)
+    - Body/region handling (isExternal, getFunctionBody)
+    - Argument/result counts (getNumArguments, getNumResults)
+    - Argument/result attribute access (getAllArgAttrs, getArgAttrDict, getArgAttr, etc.)
+
+    Note: Unlike FunctionOpInterface which requires single-region operations,
+    Cmt2FunctionLike supports two-region operations (guard and body regions).
+    For BindMethodOp and BindValueOp, which have no regions, some methods
+    (like getFunctionBody) should not be called.
   }];
   let methods = [
     //===------------------------------------------------------------------===//
@@ -42,6 +58,144 @@ def Cmt2FunctionLike : OpInterface<"Cmt2FunctionLike"> {
       This method must be implemented by each operation that implements this interface.
     }],
     "::circt::cmt2::FunctionKind", "getFunctionKind", (ins)>,
+
+    //===------------------------------------------------------------------===//
+    // FunctionOpInterface compatibility methods
+    //===------------------------------------------------------------------===//
+
+    InterfaceMethod<[{
+      Get the callable region (body region) for CallableOpInterface.
+      For Cmt2 function-like ops with two regions, return the body region.
+      For BindMethodOp/BindValueOp, return nullptr.
+    }],
+    "::mlir::Region *", "getCallableRegion", (ins)>,
+
+    InterfaceMethod<[{
+      Get the argument types from the function type.
+    }],
+    "::llvm::ArrayRef<::mlir::Type>", "getArgumentTypes", (ins)>,
+
+    InterfaceMethod<[{
+      Get the result types from the function type.
+    }],
+    "::llvm::ArrayRef<::mlir::Type>", "getResultTypes", (ins)>,
+
+    //===------------------------------------------------------------------===//
+    // FunctionOpInterface-like type manipulation
+    //===------------------------------------------------------------------===//
+
+    InterfaceMethod<[{
+      Set the type of the function. This performs an unsafe modification to
+      the function type; it does not update argument or result attributes.
+    }],
+    "void", "setFunctionTypeAttr", (ins "::mlir::TypeAttr":$type),
+    /*methodBody=*/[{ $_op->setAttr($_op.getFunctionTypeAttrName(), type); }]>,
+
+    InterfaceMethod<[{
+      Returns a clone of the function type with the given argument and result types.
+    }],
+    "::mlir::Type", "cloneTypeWith", (ins
+      "::mlir::TypeRange":$inputs, "::mlir::TypeRange":$results
+    ),
+    /*methodBody=*/[{ return $_op.getFunctionType().clone(inputs, results); }]>,
+
+    //===------------------------------------------------------------------===//
+    // Body and region handling
+    //===------------------------------------------------------------------===//
+
+    InterfaceMethod<[{
+      Returns true if this function is external (has no body).
+      For Cmt2 operations, this checks if the body region is empty.
+      For BindMethodOp/BindValueOp, always returns true.
+    }],
+    "bool", "isExternal", (ins)>,
+
+    InterfaceMethod<[{
+      Return the function body region. For Cmt2 two-region operations, this
+      returns the body region (not the guard region).
+      For BindMethodOp/BindValueOp, this should not be called.
+    }],
+    "::mlir::Region &", "getFunctionBody", (ins)>,
+
+    //===------------------------------------------------------------------===//
+    // Argument and result counts
+    //===------------------------------------------------------------------===//
+
+    InterfaceMethod<[{
+      Returns the number of function arguments.
+    }],
+    "unsigned", "getNumArguments", (ins),
+    /*methodBody=*/[{ return $_op.getArgumentTypes().size(); }]>,
+
+    InterfaceMethod<[{
+      Returns the number of function results.
+    }],
+    "unsigned", "getNumResults", (ins),
+    /*methodBody=*/[{ return $_op.getResultTypes().size(); }]>,
+
+    //===------------------------------------------------------------------===//
+    // Argument attributes
+    //===------------------------------------------------------------------===//
+
+    InterfaceMethod<[{
+      Return an ArrayAttr containing all argument attribute dictionaries,
+      or nullptr if no arguments have attributes.
+    }],
+    "::mlir::ArrayAttr", "getAllArgAttrs", (ins),
+    /*methodBody=*/[{ return $_op.getArgAttrsAttr(); }]>,
+
+    InterfaceMethod<[{
+      Return the attribute dictionary for the argument at 'index'.
+    }],
+    "::mlir::DictionaryAttr", "getArgAttrDict", (ins "unsigned":$index),
+    /*methodBody=*/[{
+      auto argAttrs = $_op.getArgAttrsAttr();
+      return argAttrs ? llvm::cast<::mlir::DictionaryAttr>(argAttrs[index])
+                      : ::mlir::DictionaryAttr();
+    }]>,
+
+    InterfaceMethod<[{
+      Return the specified attribute, if present, for the argument at 'index'.
+    }],
+    "::mlir::Attribute", "getArgAttr", (ins "unsigned":$index, "::mlir::StringAttr":$name),
+    /*methodBody=*/[{
+      auto argAttrs = $_op.getArgAttrsAttr();
+      auto argDict = argAttrs ? llvm::cast<::mlir::DictionaryAttr>(argAttrs[index])
+                              : ::mlir::DictionaryAttr();
+      return argDict ? argDict.get(name) : nullptr;
+    }]>,
+
+    //===------------------------------------------------------------------===//
+    // Result attributes
+    //===------------------------------------------------------------------===//
+
+    InterfaceMethod<[{
+      Return an ArrayAttr containing all result attribute dictionaries,
+      or nullptr if no results have attributes.
+    }],
+    "::mlir::ArrayAttr", "getAllResAttrs", (ins),
+    /*methodBody=*/[{ return $_op.getResAttrsAttr(); }]>,
+
+    InterfaceMethod<[{
+      Return the attribute dictionary for the result at 'index'.
+    }],
+    "::mlir::DictionaryAttr", "getResAttrDict", (ins "unsigned":$index),
+    /*methodBody=*/[{
+      auto resAttrs = $_op.getResAttrsAttr();
+      return resAttrs ? llvm::cast<::mlir::DictionaryAttr>(resAttrs[index])
+                      : ::mlir::DictionaryAttr();
+    }]>,
+
+    InterfaceMethod<[{
+      Return the specified attribute, if present, for the result at 'index'.
+    }],
+    "::mlir::Attribute", "getResAttr", (ins "unsigned":$index, "::mlir::StringAttr":$name),
+    /*methodBody=*/[{
+      auto resAttrs = $_op.getResAttrsAttr();
+      auto resDict = resAttrs ? llvm::cast<::mlir::DictionaryAttr>(resAttrs[index])
+                              : ::mlir::DictionaryAttr();
+      return resDict ? resDict.get(name) : nullptr;
+    }]>,
   ];
   let verify = [{}];
 }
