@@ -1,15 +1,13 @@
 add_circt_dialect_library(CIRCTCmt2
   Cmt2Dialect.cpp
   Cmt2Ops.cpp
+  Cmt2InstanceGraph.cpp
   # Cmt2OpInterfaces.cpp
-  # InstanceGraph.cpp
-  # CallInfo.cpp
 
   ADDITIONAL_HEADER_DIRS
   ${CIRCT_MAIN_INCLUDE_DIR}/circt/Dialect/Cmt2
 
   DEPENDS
-  CIRCTHW
   MLIRCmt2IncGen
   # CIRCTCmt2AttrsIncGen
   # CIRCTCmt2OpInterfacesIncGen
@@ -19,7 +17,8 @@ add_circt_dialect_library(CIRCTCmt2
 
   LINK_LIBS PUBLIC
   CIRCTSupport
-  CIRCTHW
   MLIRIR
+  CIRCTHW
   )
-# add_subdirectory(Transforms)
+  
+add_subdirectory(Transforms)

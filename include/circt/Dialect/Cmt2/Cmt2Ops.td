@@ -12,6 +12,8 @@
 #ifndef CIRCT_DIALECT_Cmt2_Cmt2OPS_TD
 #define CIRCT_DIALECT_Cmt2_Cmt2OPS_TD
 
+include "circt/Support/InstanceGraphInterface.td"
+
 // TODO: add this to HW interface
 //       and do the failing check.
 // def isHWModuleSymbol : AttrConstraint<
@@ -67,6 +69,7 @@ def ExtModuleHwOp : Cmt2Op<
     SymbolTable,
     NoTerminator,
     OpAsmOpInterface,
+    DeclareOpInterfaceMethods<InstanceGraphModuleOpInterface>,
     // FunctionOpInterface,
     // DeclareOpInterfaceMethods<Cmt2ModuleLike>,
     //DeclareOpInterfaceMethods<HWModuleLike>,
@@ -108,6 +111,11 @@ def ExtModuleHwOp : Cmt2Op<
   );
   let assemblyFormat = [{
     $sym_name `:` $ext_module_name $body attr-dict
+  }];
+
+  let extraClassDeclaration = [{
+    // Provide getNameAttr for ModuleOpInterface default implementation
+    mlir::StringAttr getNameAttr() { return getSymNameAttr(); }
   }];
 }
 
@@ -242,6 +250,7 @@ def ModuleOp : Cmt2Op<
     Symbol,
     SymbolTable,
     NoTerminator,
+    DeclareOpInterfaceMethods<InstanceGraphModuleOpInterface>,
     // DeclareOpInterfaceMethods<Cmt2ModuleLike>,
     //DeclareOpInterfaceMethods<HWModuleLike>,
   ]> {
@@ -278,7 +287,7 @@ def ModuleOp : Cmt2Op<
     ```
   }];
   let regions = (region SizedRegion<1>:$body);
-  let arguments = (ins 
+  let arguments = (ins
     SymbolNameAttr:$sym_name
     // OptionalAttr<DictArrayAttr>:$arg_attrs,
     // OptionalAttr<DictArrayAttr>:$res_attrs
@@ -288,12 +297,18 @@ def ModuleOp : Cmt2Op<
     $sym_name $body attr-dict
   }];
 
+  let extraClassDeclaration = [{
+    // Provide getNameAttr for ModuleOpInterface default implementation
+    mlir::StringAttr getNameAttr() { return getSymNameAttr(); }
+  }];
+
 }
 
 def InstanceOp : Cmt2Op<
   "instance", [
     HasParent<"ModuleOp">,
     Symbol,
+    DeclareOpInterfaceMethods<InstanceGraphInstanceOpInterface>,
   //  DeclareOpInterfaceMethods<HWInstanceLike, ["instanceName"]>,
   ]> {
   let summary = "Instantiate a Cmt2 Module or Cmt2 ExtModule";
@@ -316,13 +331,13 @@ def InstanceOp : Cmt2Op<
 
     Assembly format:
     ```mlir
-    cmt2.instance @inst1 of @mod1 ( %arg1, %arg2, ... : type1, type2, ... ) 
+    cmt2.instance @inst1 of @mod1 ( %arg1, %arg2, ... : type1, type2, ... )
       with [ [ @ifaceDef1, @ifaceDecl1 ], [ @ifaceDef2, @ifaceDecl2 ], ... ]
       attr-dict
     ```
   }];
   // arguments which need to pass to non-scheduler modules.
-  let arguments = (ins 
+  let arguments = (ins
     SymbolNameAttr:$sym_name,
     Variadic<HWIntegerType>:$args,
     FlatSymbolRefAttr:$module_name,
@@ -330,6 +345,13 @@ def InstanceOp : Cmt2Op<
   );
   let assemblyFormat = [{
     $sym_name `=` $module_name  ( `(` $args^ `)` `:` type($args))?  (`with` $interface_binds^)? attr-dict
+  }];
+
+  let extraClassDeclaration = [{
+    // Provide getReferencedModuleNameAttr for InstanceOpInterface default implementation
+    mlir::StringAttr getReferencedModuleNameAttr() {
+      return getModuleNameAttr().getAttr();
+    }
   }];
 }
 

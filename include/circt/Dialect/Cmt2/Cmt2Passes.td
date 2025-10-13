@@ -15,6 +15,22 @@
 
 include "mlir/Pass/PassBase.td"
 
+def Test: Pass<"cmt2-test", "cmt2::CircuitOp"> {
+  let summary = "a test pass for cmt2 dialect.";
+  let description = [{
+    This is a test pass for cmt2 dialect.
+  }];
+  let constructor = "circt::cmt2::createTestPass()";
+}
+
+def PrintInstanceGraph : Pass<"cmt2-print-instance-graph", "cmt2::CircuitOp"> {
+  let summary = "Print a DOT graph of the Cmt2 module hierarchy.";
+  let description = [{
+    This pass prints the instance graph of a Cmt2 circuit in DOT format,
+    showing the module hierarchy and instantiation relationships.
+  }];
+}
+
 // def InferRules : Pass<"cmt2-infer-rules", "cmt2::CircuitOp"> {
 //   let summary = "generate all Cmt2::RuleRefOp for a circuit.";
 //   let description = [{

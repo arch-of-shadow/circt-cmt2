@@ -20,9 +20,23 @@
 
 using namespace mlir;
 using namespace circt::cmt2;
+using namespace circt::igraph;
 
 namespace circt {
 namespace cmt2 {
+
+//===----------------------------------------------------------------------===//
+// InstanceOp
+//===----------------------------------------------------------------------===//
+
+llvm::StringRef InstanceOp::getInstanceName() {
+  return getSymName();
+}
+
+mlir::StringAttr InstanceOp::getInstanceNameAttr() {
+  return getSymNameAttr();
+}
+
 // Cmt2ModuleLike getReferenceModule(InstanceOp instance) {
 //   auto circuit =
 //       instance.getOperation()->getParentOfType<circt::cmt2::CircuitOp>();

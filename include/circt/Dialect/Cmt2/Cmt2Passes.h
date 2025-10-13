@@ -22,8 +22,13 @@ class Pass;
 namespace circt {
 namespace cmt2 {
 
-std::unique_ptr<mlir::Pass> createGenerateConflictMatrix();
-std::unique_ptr<mlir::Pass> createReferRules();
+std::unique_ptr<mlir::Pass> createTestPass();
+// std::unique_ptr<mlir::Pass> createGenerateConflictMatrix();
+// std::unique_ptr<mlir::Pass> createReferRules();
+
+/// Generate pass declarations.
+#define GEN_PASS_DECL
+#include "circt/Dialect/Cmt2/Cmt2Passes.h.inc"
 
 /// Generate the code for registering passes.
 #define GEN_PASS_REGISTRATION

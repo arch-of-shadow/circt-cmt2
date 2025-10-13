@@ -1,4 +1,4 @@
-//===- Cmt2InstanceGraph.cpp - Instance Graph -----------------*- C++ -*-===//
+//===- Cmt2InstanceGraph.cpp - Instance Graph ------------------*- C++ -*-===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
@@ -6,15 +6,15 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "circt/Dialect/Cmt2/InstanceGraph.h"
+#include "circt/Dialect/Cmt2/Cmt2InstanceGraph.h"
 #include "mlir/IR/BuiltinOps.h"
 
-using namespace mlir;
 using namespace circt;
 using namespace cmt2;
 
 InstanceGraph::InstanceGraph(Operation *operation)
-    : InstanceGraphBase(cast<CircuitOp>(operation)) {
-  auto circuit = cast<CircuitOp>(getParent());
-  topLevelNode = lookup(circuit.getNameAttr());
+    : igraph::InstanceGraph(cast<CircuitOp>(operation)) {
+  // For Cmt2, we don't have an explicit top-level module.
+  // The topLevelNode remains nullptr, and users should use
+  // getInferredTopLevelNodes() to get modules with no uses.
 }

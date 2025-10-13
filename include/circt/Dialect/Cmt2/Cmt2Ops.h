@@ -18,6 +18,7 @@
 #include "circt/Dialect/HW/HWAttributes.h"
 #include "circt/Dialect/HW/HWOpInterfaces.h"
 #include "circt/Dialect/HW/HWTypes.h"
+#include "circt/Support/InstanceGraphInterface.h"
 
 // provides implementations for FunctionInterface.td
 #include "mlir/Interfaces/FunctionInterfaces.h"
@@ -35,14 +36,6 @@
 #include "circt/Dialect/Cmt2/Cmt2.h.inc"
 namespace circt {
 namespace cmt2 {
-// Cmt2ModuleLike getReferenceModule(InstanceOp instance);
-// llvm::SmallVector<InstanceOp, 4> getInstances(Cmt2ModuleLike module);
-// llvm::SmallVector<Cmt2FunctionLike, 4> getFunctions(Cmt2ModuleLike module);
-// llvm::SmallVector<MethodOp, 4> getMethods(ModuleOp module);
-// llvm::SmallVector<BindMethodOp, 4> getMethods(ExtModuleOp module);
-// llvm::SmallVector<ValueOp, 4> getValues(ModuleOp module);
-// llvm::SmallVector<BindValueOp, 4> getValues(ExtModuleOp module);
-// llvm::SmallVector<RuleOp, 4> getRules(ModuleOp module);
 } // namespace cmt2
 } // namespace circt
 
