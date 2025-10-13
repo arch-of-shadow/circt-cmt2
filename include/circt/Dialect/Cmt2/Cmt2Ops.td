@@ -14,15 +14,6 @@
 
 include "circt/Support/InstanceGraphInterface.td"
 
-// TODO: add this to HW interface
-//       and do the failing check.
-// def isHWModuleSymbol : AttrConstraint<
-//     CPred<"!::mlir::SymbolTable::lookupNearestSymbolFrom("
-//             "&$_op, $_self.cast<::mlir::FlatSymbolRefAttr>()) || "
-//           "hw::isAnyModule(::mlir::SymbolTable::lookupNearestSymbolFrom("
-//             "&$_op, $_self.cast<::mlir::FlatSymbolRefAttr>()))"
-//     >, "is module like">;
-
 // MethodSymbol is an attribute constraint. It has the form (instance, method).
 def CircuitOp : Cmt2Op<
   "circuit", [
@@ -70,8 +61,8 @@ def ExtModuleHwOp : Cmt2Op<
     NoTerminator,
     OpAsmOpInterface,
     DeclareOpInterfaceMethods<InstanceGraphModuleOpInterface>,
+    Cmt2ModuleLike,
     // FunctionOpInterface,
-    // DeclareOpInterfaceMethods<Cmt2ModuleLike>,
     //DeclareOpInterfaceMethods<HWModuleLike>,
   ]> {
   let summary = "Binding a `hw.module` to Cmt2 ExtModule.";
@@ -150,8 +141,7 @@ def BindBareOp : Cmt2Op<
 def BindValueOp : Cmt2Op<
   "bind.value", [
     HasParent<"ExtModuleHwOp">,
-    // DeclareOpInterfaceMethods<Cmt2FunctionLike>,
-    // DeclareOpInterfaceMethods<Cmt2ValueLike>,
+    DeclareOpInterfaceMethods<Cmt2FunctionLike>,
     Symbol
   ]> {
   let summary = "Binding a value method";
@@ -187,13 +177,18 @@ def BindValueOp : Cmt2Op<
   let assemblyFormat = [{
     $sym_name `:` $function_type `[` (`ready` `=` $ready^ `,`)? `data` `=` $data `]` attr-dict
   }];
+
+  let extraClassDefinition = [{
+    FunctionKind $cppClass::getFunctionKind() {
+      return FunctionKind::Value;
+    }
+  }];
 }
 
 def BindMethodOp : Cmt2Op<
   "bind.method", [
     HasParent<"ExtModuleHwOp">,
-    // DeclareOpInterfaceMethods<Cmt2FunctionLike>,
-    // DeclareOpInterfaceMethods<Cmt2MethodLike>,
+    DeclareOpInterfaceMethods<Cmt2FunctionLike>,
     Symbol,
     NoTerminator,
     IsolatedFromAbove
@@ -232,6 +227,7 @@ def BindMethodOp : Cmt2Op<
     FlatSymbolRefArrayAttr:$inputs,
     FlatSymbolRefArrayAttr:$outputs
   );
+
   let assemblyFormat = [{
     $sym_name `:` $function_type `[` 
       (`enable` `=` $enable^ `,`)? 
@@ -240,6 +236,13 @@ def BindMethodOp : Cmt2Op<
       `outputs` `=` $outputs 
     `]` attr-dict
   }];
+
+  let extraClassDefinition = [{
+    FunctionKind $cppClass::getFunctionKind() {
+      return FunctionKind::Method;
+    }
+  }];
+
 }
 
 def ModuleOp : Cmt2Op<
@@ -251,7 +254,7 @@ def ModuleOp : Cmt2Op<
     SymbolTable,
     NoTerminator,
     DeclareOpInterfaceMethods<InstanceGraphModuleOpInterface>,
-    // DeclareOpInterfaceMethods<Cmt2ModuleLike>,
+    Cmt2ModuleLike,
     //DeclareOpInterfaceMethods<HWModuleLike>,
   ]> {
   let summary = "Defining a Cmt2 Module.";
@@ -353,6 +356,16 @@ def InstanceOp : Cmt2Op<
       return getModuleNameAttr().getAttr();
     }
   }];
+
+  let extraClassDefinition = [{
+    llvm::StringRef $cppClass::getInstanceName() {
+      return getSymName();
+    }
+
+    mlir::StringAttr $cppClass::getInstanceNameAttr() {
+      return getSymNameAttr();
+    }
+  }];
 }
 
 def ReturnOp : Cmt2Op<
@@ -397,7 +410,7 @@ def RuleOp : Cmt2Op<
     IsolatedFromAbove,
     HasParent<"ModuleOp">,
     Symbol,
-    // DeclareOpInterfaceMethods<Cmt2RuleLike>,
+    DeclareOpInterfaceMethods<Cmt2FunctionLike>,
     SingleBlockImplicitTerminator<"cmt2::ReturnOp">,
   ]> {
   let summary = "Define a rule";
@@ -432,6 +445,13 @@ def RuleOp : Cmt2Op<
   let assemblyFormat = [{
     $sym_name $guard $body attr-dict
   }];
+
+  let extraClassDefinition = [{
+    FunctionKind $cppClass::getFunctionKind() {
+      return FunctionKind::Rule;
+    }
+  }];
+
 }
 
 def ValueOp : Cmt2Op<
@@ -439,8 +459,7 @@ def ValueOp : Cmt2Op<
     ParentOneOf<["ModuleOp", "InterfaceOp"]>,
     IsolatedFromAbove,
     Symbol,
-    // DeclareOpInterfaceMethods<Cmt2FunctionLike>,
-    // DeclareOpInterfaceMethods<Cmt2ValueLike>,
+    DeclareOpInterfaceMethods<Cmt2FunctionLike>,
     SingleBlockImplicitTerminator<"cmt2::ReturnOp">
   ]> {
   let summary = "Define a value method";
@@ -480,16 +499,20 @@ def ValueOp : Cmt2Op<
   let assemblyFormat = [{
     $sym_name `:` $function_type $guard $body attr-dict
   }];
+
+  let extraClassDefinition = [{
+    FunctionKind $cppClass::getFunctionKind() {
+      return FunctionKind::Value;
+    }
+  }];
 }
 
 def MethodOp : Cmt2Op<
   "method", [
     ParentOneOf<["ModuleOp", "InterfaceOp"]>,
-    // DeclareOpInterfaceMethods<Cmt2FunctionLike>,
-    // DeclareOpInterfaceMethods<Cmt2MethodLike>,
+    DeclareOpInterfaceMethods<Cmt2FunctionLike>,
     Symbol,
     SingleBlockImplicitTerminator<"ReturnOp">,
-    //FunctionOpInterface
   ]> {
   let summary = "Define a method, can be used in both Cmt2 ExtModule and Module.";
   let description = [{
@@ -552,6 +575,13 @@ def MethodOp : Cmt2Op<
     //   return success();
     // }
   }];
+
+  let extraClassDefinition = [{
+    FunctionKind $cppClass::getFunctionKind() {
+      return FunctionKind::Method;
+    }
+  }];
+
 }
 
 def CallOp : Cmt2Op<
@@ -567,7 +597,8 @@ def CallOp : Cmt2Op<
 
     Arguments:
       - `inputs`: The list of input signals (values) to be passed to the method or value being called.
-      - `callee`: The symbol name of the method or value being called.
+      - `callee`: The symbol name of the method or value being called. A special case is the `@this` callee, which refers to the current module itself.
+      - `methodOrValue`: The symbol name of the method or value being called.
     
     Results:
       - `outputs`: The list of output signals (values) returned by the method or value being called.
@@ -575,7 +606,7 @@ def CallOp : Cmt2Op<
     Assembly format:
     
     ```mlir
-    %output1, %output2 = cmt2.call @methodName(%input1, %input2, ...) : <function_type>
+    %output1, %output2 = cmt2.call @callee @methodName(%input1, %input2, ...) : <function_type>
     ```
   }];
   let arguments = (ins 

@@ -24,7 +24,10 @@ Docs are maintained at `docs/Dialects/Cmt2/RationaleCmt2.md`
 
 For every task, you should create a TODO list to record the status.
 
-There are empty code blocks in "Spec" sections, which you should fill when conducting the task.
+There are code blocks in "Spec" sections, which you should fill when conducting the task.
+
+You should record the progress in the "TODO List" sections.
+
 
 ### InstanceGraph Analysis
 
@@ -34,6 +37,7 @@ You should read:
 - `include/circt/Support/InstanceGraph.h`
 - `include/circt/Support/InstanceGraphInterface.td`
 - `include/circt/Support/InstanceGraphInterface.h`
+
 To understand what an InstanceGraph can do. Summarize below:
 ```text
 InstanceGraph Overview:
@@ -69,6 +73,7 @@ You should first read:
 - `lib/Dialect/FIRRTL/FIRRTLInstanceGraph.cpp`
 - `include/circt/Dialect/HW/HWInstanceGraph.h`
 - `lib/Dialect/HW/HWInstanceGraph.cpp`
+
 To understand how to add the support. Summarize below:
 ```text
 FIRRTL InstanceGraph Implementation:
@@ -99,6 +104,7 @@ You also need to modify:
 - `include/circt/Dialect/Cmt2/Cmt2Ops.td`
 - `include/circt/Dialect/Cmt2/Cmt2Ops.h`
 - `lib/Dialect/Cmt2/Cmt2Ops.cpp`
+
 To give necessary interfaces or methods for Cmt2 operations (`ModuleOp`, `InstanceOp`, and more) according to InstanceGraph's need.
 
 You should add a test pass under `cmt2`. You can look at 
@@ -118,6 +124,53 @@ build/bin/circt-opt test/Dialect/Cmt2/instance-graph.mlir
 
 #### TODO List
 
+- [x] Add InstanceGraph interfaces to Cmt2 operations (ModuleOp, ExtModuleHwOp, InstanceOp)
+- [x] Create Cmt2InstanceGraph class and implementation
+- [x] Add PrintInstanceGraph pass for testing
+- [x] Create hierarchical test case and verify functionality
 
+### CallInfo Analysis
 
+#### Spec
 
+We want an analysis result to show: for every `cmt2` module, what does each of its rule/method/value call? 
+
+The data structure should look like:
+```text
+CallInfoView:
+  Dict:
+    Key: ModuleName (SymbolRefAttr)
+    Value:
+      Dict:
+        Key: EntityName (SymbolRefAttr)  # rule/method/value name
+        Value:
+          List:
+            Each entry is a CallInfo:
+              - calleeInstance: SymbolRefAttr
+              - calleeEntity: SymbolRefAttr
+              - callType: Enum (MethodCall, ValueCall)
+                # callType represents the TYPE of the callee (not the caller)
+                # i.e., whether we're calling a Method or a Value
+
+```
+
+You should read `include/circt/Dialect/Cmt2/Cmt2Ops.td` to understand how `cmt2` operations are defined, especially `CallOp`, `RuleOp`, `MethodOp`, and `ValueOp`, which are involved in this analysis.
+
+Then, similar to `include/circt/Dialect/Cmt2/Cmt2InstanceGraph.h` and `lib/Dialect/Cmt2/Cmt2InstanceGraph.cpp`, you should create:
+- `include/circt/Dialect/Cmt2/Cmt2CallInfo.h`
+- `lib/Dialect/Cmt2/Cmt2CallInfo.cpp`
+
+You should add a test pass under `cmt2`, similar to `PrintInstanceGraph`, to print the CallInfoView result.
+
+You should use the `gcd.mlir` (`test/Dialect/Cmt2/gcd.mlir`) to test the CallInfo analysis. You can fill the shell command below to test:
+```shell
+# Test the CallInfo analysis with gcd.mlir
+build/bin/circt-opt test/Dialect/Cmt2/gcd.mlir -cmt2-print-call-info
+```
+
+#### TODO List
+
+- [x] Design CallInfo data structure (CallType enum, CallInfo struct, ModuleCallInfo, CallInfoView)
+- [x] Create Cmt2CallInfo.h and Cmt2CallInfo.cpp with analysis implementation
+- [x] Add PrintCallInfo pass to print call information
+- [x] Test with gcd.mlir and verify output

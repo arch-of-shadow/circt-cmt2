@@ -3,6 +3,7 @@ add_circt_dialect_library(CIRCTCmt2Transforms
   # InferRules.cpp
   Test.cpp
   PrintInstanceGraph.cpp
+  PrintCallInfo.cpp
 
   DEPENDS
   CIRCTCmt2TransformsIncGen

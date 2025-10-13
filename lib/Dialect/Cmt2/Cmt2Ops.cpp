@@ -29,13 +29,6 @@ namespace cmt2 {
 // InstanceOp
 //===----------------------------------------------------------------------===//
 
-llvm::StringRef InstanceOp::getInstanceName() {
-  return getSymName();
-}
-
-mlir::StringAttr InstanceOp::getInstanceNameAttr() {
-  return getSymNameAttr();
-}
 
 // Cmt2ModuleLike getReferenceModule(InstanceOp instance) {
 //   auto circuit =

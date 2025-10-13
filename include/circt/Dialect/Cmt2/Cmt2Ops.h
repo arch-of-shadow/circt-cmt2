@@ -36,6 +36,15 @@
 #include "circt/Dialect/Cmt2/Cmt2.h.inc"
 namespace circt {
 namespace cmt2 {
+
+/// Enumeration for the kind of function (Rule, Method, or Value)
+enum class FunctionKind {
+  Rule,   // RuleOp
+  Method, // MethodOp or BindMethodOp
+  Value   // ValueOp or BindValueOp
+};
+
+
 } // namespace cmt2
 } // namespace circt
 

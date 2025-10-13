@@ -10,6 +10,41 @@
 //
 //===----------------------------------------------------------------------===//
 include "mlir/IR/OpBase.td"
+include "mlir/IR/SymbolInterfaces.td"
+
+
+// Cmt2FunctionLike interface for Rule, Method, and Value operations
+def Cmt2FunctionLike : OpInterface<"Cmt2FunctionLike"> {
+  let cppNamespace = "::circt::cmt2";
+  let description = [{
+    Provide common interface for function-like operations (Rule/Method/Value).
+    This interface applies to RuleOp, MethodOp, ValueOp, BindMethodOp, and BindValueOp.
+  }];
+  let methods = [
+    //===------------------------------------------------------------------===//
+    // Symbol Name Handle
+    //===------------------------------------------------------------------===//
+
+    InterfaceMethod<"Get the function name",
+    "::llvm::StringRef", "functionName", (ins),
+    /*methodBody=*/[{ return $_op.getName(); }]>,
+
+    InterfaceMethod<"Get the function name",
+    "::mlir::StringAttr", "functionNameAttr", (ins),
+    /*methodBody=*/[{ return $_op.getNameAttr(); }]>,
+
+    //===------------------------------------------------------------------===//
+    // Function Kind
+    //===------------------------------------------------------------------===//
+
+    InterfaceMethod<[{
+      Get the kind of this function (Rule, Method, or Value).
+      This method must be implemented by each operation that implements this interface.
+    }],
+    "::circt::cmt2::FunctionKind", "getFunctionKind", (ins)>,
+  ];
+  let verify = [{}];
+}
 
 def Cmt2ModuleLike : OpInterface<"Cmt2ModuleLike"> {
   let cppNamespace = "::circt::cmt2";
@@ -20,12 +55,27 @@ def Cmt2ModuleLike : OpInterface<"Cmt2ModuleLike"> {
     //===------------------------------------------------------------------===//
 
     InterfaceMethod<"Get the module name",
-    "StringRef", "moduleName", (ins),
+    "::llvm::StringRef", "moduleName", (ins),
     /*methodBody=*/[{ return $_op.getName(); }]>,
 
     InterfaceMethod<"Get the module name",
-    "StringAttr", "moduleNameAttr", (ins),
+    "::mlir::StringAttr", "moduleNameAttr", (ins),
     /*methodBody=*/[{ return $_op.getNameAttr(); }]>,
+
+    //===------------------------------------------------------------------===//
+    // Symbol Lookup
+    //===------------------------------------------------------------------===//
+
+    InterfaceMethod<[{
+      Look up a Cmt2FunctionLike by name in this module.
+      Returns the Cmt2FunctionLike if found, nullptr otherwise.
+    }],
+    "Cmt2FunctionLike", "lookupFunctionLike",
+    (ins "::mlir::StringAttr":$name),
+    /*methodBody=*/[{
+      return llvm::dyn_cast_or_null<Cmt2FunctionLike>(::mlir::SymbolTable::lookupSymbolIn($_op, name));
+    }]>
+
 
     //===------------------------------------------------------------------===//
     // Instance
@@ -37,82 +87,3 @@ def Cmt2ModuleLike : OpInterface<"Cmt2ModuleLike"> {
   let verify = [{}];
 }
 
-// BindMethod and Method
-def Cmt2MethodLike : OpInterface<"Cmt2MethodLike"> {
-  let cppNamespace = "::circt::cmt2";
-  let description = "Provide method interface.";
-}
-
-// BindValue and Value
-def Cmt2ValueLike : OpInterface<"Cmt2ValueLike"> {
-  let cppNamespace = "::circt::cmt2";
-  let description = "Provide value interface.";
-}
-
-def Cmt2RuleLike : OpInterface<"Cmt2RuleLike"> {
-  let cppNamespace = "::circt::cmt2";
-  let description = "Provide rule interface.";
-  let methods = [
-    //===------------------------------------------------------------------===//
-    // Symbol Name Handle
-    //===------------------------------------------------------------------===//
-
-    InterfaceMethod<"Get the rule name",
-    "StringRef", "ruleName", (ins),
-    /*methodBody=*/[{ return $_op.getName(); }]>,
-
-    InterfaceMethod<"Get the rule name",
-    "StringAttr", "ruleNameAttr", (ins),
-    /*methodBody=*/[{ return $_op.getNameAttr(); }]>,
-  ];
-  let verify = [{}];
-}
-
-def Cmt2FunctionLike : OpInterface<"Cmt2FunctionLike"> {
-  let cppNamespace = "::circt::cmt2";
-  let description = "Provide method and value interface to modules.";
-  let methods = [
-    //===------------------------------------------------------------------===//
-    // Symbol Name Handle
-    //===------------------------------------------------------------------===//
-
-    InterfaceMethod<"Get the function name",
-    "StringRef", "functionName", (ins),
-    /*methodBody=*/[{ return $_op.getName(); }]>,
-
-    InterfaceMethod<"Get the function name",
-    "StringAttr", "functionNameAttr", (ins),
-    /*methodBody=*/[{ return $_op.getNameAttr(); }]>,
-  ];
-
-}
-
-def Cmt2CallLike : OpInterface<"Cmt2CallLike"> {
-  let cppNamespace = "::circt::cmt2";
-  let description = "Provide functions to call method and value";
-  let methods = [
-    //===------------------------------------------------------------------===//
-    // Instance
-    //===------------------------------------------------------------------===//
-    InterfaceMethod<"Which instance is called.",
-    "SymbolRefAttr", "instanceName", (ins),
-    [{}],
-    /*defaultImplementation=*/[{
-      return $_op->template
-        getAttrOfType<SymbolRefAttr>("instanceName");
-    }]
-    >,
-
-    //===------------------------------------------------------------------===//
-    // Methods
-    //===------------------------------------------------------------------===//
-    InterfaceMethod<"Which FunctionLikeOp is called.",
-    "SymbolRefAttr", "functionName", (ins),
-    [{}],
-    /*defaultImplementation=*/[{
-      return $_op->template
-        getAttrOfType<SymbolRefAttr>("functionName");
-    }]
-    >,
-  ];
-}

@@ -31,6 +31,14 @@ def PrintInstanceGraph : Pass<"cmt2-print-instance-graph", "cmt2::CircuitOp"> {
   }];
 }
 
+def PrintCallInfo : Pass<"cmt2-print-call-info", "cmt2::CircuitOp"> {
+  let summary = "Print call information for Cmt2 modules.";
+  let description = [{
+    This pass prints the call information for each module in a Cmt2 circuit,
+    showing which methods and values are called by each rule, method, and value.
+  }];
+}
+
 // def InferRules : Pass<"cmt2-infer-rules", "cmt2::CircuitOp"> {
 //   let summary = "generate all Cmt2::RuleRefOp for a circuit.";
 //   let description = [{

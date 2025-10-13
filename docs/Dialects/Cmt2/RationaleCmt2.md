@@ -27,6 +27,52 @@ In 5th Workshop on Languages, Tools, and Techniques for Accelerator Design (LATT
 - `cmt2.interface.def`: define an interface instance
 - `cmt2.interface.decl`: declare an interface instance
 
+## Interfaces
+
+### Cmt2ModuleLike Interface
+
+The `Cmt2ModuleLike` interface provides a common abstraction for module-like operations in the Cmt2 dialect (`ModuleOp` and `ExtModuleHwOp`). This interface enables uniform access to methods and values defined within modules, which is essential for analysis passes like CallInfo.
+
+**Required Methods:**
+- `lookupFunctionLike(StringAttr name)`: Look up a Cmt2FunctionLike by name
+
+**Utility Functions:**
+The Cmt2 dialect provides utility functions in `Cmt2OpInterfaces.h`:
+- `isMethodOp(Operation*)`: Check if an operation is a MethodOp
+- `isValueOp(Operation*)`: Check if an operation is a ValueOp
+- `getCalleeType(Operation*)`: Determine the type of a callee (Method or Value)
+
+These utilities simplify code that needs to distinguish between methods and values, avoiding verbose `isa_and_nonnull` checks throughout the codebase.
+
+### Cmt2FunctionLike Interface
+
+The `Cmt2FunctionLike` interface provides a common abstraction for function-like operations in the Cmt2 dialect that can be called. This includes:
+- `RuleOp`: Rules that define behavior
+- `MethodOp`: Action methods that can modify state
+- `ValueOp`: Value methods that read state
+- `BindMethodOp`: Bound methods from external hardware modules
+- `BindValueOp`: Bound values from external hardware modules
+
+This interface enables uniform handling of all callable entities in the Cmt2 dialect, which is essential for analysis passes and transformations.
+
+**Required Methods:**
+- `getFunctionKind()`: Returns a `FunctionKind` enum indicating whether this is a Rule, Method, or Value
+- `functionName()`: Get the function name as StringRef
+- `functionNameAttr()`: Get the function name as StringAttr
+
+**FunctionKind Enum:**
+The `FunctionKind` enum distinguishes between different types of callable entities:
+- `FunctionKind::Rule`: Represents a RuleOp
+- `FunctionKind::Method`: Represents a MethodOp or BindMethodOp
+- `FunctionKind::Value`: Represents a ValueOp or BindValueOp
+
+**Utility Functions:**
+The Cmt2 dialect provides utility functions in `Cmt2OpInterfaces.h`:
+- `isRuleOp(Operation*)`: Check if an operation is a RuleOp
+- `getFunctionKind(Operation*)`: Get the FunctionKind of an operation
+
+These utilities simplify code that needs to distinguish between different types of callable entities, providing a uniform interface for working with rules, methods, and values.
+
 ## Appendix
 
 Quotes from [`sequence/gaa`](https://github.com/sequencer/circt/blob/gaa/docs/RationalGAA.md):

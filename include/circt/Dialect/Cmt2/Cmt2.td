@@ -27,7 +27,7 @@ include "circt/Dialect/HW/HWTypes.td"
 // HWModuleLike
 // include "circt/Dialect/HW/HWOpInterfaces.td"
 
-// include "Cmt2OpInterfaces.td"
+include "Cmt2OpInterfaces.td"
 include "Cmt2Dialect.td"
 // include "Cmt2Attributes.td"
 // include "Cmt2Types.td"

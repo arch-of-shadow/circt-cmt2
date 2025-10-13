@@ -66,16 +66,20 @@ builtin.module {
             cmt2.instance @x = @reg (%clk, %rst) : i1, i1
             cmt2.instance @y = @reg (%clk, %rst) : i1, i1
 
+            cmt2.value @doing: () -> (i1) {} {
+              %y = cmt2.call @y @read () : () -> (i32)
+              %0 = hw.constant 0: i32
+              %1 = comb.icmp ne %y, %0 : i32
+              cmt2.return %1 : i1
+            }
 
             cmt2.rule @swap {                
                 %0 = cmt2.call @x @read () : () -> (i32)
                 %1 = cmt2.call @y @read () : () -> (i32)
                 %2 = "comb.icmp"(%0, %1) {predicate = 8 : i64} : (i32, i32) -> i1
-                %3 = "hw.constant"() {value = 0 : i32} : () -> i32
-                // comb.icmp ne %0, %3 : i1
-                %4 = "comb.icmp"(%1, %3) {predicate = 1 : i64} : (i32, i32) -> i1
-                %5 = "comb.and"(%2, %4) : (i1, i1) -> i1
-                cmt2.return %5 : i1
+                %3 = cmt2.call @this @doing () : () -> (i1)
+                %4 = "comb.and"(%2, %3) : (i1, i1) -> i1
+                cmt2.return %4 : i1
             } { 
                 %0 = cmt2.call @x @read () : () -> (i32)
                 %1 = cmt2.call @y @read () : () -> (i32)
@@ -88,11 +92,9 @@ builtin.module {
                 %0 = cmt2.call @x @read () : () -> (i32)
                 %1 = cmt2.call @y @read () : () -> (i32)
                 %2 = "comb.icmp"(%0, %1) {predicate = 2 : i64} : (i32, i32) -> i1
-                %3 = "hw.constant"() {value = 0 : i32} : () -> i32
-                // comb.icmp ne %0, %3 : i1
-                %4 = "comb.icmp"(%1, %3) {predicate = 1 : i64} : (i32, i32) -> i1
-                %5 = "comb.and"(%2, %4) : (i1, i1) -> i1
-                cmt2.return %5 : i1
+                %3 = cmt2.call @this @doing () : () -> (i1)
+                %4 = "comb.and"(%2, %3) : (i1, i1) -> i1
+                cmt2.return %4 : i1
             } {
                 %0 = cmt2.call @x @read () : () -> (i32)
                 %1 = cmt2.call @y @read () : () -> (i32)
@@ -102,10 +104,9 @@ builtin.module {
             }
 
             cmt2.method @start : () -> () {
-                %0 = "hw.constant"() {value = 0 : i32} : () -> i32
-                %1 = cmt2.call @y @read () : () -> (i32)
-                // comb.icmp eq %0, %1 : i1
-                %2 = "comb.icmp"(%0, %1) {predicate = 0 : i64} : (i32, i32) -> i1
+                %0 = cmt2.call @this @doing () : () -> (i1)
+                %c1_i1 = hw.constant 1 : i1
+                %2 = comb.xor %0, %c1_i1 : i1
                 cmt2.return %2 : i1
             } {
                 ^bb0(%a: i32, %b: i32):
@@ -113,11 +114,10 @@ builtin.module {
                 cmt2.call @y @write (%b) : (i32) -> ()
             }
             cmt2.value @result : () -> () {
-                %y = cmt2.call @y @read () : () -> (i32)
-                %0 = "hw.constant"() {value = 0 : i32} : () -> i32
-                // comb.icmp eq %0, %1 : i1
-                %1 = "comb.icmp"(%y, %0) {predicate = 0 : i64} : (i32, i32) -> i1
-                cmt2.return %1 : i1
+                %0 = cmt2.call @this @doing () : () -> (i1)
+                %c1_i1 = hw.constant 1 : i1
+                %2 = comb.xor %0, %c1_i1 : i1
+                cmt2.return %2 : i1
             } {
                 %x = cmt2.call @x @read () : () -> (i32)
                 cmt2.return %x : i32
