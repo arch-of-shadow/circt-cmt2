@@ -436,9 +436,40 @@ Region &BindValueOp::getFunctionBody() {
 }
 
 //===----------------------------------------------------------------------===//
+// CallOp
+//===----------------------------------------------------------------------===//
+
+// CallOpInterface methods for CallOp
+CallInterfaceCallable CallOp::getCallableForCallee() {
+  // Return the methodOrValue symbol as the callee
+  return getMethodOrValueAttr();
+}
+
+void CallOp::setCalleeFromCallable(CallInterfaceCallable callee) {
+  // Set the methodOrValue attribute from the callable
+  if (auto symbolRef = callee.dyn_cast<SymbolRefAttr>())
+    setMethodOrValueAttr(symbolRef);
+}
+
+Operation::operand_range CallOp::getArgOperands() {
+  return getInputs();
+}
+
+MutableOperandRange CallOp::getArgOperandsMutable() {
+  return getInputsMutable();
+}
+
+//===----------------------------------------------------------------------===//
 // InstanceOp
 //===----------------------------------------------------------------------===//
 
+// Get the referenced module (Cmt2ModuleLike) for this instance
+Cmt2ModuleLike InstanceOp::getReferencedModule() {
+  auto circuit = getOperation()->getParentOfType<CircuitOp>();
+  if (!circuit)
+    return nullptr;
+  return circuit.lookupSymbol<Cmt2ModuleLike>(getModuleNameAttr().getAttr());
+}
 
 // Cmt2ModuleLike getReferenceModule(InstanceOp instance) {
 //   auto circuit =

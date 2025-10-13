@@ -13,6 +13,7 @@
 #define CIRCT_DIALECT_Cmt2_Cmt2OPS_TD
 
 include "circt/Support/InstanceGraphInterface.td"
+include "mlir/Interfaces/CallInterfaces.td"
 
 // MethodSymbol is an attribute constraint. It has the form (instance, method).
 def CircuitOp : Cmt2Op<
@@ -358,6 +359,9 @@ def InstanceOp : Cmt2Op<
     mlir::StringAttr getReferencedModuleNameAttr() {
       return getModuleNameAttr().getAttr();
     }
+
+    /// Get the referenced module (Cmt2ModuleLike) for this instance
+    Cmt2ModuleLike getReferencedModule();
   }];
 
   let extraClassDefinition = [{
@@ -605,36 +609,48 @@ def MethodOp : Cmt2Op<
 def CallOp : Cmt2Op<
   "call", [
     ParentOneOf<["MethodOp", "RuleOp", "ValueOp"]>,
-    // DeclareOpInterfaceMethods<Cmt2CallLike>
+    DeclareOpInterfaceMethods<CallOpInterface>
   ]> {
   let summary = "Call Method/Value.";
   let description = [{
     The `cmt2.call` operation is used to invoke a `MethodOp` or `ValueOp` within a `RuleOp`, `MethodOp`, or `ValueOp`.
 
-    Attributes: None
+    This operation implements CallOpInterface, providing standard call-like operation features:
+    - getCallableForCallee(): Returns the callee symbol reference
+    - getArgOperands(): Returns the input operands
+    - resolveCallable(): Resolves the callable operation
 
     Arguments:
       - `inputs`: The list of input signals (values) to be passed to the method or value being called.
-      - `callee`: The symbol name of the method or value being called. A special case is the `@this` callee, which refers to the current module itself.
+      - `callee`: The symbol name of the instance being called. A special case is the `@this` callee, which refers to the current module itself.
       - `methodOrValue`: The symbol name of the method or value being called.
-    
+
     Results:
       - `outputs`: The list of output signals (values) returned by the method or value being called.
-  
+
     Assembly format:
-    
+
     ```mlir
     %output1, %output2 = cmt2.call @callee @methodName(%input1, %input2, ...) : <function_type>
     ```
   }];
-  let arguments = (ins 
+  let arguments = (ins
     Variadic<HWIntegerType>:$inputs,
     SymbolRefAttr:$callee,
-    SymbolRefAttr:$methodOrValue
+    SymbolRefAttr:$methodOrValue,
+    OptionalAttr<ArrayAttr>:$arg_attrs,
+    OptionalAttr<ArrayAttr>:$res_attrs
   );
   let results = (outs Variadic<HWIntegerType>:$outputs);
   let assemblyFormat = [{
     $callee $methodOrValue `(` $inputs `)` attr-dict `:` functional-type($inputs, results)
+  }];
+
+  let extraClassDeclaration = [{
+    /// Get the methodOrValue symbol as the primary callee
+    mlir::SymbolRefAttr getMethodOrValueSymbol() {
+      return getMethodOrValueAttr();
+    }
   }];
 }
 

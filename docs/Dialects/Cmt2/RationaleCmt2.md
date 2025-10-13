@@ -21,7 +21,10 @@ In 5th Workshop on Languages, Tools, and Techniques for Accelerator Design (LATT
 - `cmt2.value`: define a value method
 - `cmt2.rule`: define a rule
 - `cmt2.instance`: instantiate a module
-- `cmt2.call`: call a method
+  - Provides `getReferencedModule()` method to get the Cmt2ModuleLike operation being instantiated
+- `cmt2.call`: call a method (implements CallOpInterface)
+  - Provides standard call-like operation features: getCallableForCallee(), getArgOperands(), resolveCallable()
+  - Supports argument and result attributes via CallOpInterface
 - `cmt2.return`: return a value to caller
 - `cmt2.interface`: declare an interface comprised of methods.
 - `cmt2.interface.def`: define an interface instance
