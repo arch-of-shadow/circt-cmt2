@@ -4,6 +4,7 @@ add_circt_dialect_library(CIRCTCmt2Transforms
   Test.cpp
   PrintInstanceGraph.cpp
   PrintCallInfo.cpp
+  PrintConflictMatrix.cpp
   ModuleInliner.cpp
 
   DEPENDS

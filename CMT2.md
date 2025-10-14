@@ -322,3 +322,91 @@ Both test cases pass successfully:
 - `lib/Dialect/Cmt2/Transforms/ModuleInliner.cpp` - Main implementation (~320 lines)
 - `lib/Dialect/Cmt2/Transforms/CMakeLists.txt` - Added ModuleInliner.cpp to build
 - `test/Dialect/Cmt2/inline.mlir` - Test case with multi-level module hierarchy
+
+
+### ConflictMatrix Analysis
+
+#### Spec
+
+We now need an analysis to infer relationships among rule/method/value of a module, as a conflict matrix, to prepare the "scheduling".
+
+```markdown
+MLIR Compiler will schedule as much as possibles rules in a single cycle. The
+scheduling result is opaque to users, which protects user from dealing with 
+complex control circuits.
+
+Scheduler will analyse the included instances, based on the call map to those methods, scheduler can construct a conflict matrix among rule/action/value. There will be 3 relationships:
+- `r0 <>  r1`, Conflict(C): `r0` and `r1` cannot be executed in a same cycle.
+- `r0 / r1`, Conflict Free(CF): `r0` and `r1` can be executed in a same cycle 
+  in any order.
+- `r0 <  r1`, Sequential Before(SB): `r0` and `r1` can be executed in a same
+  cycle, but `r0` should be executed before `r1`.
+```
+
+How to infer the conflict matrix? Given two function (either rule/method/value) `fx` and `fy`, first collect calls of each, denoted as `calls(fx)` and `calls(fy)`, from two regions (guard and body) of each. Each call can be denoted as `<instance>.<method>`. Then, there are some inference rules:
+1. If there exists a call `i.m0` in `calls(fx)` and a call `i.m1` in `calls(fy)`, and `m0 <> m1` in `i`'s module, then `fx <> fy`. (Conflict)
+2. If there exists a call `i.m0` in `calls(fx)` and a call `i.m1` in `calls(fy)`, and `m0 < m1` in `i`'s module, then `fx < fy`. (Sequential Before) 
+3. If `fx < fy` and `fy < fx`, `fx <> fy`. (Merge)
+4. If attributes specify `fx / fy` or there are no infered relationships between `fx` and `fy`, `fx / fy` (Conflict Free)
+
+You should do this analysis with the help of existing InstanceGraph and CallInfo analysis. The analysis should be conducted in a topological order (from instance's modules to parent's module).
+
+The starting point should be extmodules like `@reg` in `test/Dialect/Cmt2/gcd.mlir` with specified conflict matrix. You should test your analysis with the `gcd.mlir` case by the command:
+```shell
+build/bin/circt-opt test/Dialect/Cmt2/gcd.mlir -cmt2-print-conflict-matrix
+```
+
+#### TODO List
+
+- [x] Design ConflictMatrix data structure (Relationship enum, ModuleConflictMatrix, ConflictMatrixAnalysis)
+- [x] Create Cmt2ConflictMatrix.h and Cmt2ConflictMatrix.cpp with analysis implementation
+- [x] Parse conflict matrix attributes from ExtModuleHwOp (conflict, conflictFree, sequenceBefore)
+- [x] Implement topological order traversal for bottom-up analysis
+- [x] Implement inference rules for conflict relationships
+- [x] Add PrintConflictMatrix pass to print conflict matrices
+- [x] Test with gcd.mlir and verify conflict matrix output
+
+**Status: ✅ COMPLETE**
+
+The conflict matrix analysis has been successfully implemented and tested with the following features:
+
+**Features:**
+- Parses conflict matrices from external modules via attributes:
+  - `conflict`: [[@f1, @f2], ...] - functions that cannot execute in the same cycle
+  - `conflictFree`: [[@f1, @f2], ...] - functions that can execute in any order
+  - `sequenceBefore`: [[@f1, @f2], ...] - f1 must execute before f2
+- Infers conflict matrices for regular modules using four inference rules:
+  1. If `i.m0 <> i.m1` in instance's module, then `fx <> fy` (Conflict propagation)
+  2. If `i.m0 < i.m1` in instance's module, then `fx < fy` (Sequential Before propagation)
+  3. If `fx < fy` AND `fy < fx`, then `fx <> fy` (Merge to Conflict)
+  4. Default to ConflictFree if no relationships inferred
+- Analyzes modules in topological order (bottom-up) to ensure submodules are analyzed first
+- Collects calls from both guard and body regions of functions
+- Prints conflict matrices in human-readable format grouped by relationship type
+
+**Key Implementation Details:**
+- Uses `ModuleConflictMatrix` to store relationships for each module
+- Uses normalized function pairs (sorted order) for consistent lookup
+- Implements topological sort using dependency tracking
+- Handles external modules (ExtModuleHwOp) and regular modules (ModuleOp)
+
+**Test Results:**
+Successfully tested with `test/Dialect/Cmt2/gcd.mlir`:
+- External module `@reg`: correctly parsed conflict, sequenceBefore, and conflictFree relationships
+- Module `@gcd`: correctly inferred conflicts between rules/methods/values based on their calls to instance methods
+
+Example inferred relationships:
+- `@start <> @swap`: both call `@write` on instances, and `@write <> @write` in `@reg`
+- `@result / @sub`: conflict-free because they call different methods/instances
+- `@doing / @result`: conflict-free because both only call `@read`, which is conflict-free with itself
+
+**Files Created:**
+- `include/circt/Dialect/Cmt2/Cmt2ConflictMatrix.h` - Header file with data structures
+- `lib/Dialect/Cmt2/Cmt2ConflictMatrix.cpp` - Main analysis implementation (~400 lines)
+- `lib/Dialect/Cmt2/Transforms/PrintConflictMatrix.cpp` - Print pass implementation
+
+**Files Modified:**
+- `include/circt/Dialect/Cmt2/Cmt2Passes.td` - Added PrintConflictMatrix pass definition
+- `lib/Dialect/Cmt2/CMakeLists.txt` - Added Cmt2ConflictMatrix.cpp to build
+- `lib/Dialect/Cmt2/Transforms/CMakeLists.txt` - Added PrintConflictMatrix.cpp to build
+

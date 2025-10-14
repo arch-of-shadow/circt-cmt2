@@ -56,6 +56,21 @@ def ModuleInliner : Pass<"cmt2-inline-modules", "cmt2::CircuitOp"> {
   }];
 }
 
+def PrintConflictMatrix : Pass<"cmt2-print-conflict-matrix", "cmt2::CircuitOp"> {
+  let summary = "Print conflict matrix for Cmt2 modules.";
+  let description = [{
+    This pass analyzes and prints the conflict matrix for each module in a Cmt2
+    circuit. The conflict matrix defines scheduling relationships between
+    rules/methods/values:
+    - Conflict (<>): cannot execute in the same cycle
+    - Conflict Free (/): can execute in the same cycle, any order
+    - Sequential Before (<): can execute in the same cycle, but ordered
+
+    The analysis is performed bottom-up in the instance hierarchy, using conflict
+    information from external modules and propagating it through the design.
+  }];
+}
+
 // def InferRules : Pass<"cmt2-infer-rules", "cmt2::CircuitOp"> {
 //   let summary = "generate all Cmt2::RuleRefOp for a circuit.";
 //   let description = [{

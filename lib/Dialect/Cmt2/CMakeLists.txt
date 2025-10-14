@@ -3,6 +3,7 @@ add_circt_dialect_library(CIRCTCmt2
   Cmt2Ops.cpp
   Cmt2InstanceGraph.cpp
   Cmt2CallInfo.cpp
+  Cmt2ConflictMatrix.cpp
   Cmt2OpInterfaces.cpp
 
   ADDITIONAL_HEADER_DIRS
