@@ -410,3 +410,88 @@ Example inferred relationships:
 - `lib/Dialect/Cmt2/CMakeLists.txt` - Added Cmt2ConflictMatrix.cpp to build
 - `lib/Dialect/Cmt2/Transforms/CMakeLists.txt` - Added PrintConflictMatrix.cpp to build
 
+### PrivateFunc Analysis and Transform
+
+
+#### Spec
+
+There is a special class of functions (method / value) called "private function". A private function is only called by functions in the same module by the `@this` instance. 
+
+We need an analysis to identify private functions in every module.
+
+Then, you need to create a transform to inline private functions.
+
+You should use the `gcd.mlir` (`test/Dialect/Cmt2/gcd.mlir`) to test the analysis and transform. You can fill the shell command below to test:
+```shell
+# Test the private function inliner pass with gcd.mlir
+build/bin/circt-opt test/Dialect/Cmt2/gcd.mlir -cmt2-inline-private-funcs
+```
+
+#### TODO List
+
+- [x] Design PrivateFuncAnalysis data structure
+- [x] Create PrivateFuncAnalysis.h and PrivateFuncAnalysis.cpp with analysis implementation
+- [x] Implement private function identification using CallInfo
+- [x] Add InlinePrivateFuncs pass definition to Cmt2Passes.td
+- [x] Create InlinePrivateFuncs transform pass implementation
+- [x] Update CMakeLists.txt files
+- [x] Test with gcd.mlir and verify private function inlining
+
+**Status: ✅ COMPLETE**
+
+The private function analysis and transform has been successfully implemented and tested with the following features:
+
+**Features:**
+- Identifies private functions in each module:
+  - A private function is a method or value that is ONLY called via `@this` instance
+  - All calls must be from functions in the same module
+  - If a function is called from outside the module or from a different instance, it's not private
+- Inlines private functions by:
+  1. Identifying all private functions using the PrivateFuncAnalysis
+  2. For each private function, finding all call sites (CallOps with `@this` callee)
+  3. Cloning the function body at each call site with proper SSA value mapping
+  4. Replacing the call results with the inlined results
+  5. Removing the private function definition after all calls are inlined
+
+**Key Implementation Details:**
+- Uses `PrivateFuncAnalysis` class to identify private functions
+- Analyzes CallInfo to determine which functions are called and from where
+- Supports both MethodOp and ValueOp private functions
+- Uses `IRMapping` to map function arguments to call inputs during inlining
+- Properly handles SSA values and maintains correctness
+
+**Test Results:**
+Successfully tested with `test/Dialect/Cmt2/gcd.mlir`:
+- Function `@doing` was correctly identified as a private function (only called via `@this`)
+- All calls to `@doing` in rules `@swap`, `@sub`, and methods `@start`, `@result` were inlined
+- The inlined code correctly reads from `@y @read` and checks if it's not equal to 0
+- The `@doing` function definition was removed after inlining
+
+Example transformation:
+```mlir
+// Before (original @doing function):
+cmt2.value @doing() -> (i1) {} {
+  %y = cmt2.call @y @read () : () -> (i32)
+  %0 = hw.constant 0: i32
+  %1 = comb.icmp ne %y, %0 : i32
+  cmt2.return %1 : i1
+}
+
+// Before (call site in @swap rule):
+%3 = cmt2.call @this @doing () : () -> (i1)
+
+// After (inlined at call site):
+%3 = cmt2.call @y @read() : () -> i32
+%c0_i32 = hw.constant 0 : i32
+%4 = comb.icmp ne %3, %c0_i32 : i32
+// %4 is used instead of %3
+```
+
+**Files Created:**
+- `include/circt/Dialect/Cmt2/Transforms/PrivateFuncAnalysis.h` - Header file for private function analysis
+- `lib/Dialect/Cmt2/Transforms/PrivateFuncAnalysis.cpp` - Analysis implementation (~150 lines)
+- `lib/Dialect/Cmt2/Transforms/InlinePrivateFuncs.cpp` - Transform pass implementation (~160 lines)
+
+**Files Modified:**
+- `include/circt/Dialect/Cmt2/Cmt2Passes.td` - Added InlinePrivateFuncs pass definition
+- `lib/Dialect/Cmt2/Transforms/CMakeLists.txt` - Added PrivateFuncAnalysis.cpp and InlinePrivateFuncs.cpp to build

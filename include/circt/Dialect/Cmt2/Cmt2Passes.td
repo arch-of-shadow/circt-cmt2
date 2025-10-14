@@ -71,6 +71,20 @@ def PrintConflictMatrix : Pass<"cmt2-print-conflict-matrix", "cmt2::CircuitOp"> 
   }];
 }
 
+def InlinePrivateFuncs : Pass<"cmt2-inline-private-funcs", "cmt2::CircuitOp"> {
+  let summary = "Inline private functions in Cmt2 modules.";
+  let description = [{
+    This pass inlines private functions (methods and values) in Cmt2 modules.
+    A private function is defined as a function that is only called by other
+    functions in the same module via the @this instance.
+
+    The pass:
+    1. Identifies all private functions in each module
+    2. Inlines the body of each private function at its call sites
+    3. Removes the private function definition after inlining
+  }];
+}
+
 // def InferRules : Pass<"cmt2-infer-rules", "cmt2::CircuitOp"> {
 //   let summary = "generate all Cmt2::RuleRefOp for a circuit.";
 //   let description = [{

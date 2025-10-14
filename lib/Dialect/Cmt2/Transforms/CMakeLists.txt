@@ -9,6 +9,8 @@ add_circt_dialect_library(CIRCTCmt2Transforms
   PrintCallInfo.cpp
   PrintConflictMatrix.cpp
   ModuleInliner.cpp
+  PrivateFuncAnalysis.cpp
+  InlinePrivateFuncs.cpp
 
   DEPENDS
   CIRCTCmt2TransformsIncGen
