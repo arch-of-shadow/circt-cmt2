@@ -39,6 +39,23 @@ def PrintCallInfo : Pass<"cmt2-print-call-info", "cmt2::CircuitOp"> {
   }];
 }
 
+def ModuleInliner : Pass<"cmt2-inline-modules", "cmt2::CircuitOp"> {
+  let summary = "Inline Cmt2 modules into their instantiation sites.";
+  let description = [{
+    This pass inlines Cmt2 modules into their instantiation sites. Modules are
+    inlined from bottom-up in the instance hierarchy. The following modules are
+    NOT inlined:
+    - Top-level module (the one referenced by CircuitOp)
+    - External modules (ExtModuleHwOp)
+    - Modules with "synthesis" attribute set to true
+
+    For each inlined instance:
+    1. Subinstances are added to the parent module
+    2. Calls to the instance's methods/values are replaced with the cloned body
+    3. The inlined module is removed if no longer referenced
+  }];
+}
+
 // def InferRules : Pass<"cmt2-infer-rules", "cmt2::CircuitOp"> {
 //   let summary = "generate all Cmt2::RuleRefOp for a circuit.";
 //   let description = [{

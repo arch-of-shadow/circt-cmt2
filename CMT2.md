@@ -267,8 +267,58 @@ We need a module inline transform. It comprises the following steps:
     1. add subinstances to the parent module;
     2. inline parent module's call to the instance's methods/values (use CallInfo analysis).
 
+You may refer to FIRRTL's inline as a lesson:
+- `lib/Dialect/FIRRTL/Transforms/ModuleInliner.cpp`
+
 Add a test that have modules (synthesis = true / false) and extern modules to test the inline transform. Run the following command to test:
 ```shell
+# Test the module inliner pass
+build/bin/circt-opt test/Dialect/Cmt2/inline.mlir -cmt2-inline-modules
+
+# Or run with FileCheck
+build/bin/circt-opt test/Dialect/Cmt2/inline.mlir -cmt2-inline-modules | build/bin/FileCheck test/Dialect/Cmt2/inline.mlir
 ```
 
 #### TODO List
+
+- [x] Study FIRRTL ModuleInliner implementation
+- [x] Design simplified Cmt2 module inlining strategy
+- [x] Implement Cmt2ModuleInliner pass (lib/Dialect/Cmt2/Transforms/ModuleInliner.cpp)
+- [x] Create test case with synthesis attribute (test/Dialect/Cmt2/inline.mlir, inline-simple.mlir)
+- [x] Debug and fix SSA value use-def issues in the inline transform
+- [x] Fix operand remapping when cloning instances
+- [x] Fix symbol reference remapping in cloned CallOps
+- [x] Test and verify successful inlining
+- [x] Subinstances' name resolution: When inlining a module `Leaf`, which is instantiated as `@leaf` in module `Parent`, its instance `@x` is cloned to `Parent` with the updated instance name `@leaf.x`. The hierarchical name uses `.` as a separator and is implemented as a StringAttr, preserving the hierarchy path for debugging and analysis purposes.
+
+**Status: ✅ COMPLETE**
+
+The module inliner pass has been successfully implemented and tested with the following features:
+
+**Features:**
+- Identifies modules that should NOT be inlined: top-level modules (modules with no uses), external modules (ExtModuleHwOp), and modules with `synthesis=true` attribute
+- Inlines modules iteratively until no more inlining is possible by:
+  1. Mapping module block arguments to instance operands (crucial for correct SSA value mapping)
+  2. Cloning subinstances from target module to parent with proper operand mapping and **hierarchical naming**
+  3. Tracking instance name mappings for updating CallOp references
+  4. Inlining calls to the instance's methods/values by cloning method/value bodies
+  5. Remapping CallOp callee references to point to cloned instances with hierarchical names
+  6. Removing the inlined instance
+- Removes unused modules after all inlining is complete
+- **Hierarchical Instance Naming**: When inlining module `@Leaf` instantiated as `@leaf`, its subinstance `@storage` is renamed to `@leaf.storage`, preserving the full instantiation path for clarity and avoiding name conflicts
+
+**Key Implementation Details:**
+- Uses `IRMapping` to map SSA values during cloning
+- Uses `DenseMap<StringAttr, StringAttr>` to map instance names for CallOp remapping
+- Properly handles module block arguments by mapping them to instance operands before cloning
+- Updates CallOp callee symbols to reference cloned instances
+
+**Test Results:**
+Both test cases pass successfully:
+- `test/Dialect/Cmt2/inline.mlir` - Multi-level hierarchical inlining
+
+**Files Modified:**
+- `include/circt/Dialect/Cmt2/Cmt2Passes.td` - Added ModuleInliner pass definition
+- `lib/Dialect/Cmt2/Transforms/ModuleInliner.cpp` - Main implementation (~320 lines)
+- `lib/Dialect/Cmt2/Transforms/CMakeLists.txt` - Added ModuleInliner.cpp to build
+- `test/Dialect/Cmt2/inline.mlir` - Test case with multi-level module hierarchy
