@@ -30,11 +30,16 @@ def Cmt2FunctionLike : OpInterface<"Cmt2FunctionLike"> {
     - Body/region handling (isExternal, getFunctionBody)
     - Argument/result counts (getNumArguments, getNumResults)
     - Argument/result attribute access (getAllArgAttrs, getArgAttrDict, getArgAttr, etc.)
+    - Optional signal name attributes (readyName, enableName) for hardware generation
 
     Note: Unlike FunctionOpInterface which requires single-region operations,
     Cmt2FunctionLike supports two-region operations (guard and body regions).
     For BindMethodOp and BindValueOp, which have no regions, some methods
     (like getFunctionBody) should not be called.
+
+    Optional attributes:
+    - readyName: String attribute specifying the name for the ready signal
+    - enableName: String attribute specifying the name for the enable signal
   }];
   let methods = [
     //===------------------------------------------------------------------===//
@@ -195,6 +200,80 @@ def Cmt2FunctionLike : OpInterface<"Cmt2FunctionLike"> {
       auto resDict = resAttrs ? llvm::cast<::mlir::DictionaryAttr>(resAttrs[index])
                               : ::mlir::DictionaryAttr();
       return resDict ? resDict.get(name) : nullptr;
+    }]>,
+
+    //===------------------------------------------------------------------===//
+    // Optional attributes for ready/enable signal names
+    //===------------------------------------------------------------------===//
+
+    InterfaceMethod<[{
+      Get the ready signal name, if specified.
+      Returns StringAttr if set, nullptr otherwise.
+    }],
+    "::mlir::StringAttr", "getReadyNameAttr", (ins),
+    /*methodBody=*/[{
+      return ::llvm::dyn_cast_or_null<::mlir::StringAttr>($_op->getAttr("readyName"));
+    }]>,
+
+    InterfaceMethod<[{
+      Get the ready signal name as a StringRef.
+      Returns empty string if not set.
+    }],
+    "::llvm::StringRef", "getReadyName", (ins),
+    /*methodBody=*/[{
+      auto attr = ::llvm::dyn_cast_or_null<::mlir::StringAttr>($_op->getAttr("readyName"));
+      return attr ? attr.getValue() : ::llvm::StringRef();
+    }]>,
+
+    InterfaceMethod<[{
+      Set the ready signal name.
+    }],
+    "void", "setReadyNameAttr", (ins "::mlir::StringAttr":$name),
+    /*methodBody=*/[{
+      $_op->setAttr("readyName", name);
+    }]>,
+
+    InterfaceMethod<[{
+      Remove the ready signal name attribute.
+    }],
+    "void", "removeReadyName", (ins),
+    /*methodBody=*/[{
+      $_op->removeAttr("readyName");
+    }]>,
+
+    InterfaceMethod<[{
+      Get the enable signal name, if specified.
+      Returns StringAttr if set, nullptr otherwise.
+    }],
+    "::mlir::StringAttr", "getEnableNameAttr", (ins),
+    /*methodBody=*/[{
+      return ::llvm::dyn_cast_or_null<::mlir::StringAttr>($_op->getAttr("enableName"));
+    }]>,
+
+    InterfaceMethod<[{
+      Get the enable signal name as a StringRef.
+      Returns empty string if not set.
+    }],
+    "::llvm::StringRef", "getEnableName", (ins),
+    /*methodBody=*/[{
+      auto attr = ::llvm::dyn_cast_or_null<::mlir::StringAttr>($_op->getAttr("enableName"));
+      return attr ? attr.getValue() : ::llvm::StringRef();
+    }]>,
+
+    InterfaceMethod<[{
+      Set the enable signal name.
+    }],
+    "void", "setEnableNameAttr", (ins "::mlir::StringAttr":$name),
+    /*methodBody=*/[{
+      $_op->setAttr("enableName", name);
+    }]>,
+
+    InterfaceMethod<[{
+      Remove the enable signal name attribute.
+    }],
+    "void", "removeEnableName", (ins),
+    /*methodBody=*/[{
+      $_op->removeAttr("enableName");
     }]>,
   ];
   let verify = [{}];

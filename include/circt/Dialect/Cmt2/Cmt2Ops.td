@@ -429,10 +429,6 @@ def RuleOp : Cmt2Op<
     Cmt2 scheduler, which generates firing logic of rules and the `enable` signals for the methods
     called by the rule.
 
-    Attributes:
-    - `explicit`: A boolean attribute indicating whether the rule is explicit.
-      An explicit rule is one that have the `ready` signal registered and returned (as the first output).
-
     Arguments:
     - `sym_name`: The symbol name of the rule being defined.
     - `function_type`: The function type of the rule (typically no arguments).
@@ -495,10 +491,6 @@ def ValueOp : Cmt2Op<
     The value method can contain value calls and combinational
     logic to define the behavior of the value method.
 
-    Attributes:
-    - `explicit`: A boolean attribute indicating whether the value method is explicit.
-      An explicit value method is one that have the `ready` signal registered and returned (as the first output).
-
     Arguments:
     - `sym_name`: The symbol name of the value method being defined.
     - `function_type`: The function type of the value method (shared arguments).
@@ -556,10 +548,6 @@ def MethodOp : Cmt2Op<
   let summary = "Define a method, can be used in both Cmt2 ExtModule and Module.";
   let description = [{
     The "cmt2.method" defines an action method, which has the `ready`-`enable` contract.
-
-    Attributes:
-    - `explicit`: A boolean attribute indicating whether the method is explicit.
-    An explicit method should have a `enable` argument as the first input, and a `ready` output as the first output.
 
     Arguments:
     - `sym_name`: The symbol name of the method being defined.

@@ -610,3 +610,58 @@ Comprehensive testing with `test/Dialect/Cmt2/interface-inline.mlir`:
 - Matching is done by comparing the interfaceMethod with the CallOp's methodOrValue
 - Once matched, the actual instance and method are used for CallInfo and call type determination
 - This design keeps interface resolution at the analysis layer, not requiring IR transformation
+
+
+### Attributes
+
+#### Spec
+
+In `include/circt/Dialect/Cmt2/Cmt2Ops.td`, there are some `explicit` attributes, which are not useful. Remove them.
+
+The `Cmt2FunctionLike` should have optional attributes, including:
+- `readyName`
+- `enableName`
+
+Note that, these attributes don't need to be arguments of the operations. However, the `Cmt2FunctionLike` should provide methods to set or get them.
+
+#### TODO List
+
+- [x] Remove unused `explicit` attributes from Cmt2Ops.td (RuleOp, MethodOp, ValueOp)
+- [x] Add optional attribute support to Cmt2FunctionLike interface
+- [x] Implement getter/setter methods for readyName and enableName
+- [x] Build and test the changes
+
+**Status: ✅ COMPLETE**
+
+The attributes task has been successfully implemented with the following changes:
+
+**Changes Made:**
+1. **Removed `explicit` attributes**: Cleaned up unused `explicit` attribute documentation from RuleOp (Cmt2Ops.td:433-434), ValueOp (Cmt2Ops.td:499-500), and MethodOp (Cmt2Ops.td:561-562) descriptions
+2. **Added optional attributes to Cmt2FunctionLike**: Added `readyName` and `enableName` optional attributes that can be set on any Cmt2FunctionLike operation (RuleOp, MethodOp, ValueOp, BindMethodOp, BindValueOp)
+3. **Implemented interface methods** in `Cmt2OpInterfaces.td`:
+   - `getReadyNameAttr()` - Returns StringAttr or nullptr
+   - `getReadyName()` - Returns StringRef (empty if not set)
+   - `setReadyNameAttr(StringAttr)` - Sets the ready signal name
+   - `removeReadyName()` - Removes the attribute
+   - `getEnableNameAttr()` - Returns StringAttr or nullptr
+   - `getEnableName()` - Returns StringRef (empty if not set)
+   - `setEnableNameAttr(StringAttr)` - Sets the enable signal name
+   - `removeEnableName()` - Removes the attribute
+
+**Implementation Details:**
+- Attributes are stored as optional attributes on operations (not as operation arguments)
+- Methods use `$_op->getAttr()` and `$_op->setAttr()` to access/modify attributes
+- All methods are inline implementations in the interface definition
+- Compatible with all Cmt2FunctionLike operations
+
+**Files Modified:**
+- `include/circt/Dialect/Cmt2/Cmt2Ops.td` - Removed explicit attribute documentation
+- `include/circt/Dialect/Cmt2/Cmt2OpInterfaces.td` - Added readyName/enableName methods to Cmt2FunctionLike
+
+**Testing:**
+- Build successful
+- Verified with `circt-opt test/Dialect/Cmt2/gcd.mlir` - parses and prints correctly
+
+### Schedule Transform
+
+Now we need to do a 
