@@ -495,3 +495,118 @@ cmt2.value @doing() -> (i1) {} {
 **Files Modified:**
 - `include/circt/Dialect/Cmt2/Cmt2Passes.td` - Added InlinePrivateFuncs pass definition
 - `lib/Dialect/Cmt2/Transforms/CMakeLists.txt` - Added PrivateFuncAnalysis.cpp and InlinePrivateFuncs.cpp to build
+
+### Interface Support
+
+#### Spec
+
+Currently, the analysis and transforms we have done only support direct instance calls. However, `cmt2` have support for the interface mechanism. You should read `include/circt/Dialect/Cmt2/Cmt2Ops.td` to understand how interface is defined and used, as exemplified in `test/Dialect/Cmt2/gcd.mlir`. 
+
+In `cmt2` modules, a function can call the method/value of an interface (defined by the `InterfaceDefOp` operation) instead of a direct instance. So, we need to update our analysis and transforms to support interface calls. We need to update:
+- CallInfo analysis: to include interface calls
+- ConflictMatrix analysis: to include interface calls (this may affect the topological order, since interface comes from modules outside the current module)
+- ModuleInliner transform: to inline interface calls
+- More if you find necessary
+
+You should use the `gcd.mlir` (`test/Dialect/Cmt2/gcd.mlir`) to test the analysis and transform. You can fill the shell command below to test:
+```shell
+# Test CallInfo analysis (should resolve interface calls to actual instances)
+build/bin/circt-opt test/Dialect/Cmt2/gcd.mlir -cmt2-print-call-info
+
+# Test ConflictMatrix analysis (should work with interface-resolved calls)
+build/bin/circt-opt test/Dialect/Cmt2/gcd.mlir -cmt2-print-conflict-matrix
+
+# Test ModuleInliner (should handle modules with interfaces)
+build/bin/circt-opt test/Dialect/Cmt2/gcd.mlir -cmt2-inline-modules
+
+# Test PrivateFuncInliner (should work with interface-using functions)
+build/bin/circt-opt test/Dialect/Cmt2/gcd.mlir -cmt2-inline-private-funcs
+```
+
+`gcd.mlir`'s interface mechanism is too simple (cannot fully test the transforms, especially the ModuleInliner). You should create a more complex test case, which must have a module with functions and interfaces to be inlined. You can create `test/Dialect/Cmt2/interface-inline.mlir` for this purpose. You can fill the shell command below to test:
+```shell
+# Test CallInfo analysis with interface-inline.mlir (shows @reader calls before module inlining)
+build/bin/circt-opt test/Dialect/Cmt2/interface-inline.mlir -cmt2-print-call-info
+
+# Test ConflictMatrix analysis with interface-inline.mlir
+build/bin/circt-opt test/Dialect/Cmt2/interface-inline.mlir -cmt2-print-conflict-matrix
+
+# Test ModuleInliner with interface-inline.mlir (inlines @child into @parent, remaps interface calls)
+build/bin/circt-opt test/Dialect/Cmt2/interface-inline.mlir -cmt2-inline-modules
+``` 
+
+#### TODO List
+
+- [x] Understand interface mechanism (InterfaceOp, InterfaceDefOp, InterfaceDeclOp, interface_binds)
+- [x] Update CallInfo analysis to resolve interface calls to actual instance.method pairs
+- [x] Verify ConflictMatrix analysis works with updated CallInfo (it automatically benefits)
+- [x] Update ModuleInliner to handle interface bindings during module inlining
+- [x] Verify PrivateFuncInliner works correctly (no changes needed)
+- [x] Test all analyses and transforms with gcd.mlir
+- [x] Create comprehensive interface-inline.mlir test case
+- [x] Test CallInfo, ConflictMatrix, and ModuleInliner with interface-inline.mlir
+
+**Status: ✅ COMPLETE**
+
+The interface support has been successfully implemented with the following key changes:
+
+**Understanding:**
+- **InterfaceOp**: Defines an interface with method/value signatures (e.g., `@Read` with `@read` method)
+- **InterfaceDefOp**: Maps interface methods to actual instance.method pairs (e.g., `@ReadX : @Read [[@x, @read, @read]]`)
+- **InterfaceDeclOp**: Declares that a module requires an interface parameter (e.g., `@reader : @Read`)
+- **InstanceOp with interface_binds**: Binds interface definitions to declarations during instantiation
+
+**Implementation:**
+- **CallInfo Analysis**: Updated to resolve interface calls to actual instance.method pairs
+  - When a CallOp references an InterfaceDefOp (e.g., `cmt2.call @ReadX @read()`), the analysis resolves it to the actual instance and method (e.g., `@x.@read`)
+  - The resolution happens during analysis building by looking up InterfaceDefOp and extracting the mapping from the `methods` attribute
+  - Format: [[@instance, @instanceMethod, @interfaceMethod], ...] where the third element matches the call's method
+  - Once resolved, the CallInfo stores the actual instance and method, making the rest of the analysis infrastructure transparent to interfaces
+
+- **ConflictMatrix Analysis**: No changes needed - automatically benefits from CallInfo's interface resolution
+
+- **ModuleInliner**: Updated to handle interface bindings during module inlining
+  - When inlining a module instance, extract `interface_binds` attribute to build an `interfaceBindingMap` (interfaceDecl -> interfaceDef)
+  - During CallOp cloning, remap interface declaration references to interface definition references
+  - Two-stage remapping: first remap interface declarations, then remap to hierarchical instance names if needed
+  - Format of interface_binds: [[@interfaceDef, @interfaceDecl], ...] where interfaceDecl is from child module and interfaceDef is from parent
+
+- **PrivateFuncInliner**: No changes needed - works correctly with interface-using functions
+
+**Test Results:**
+All analyses and transforms tested successfully with `test/Dialect/Cmt2/gcd.mlir`:
+- CallInfo correctly analyzes calls (interface resolution code path tested but gcd.mlir has no actual interface method calls in functions)
+- ConflictMatrix produces correct conflict relationships
+- ModuleInliner handles modules with interface definitions
+- PrivateFuncInliner correctly inlines `@doing` value method
+
+Comprehensive testing with `test/Dialect/Cmt2/interface-inline.mlir`:
+- **Test case structure**:
+  - `@child` module with `@reader` interface declaration (InterfaceDeclOp)
+  - `@child` has `@process` method and `@doubleData` value that call through `@reader @getData`
+  - `@parent` module defines `@StorageReader` interface (InterfaceDefOp) binding to `@storage` instance
+  - `@parent` instantiates `@child` with interface binding: `with [[@StorageReader, @reader]]`
+  - `@compute` rule in `@parent` calls `@processor @process` and `@processor @doubleData`
+- **CallInfo test**: Shows `@process` and `@doubleData` in `@child` call `@reader @getData` (not yet resolved - correct for modules with InterfaceDeclOp)
+- **ConflictMatrix test**: Correctly analyzes conflict relationships
+- **ModuleInliner test**: Successfully inlines `@child` into `@parent`
+  - Removes `@processor` instance
+  - Inlines `@process` and `@doubleData` bodies into `@compute` rule
+  - Remaps `@reader @getData` calls to `@StorageReader @getData` using interface binding
+  - Removes unused `@child` module
+  - Result: `@compute` now directly calls `@StorageReader @getData` (interface definition in parent)
+
+**Files Modified:**
+- `include/circt/Dialect/Cmt2/Transforms/CallInfo.h` - Added overloaded `determineCalleeType` method
+- `lib/Dialect/Cmt2/Transforms/CallInfo.cpp` - Implemented interface resolution logic in `processEntity` method (~30 lines added)
+- `lib/Dialect/Cmt2/Transforms/ModuleInliner.cpp` - Added interface binding support (~50 lines modified/added)
+
+**Files Created:**
+- `test/Dialect/Cmt2/interface-inline.mlir` - Comprehensive test case demonstrating interface mechanism with module inlining (~105 lines)
+
+**Key Technical Details:**
+- Interface resolution is performed by looking up InterfaceDefOp using the callee symbol
+- The `methods` attribute is an ArrayAttr of ArrayAttrs with format [instance, instanceMethod, interfaceMethod]
+- Matching is done by comparing the interfaceMethod with the CallOp's methodOrValue
+- Once matched, the actual instance and method are used for CallInfo and call type determination
+- This design keeps interface resolution at the analysis layer, not requiring IR transformation

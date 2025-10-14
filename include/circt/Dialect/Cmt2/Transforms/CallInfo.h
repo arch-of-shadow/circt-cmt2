@@ -71,6 +71,11 @@ private:
   /// Determine the type of the callee (Method or Value)
   CallType determineCalleeType(CallOp callOp, ModuleOp currentModule);
 
+  /// Determine the type of the callee with explicit instance and method refs
+  CallType determineCalleeType(CallOp callOp, ModuleOp currentModule,
+                                mlir::SymbolRefAttr calleeInstance,
+                                mlir::SymbolRefAttr calleeEntity);
+
   /// The circuit operation for symbol lookup
   CircuitOp circuit;
 

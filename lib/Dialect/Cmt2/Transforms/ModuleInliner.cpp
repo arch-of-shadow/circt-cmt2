@@ -53,7 +53,8 @@ private:
   /// Replace calls to an instance with inlined body
   void inlineCalls(InstanceOp instance, Cmt2ModuleLike targetModule,
                    IRMapping &mapper,
-                   DenseMap<StringAttr, StringAttr> &instanceNameMap);
+                   DenseMap<StringAttr, StringAttr> &instanceNameMap,
+                   DenseMap<StringAttr, StringAttr> &interfaceBindingMap);
 
   InstanceGraph *instanceGraph = nullptr;
   CallInfoView *callInfo = nullptr;
@@ -114,6 +115,23 @@ LogicalResult ModuleInlinerPass::inlineInstance(InstanceOp instance) {
     }
   }
 
+  // Build interface binding map: interfaceDecl -> interfaceDef
+  // This maps the child module's interface declarations to the parent's interface definitions
+  DenseMap<StringAttr, StringAttr> interfaceBindingMap;
+  if (auto interfaceBindsAttr = instance.getInterfaceBinds()) {
+    for (auto binding : *interfaceBindsAttr) {
+      auto bindingArray = llvm::cast<mlir::ArrayAttr>(binding);
+      if (bindingArray.size() >= 2) {
+        // Format: [@interfaceDef, @interfaceDecl]
+        auto interfaceDefRef = llvm::cast<mlir::SymbolRefAttr>(bindingArray[0]);
+        auto interfaceDeclRef = llvm::cast<mlir::SymbolRefAttr>(bindingArray[1]);
+        interfaceBindingMap[interfaceDeclRef.getLeafReference()] = interfaceDefRef.getLeafReference();
+        LLVM_DEBUG(llvm::dbgs() << "  Interface binding: @" << interfaceDeclRef.getLeafReference().getValue()
+                                << " -> @" << interfaceDefRef.getLeafReference().getValue() << "\n");
+      }
+    }
+  }
+
   // Step 1: Clone subinstances from target module to parent module
   // We also need to track symbol name mappings for updating CallOps
   // Rename cloned instances with hierarchical names: parent.child
@@ -143,7 +161,7 @@ LogicalResult ModuleInlinerPass::inlineInstance(InstanceOp instance) {
   });
 
   // Step 2: Inline calls to this instance's methods/values
-  inlineCalls(instance, targetModule, mapper, instanceNameMap);
+  inlineCalls(instance, targetModule, mapper, instanceNameMap, interfaceBindingMap);
 
   // Step 3: Remove the original instance
   instance.erase();
@@ -154,7 +172,8 @@ LogicalResult ModuleInlinerPass::inlineInstance(InstanceOp instance) {
 void ModuleInlinerPass::inlineCalls(InstanceOp instance,
                                     Cmt2ModuleLike targetModule,
                                     IRMapping &mapper,
-                                    DenseMap<StringAttr, StringAttr> &instanceNameMap) {
+                                    DenseMap<StringAttr, StringAttr> &instanceNameMap,
+                                    DenseMap<StringAttr, StringAttr> &interfaceBindingMap) {
   auto parentModule = instance->getParentOfType<cmt2::ModuleOp>();
   OpBuilder builder(parentModule.getContext());
 
@@ -220,17 +239,30 @@ void ModuleInlinerPass::inlineCalls(InstanceOp instance,
       auto *clonedOp = builder.clone(op, localMapper);
 
       // If this is a CallOp, we need to update the callee reference
-      // if it references a subinstance that was cloned
+      // if it references a subinstance that was cloned or an interface that needs binding
       if (auto clonedCall = dyn_cast<CallOp>(clonedOp)) {
         SymbolRefAttr oldCalleeRef = clonedCall.getCalleeAttr();
         StringAttr oldCallee = oldCalleeRef.getLeafReference();
-        auto it = instanceNameMap.find(oldCallee);
-        if (it != instanceNameMap.end()) {
-          // Update the callee to point to the cloned instance
-          SymbolRefAttr newCalleeRef = SymbolRefAttr::get(it->second);
+
+        // First, check if this is an interface call that needs remapping
+        auto interfaceIt = interfaceBindingMap.find(oldCallee);
+        if (interfaceIt != interfaceBindingMap.end()) {
+          // This call references an interface declaration - remap to interface definition
+          SymbolRefAttr newCalleeRef = SymbolRefAttr::get(interfaceIt->second);
           clonedCall.setCalleeAttr(newCalleeRef);
-          LLVM_DEBUG(llvm::dbgs() << "    Remapped call from @" << oldCallee.getValue()
-                                  << " to @" << it->second.getValue() << "\n");
+          LLVM_DEBUG(llvm::dbgs() << "    Remapped interface call from @" << oldCallee.getValue()
+                                  << " to @" << interfaceIt->second.getValue() << "\n");
+          oldCallee = interfaceIt->second; // Update for potential further remapping
+        }
+
+        // Then, check if it references a subinstance that was cloned
+        auto instanceIt = instanceNameMap.find(oldCallee);
+        if (instanceIt != instanceNameMap.end()) {
+          // Update the callee to point to the cloned instance
+          SymbolRefAttr newCalleeRef = SymbolRefAttr::get(instanceIt->second);
+          clonedCall.setCalleeAttr(newCalleeRef);
+          LLVM_DEBUG(llvm::dbgs() << "    Remapped instance call from @" << oldCallee.getValue()
+                                  << " to @" << instanceIt->second.getValue() << "\n");
         }
       }
     }

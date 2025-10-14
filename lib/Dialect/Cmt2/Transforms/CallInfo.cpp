@@ -57,9 +57,39 @@ void CallInfoView::processEntity(mlir::Operation *entity,
 
   // Walk through all operations in the entity's regions
   entity->walk([&](CallOp callOp) {
-    // Determine the type of the callee by looking it up
+    // Get the callee and method/value
+    mlir::SymbolRefAttr calleeAttr = callOp.getCalleeAttr();
+    mlir::SymbolRefAttr methodOrValueAttr = callOp.getMethodOrValueAttr();
+
+    // Check if this is an interface call by looking up InterfaceDefOp
+    if (auto interfaceDef = mlir::SymbolTable::lookupNearestSymbolFrom<InterfaceDefOp>(
+            currentModule, calleeAttr)) {
+      // This is an interface call - resolve it to actual instance.method
+      // InterfaceDefOp has methods attribute: [[@inst, @instMethod, @ifaceMethod], ...]
+      auto methodsAttr = interfaceDef.getMethods();
+      for (auto methodEntry : methodsAttr) {
+        auto arrayAttr = llvm::cast<mlir::ArrayAttr>(methodEntry);
+        if (arrayAttr.size() >= 3) {
+          // Format: [@instance, @instanceMethod, @interfaceMethod]
+          auto ifaceMethodRef = llvm::cast<mlir::SymbolRefAttr>(arrayAttr[2]);
+          if (ifaceMethodRef.getLeafReference() == methodOrValueAttr.getLeafReference()) {
+            // Found the mapping - use the actual instance and method
+            auto instanceRef = llvm::cast<mlir::SymbolRefAttr>(arrayAttr[0]);
+            auto instanceMethodRef = llvm::cast<mlir::SymbolRefAttr>(arrayAttr[1]);
+
+            // Determine the call type using the resolved instance and method
+            CallType callType = determineCalleeType(callOp, currentModule, instanceRef, instanceMethodRef);
+            CallInfo info(instanceRef, instanceMethodRef, callType);
+            calls.push_back(info);
+            return; // Found and processed the interface call
+          }
+        }
+      }
+    }
+
+    // Not an interface call - process normally
     CallType callType = determineCalleeType(callOp, currentModule);
-    CallInfo info(callOp.getCalleeAttr(), callOp.getMethodOrValueAttr(), callType);
+    CallInfo info(calleeAttr, methodOrValueAttr, callType);
     calls.push_back(info);
   });
 
@@ -69,9 +99,9 @@ void CallInfoView::processEntity(mlir::Operation *entity,
   }
 }
 
-CallType CallInfoView::determineCalleeType(CallOp callOp, ModuleOp currentModule) {
-  mlir::SymbolRefAttr calleeInstance = callOp.getCalleeAttr();
-  mlir::SymbolRefAttr calleeEntity = callOp.getMethodOrValueAttr();
+CallType CallInfoView::determineCalleeType(CallOp callOp, ModuleOp currentModule,
+                                             mlir::SymbolRefAttr calleeInstance,
+                                             mlir::SymbolRefAttr calleeEntity) {
 
   // Find the target module where the callee entity is defined
   Cmt2ModuleLike targetModule = nullptr;
@@ -113,6 +143,10 @@ CallType CallInfoView::determineCalleeType(CallOp callOp, ModuleOp currentModule
 
   // Default to MethodCall if we can't determine
   return CallType::MethodCall;
+}
+
+CallType CallInfoView::determineCalleeType(CallOp callOp, ModuleOp currentModule) {
+  return determineCalleeType(callOp, currentModule, callOp.getCalleeAttr(), callOp.getMethodOrValueAttr());
 }
 
 const ModuleCallInfo *
