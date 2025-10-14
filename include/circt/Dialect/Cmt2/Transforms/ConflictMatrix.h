@@ -1,4 +1,4 @@
-//===- Cmt2ConflictMatrix.h - Cmt2 Conflict Matrix Analysis ----*- C++ -*-===//
+//===- ConflictMatrix.h - Conflict Matrix Analysis for Cmt2 ---*- C++ -*-===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
@@ -12,10 +12,10 @@
 //
 //===----------------------------------------------------------------------===//
 
-#ifndef CIRCT_DIALECT_CMT2_CMT2CONFLICTMATRIX_H
-#define CIRCT_DIALECT_CMT2_CMT2CONFLICTMATRIX_H
+#ifndef CIRCT_DIALECT_CMT2_TRANSFORMS_CONFLICTMATRIX_H
+#define CIRCT_DIALECT_CMT2_TRANSFORMS_CONFLICTMATRIX_H
 
-#include "circt/Dialect/Cmt2/Cmt2CallInfo.h"
+#include "circt/Dialect/Cmt2/Transforms/CallInfo.h"
 #include "circt/Dialect/Cmt2/Cmt2Ops.h"
 #include "circt/Support/LLVM.h"
 #include "mlir/IR/SymbolTable.h"
@@ -105,4 +105,4 @@ private:
 } // namespace cmt2
 } // namespace circt
 
-#endif // CIRCT_DIALECT_CMT2_CMT2CONFLICTMATRIX_H
+#endif // CIRCT_DIALECT_CMT2_TRANSFORMS_CONFLICTMATRIX_H

@@ -1,4 +1,4 @@
-//===- Cmt2InstanceGraph.h - Instance graph --------------------*- C++ -*-===//
+//===- InstanceGraph.h - Instance graph for Cmt2 --------------*- C++ -*-===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
@@ -6,12 +6,12 @@
 //
 //===----------------------------------------------------------------------===//
 //
-// This file defines the Cmt2 InstanceGraph.
+// This file defines the InstanceGraph analysis for the Cmt2 dialect.
 //
 //===----------------------------------------------------------------------===//
 
-#ifndef CIRCT_DIALECT_CMT2_CMT2INSTANCEGRAPH_H
-#define CIRCT_DIALECT_CMT2_CMT2INSTANCEGRAPH_H
+#ifndef CIRCT_DIALECT_CMT2_TRANSFORMS_INSTANCEGRAPH_H
+#define CIRCT_DIALECT_CMT2_TRANSFORMS_INSTANCEGRAPH_H
 
 #include "circt/Dialect/Cmt2/Cmt2Ops.h"
 #include "circt/Support/InstanceGraph.h"
@@ -60,4 +60,4 @@ struct llvm::DOTGraphTraits<circt::cmt2::InstanceGraph *>
   using llvm::DOTGraphTraits<circt::igraph::InstanceGraph *>::DOTGraphTraits;
 };
 
-#endif // CIRCT_DIALECT_CMT2_CMT2INSTANCEGRAPH_H
+#endif // CIRCT_DIALECT_CMT2_TRANSFORMS_INSTANCEGRAPH_H

@@ -1,4 +1,4 @@
-//===- Cmt2CallInfo.cpp - Call information for Cmt2 ----------------------===//
+//===- CallInfo.cpp - Call information analysis for Cmt2 -------*- C++ -*-===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
@@ -10,7 +10,7 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "circt/Dialect/Cmt2/Cmt2CallInfo.h"
+#include "circt/Dialect/Cmt2/Transforms/CallInfo.h"
 #include "mlir/IR/BuiltinOps.h"
 
 using namespace circt;

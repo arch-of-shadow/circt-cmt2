@@ -2,6 +2,9 @@ add_circt_dialect_library(CIRCTCmt2Transforms
   # GenerateConflictMatrix.cpp
   # InferRules.cpp
   Test.cpp
+  InstanceGraph.cpp
+  CallInfo.cpp
+  ConflictMatrix.cpp
   PrintInstanceGraph.cpp
   PrintCallInfo.cpp
   PrintConflictMatrix.cpp

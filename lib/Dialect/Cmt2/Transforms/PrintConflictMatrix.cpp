@@ -1,4 +1,4 @@
-//===- PrintConflictMatrix.cpp - Print Cmt2 Conflict Matrix ----*- C++ -*-===//
+//===- PrintConflictMatrix.cpp - Print Conflict Matrix ---------*- C++ -*-===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
@@ -10,7 +10,7 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "circt/Dialect/Cmt2/Cmt2ConflictMatrix.h"
+#include "circt/Dialect/Cmt2/Transforms/ConflictMatrix.h"
 #include "circt/Dialect/Cmt2/Cmt2Ops.h"
 #include "circt/Dialect/Cmt2/Cmt2Passes.h"
 #include "mlir/Pass/Pass.h"

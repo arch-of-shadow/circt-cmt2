@@ -12,7 +12,7 @@
 
 #include "circt/Dialect/Cmt2/Cmt2OpInterfaces.h"
 #include "circt/Dialect/Cmt2/Cmt2Ops.h"
-#include "circt/Dialect/Cmt2/Cmt2CallInfo.h"
+#include "circt/Dialect/Cmt2/Transforms/CallInfo.h"
 
 using namespace circt;
 using namespace cmt2;

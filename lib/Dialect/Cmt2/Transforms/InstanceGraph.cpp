@@ -1,4 +1,4 @@
-//===- Cmt2InstanceGraph.cpp - Instance Graph ------------------*- C++ -*-===//
+//===- InstanceGraph.cpp - Instance graph for Cmt2 -------------*- C++ -*-===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
@@ -6,7 +6,7 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "circt/Dialect/Cmt2/Cmt2InstanceGraph.h"
+#include "circt/Dialect/Cmt2/Transforms/InstanceGraph.h"
 #include "mlir/IR/BuiltinOps.h"
 
 using namespace circt;

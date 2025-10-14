@@ -1,4 +1,4 @@
-//===- Cmt2ConflictMatrix.cpp - Cmt2 Conflict Matrix Analysis --*- C++ -*-===//
+//===- ConflictMatrix.cpp - Conflict Matrix Analysis for Cmt2 --*- C++ -*-===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
@@ -6,9 +6,9 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "circt/Dialect/Cmt2/Cmt2ConflictMatrix.h"
-#include "circt/Dialect/Cmt2/Cmt2CallInfo.h"
-#include "circt/Dialect/Cmt2/Cmt2InstanceGraph.h"
+#include "circt/Dialect/Cmt2/Transforms/ConflictMatrix.h"
+#include "circt/Dialect/Cmt2/Transforms/CallInfo.h"
+#include "circt/Dialect/Cmt2/Transforms/InstanceGraph.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/PostOrderIterator.h"

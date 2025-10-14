@@ -1,4 +1,4 @@
-//===- Cmt2CallInfo.h - Call information for Cmt2 --------------*- C++ -*-===//
+//===- CallInfo.h - Call information analysis for Cmt2 --------*- C++ -*-===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
@@ -11,8 +11,8 @@
 //
 //===----------------------------------------------------------------------===//
 
-#ifndef CIRCT_DIALECT_CMT2_CMT2CALLINFO_H
-#define CIRCT_DIALECT_CMT2_CMT2CALLINFO_H
+#ifndef CIRCT_DIALECT_CMT2_TRANSFORMS_CALLINFO_H
+#define CIRCT_DIALECT_CMT2_TRANSFORMS_CALLINFO_H
 
 #include "circt/Dialect/Cmt2/Cmt2Ops.h"
 #include "mlir/IR/SymbolTable.h"
@@ -81,4 +81,4 @@ private:
 } // namespace cmt2
 } // namespace circt
 
-#endif // CIRCT_DIALECT_CMT2_CMT2CALLINFO_H
+#endif // CIRCT_DIALECT_CMT2_TRANSFORMS_CALLINFO_H
