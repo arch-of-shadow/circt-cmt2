@@ -19,9 +19,9 @@ builtin.module {
         argNames = ["write", "writeEnable", "clock"],
         comment = "",
         parameters = [],
-        resultNames = ["writeReady", "readReady", "ready"],
+        resultNames = ["writeReady", "readReady", "read"],
         sym_name = "Reg32",
-        module_type = !hw.modty<input write : i32, input writeEnable : i1, input clock : !seq.clock, output writeReady : i1, output readReady : i1, output ready : i32>
+        module_type = !hw.modty<input write : i32, input writeEnable : i1, input clock : !seq.clock, output writeReady : i1, output readReady : i1, output read : i32>
     } : () -> ()
     cmt2.circuit {
         // External register module with conflict matrix
@@ -53,21 +53,21 @@ builtin.module {
             }
 
             // Rule: swap x and y when x < y and y != 0
-            cmt2.rule @swap() -> i1 {
-                %0 = cmt2.call @x @read () : () -> (i32)
-                %1 = cmt2.call @y @read () : () -> (i32)
-                %2 = comb.icmp bin ult %0, %1 : i32
-                %3 = cmt2.call @this @doing () : () -> (i1)
-                %4 = comb.and %2, %3 : i1
-                cmt2.return %4 : i1
-            } {
-                %0 = cmt2.call @x @read () : () -> (i32)
-                %1 = cmt2.call @y @read () : () -> (i32)
+            // cmt2.rule @swap() -> i1 {
+            //     %0 = cmt2.call @x @read () : () -> (i32)
+            //     %1 = cmt2.call @y @read () : () -> (i32)
+            //     %2 = comb.icmp bin ult %0, %1 : i32
+            //     %3 = cmt2.call @this @doing () : () -> (i1)
+            //     %4 = comb.and %2, %3 : i1
+            //     cmt2.return %4 : i1
+            // } {
+            //     %0 = cmt2.call @x @read () : () -> (i32)
+            //     %1 = cmt2.call @y @read () : () -> (i32)
 
-                cmt2.call @x @write (%1) : (i32) -> ()
-                cmt2.call @y @write (%0) : (i32) -> ()
-                cmt2.return
-            }
+            //     cmt2.call @x @write (%1) : (i32) -> ()
+            //     cmt2.call @y @write (%0) : (i32) -> ()
+            //     cmt2.return
+            // }
 
             // Rule: subtract y from x when x >= y and y != 0
             cmt2.rule @sub() -> i1 {
