@@ -124,10 +124,10 @@ build/bin/circt-opt test/Dialect/Cmt2/instance-graph.mlir
 
 #### TODO List
 
-- [x] Add InstanceGraph interfaces to Cmt2 operations (ModuleOp, ExtModuleHwOp, InstanceOp)
-- [x] Create Cmt2InstanceGraph class and implementation
-- [x] Add PrintInstanceGraph pass for testing
-- [x] Create hierarchical test case and verify functionality
+- [x] InstanceGraph interfaces (ModuleOpInterface, InstanceOpInterface)
+- [x] Cmt2InstanceGraph class
+- [x] PrintInstanceGraph pass
+- [x] Test case (instance-graph.mlir)
 
 ### CallInfo Analysis
 
@@ -170,10 +170,10 @@ build/bin/circt-opt test/Dialect/Cmt2/gcd.mlir -cmt2-print-call-info
 
 #### TODO List
 
-- [x] Design CallInfo data structure (CallType enum, CallInfo struct, ModuleCallInfo, CallInfoView)
-- [x] Create Cmt2CallInfo.h and Cmt2CallInfo.cpp with analysis implementation
-- [x] Add PrintCallInfo pass to print call information
-- [x] Test with gcd.mlir and verify output
+- [x] CallInfo data structures (CallType, CallInfo, ModuleCallInfo, CallInfoView)
+- [x] Analysis implementation (Cmt2CallInfo.h/cpp)
+- [x] PrintCallInfo pass
+- [x] Testing with gcd.mlir
 
 ### Better Parse/Print Support
 
@@ -206,52 +206,22 @@ build/bin/circt-opt test/Dialect/Cmt2/gcd.mlir
 
 #### TODO List
 
-**Phase 1: Module-like Operations (ModuleOp, ExtModuleHwOp)**
-- [x] Study hw.module parse/print implementation in HWOps.cpp
-- [x] Add argNames attribute to ModuleOp/ExtModuleHwOp
-- [x] Remove assemblyFormat, add hasCustomAssemblyFormat = 1
-- [x] Implement custom parse() for ModuleOp (parse port list, attributes, body)
-- [x] Implement custom print() for ModuleOp (print in hw.module style)
-- [x] Implement custom parse() for ExtModuleHwOp
-- [x] Implement custom print() for ExtModuleHwOp
-- [x] Add getAsmBlockArgumentNames() for proper naming
-- [x] Fix parseArgumentList() for comma-separated argument parsing
-- [x] Support trailing attribute dict (without 'attributes' keyword)
-- [x] Build successful
-- [x] Test ModuleOp/ExtModuleHwOp parsing with updated gcd.mlir
+**Phase 1: Module-like Operations**
+- [x] hw.module-style custom parse/print for ModuleOp/ExtModuleHwOp
+- [x] argNames attribute and argument list parsing
+- [x] Build and test with gcd.mlir
 
-**Phase 2: Function-like Operations (RuleOp, MethodOp, ValueOp, BindMethodOp, BindValueOp)**
-- [x] Study handshake.func parse/print implementation
-- [x] Add function_type attribute to RuleOp (MethodOp and ValueOp already had it)
-- [x] Verify BindMethodOp and BindValueOp use assemblyFormat effectively
-- [x] Update gcd.mlir to include function_type for all RuleOp instances
-- [x] Test function-like operations parsing
-- [x] Implement custom parse/print with shared argument lists for two-region operations
-- [x] Add Cmt2FunctionLike interface with FunctionOpInterface-compatible features
-- [x] Add arg_attrs and res_attrs attributes to all function-like operations
-- [x] Implement comprehensive interface methods for type manipulation, body handling, and attribute access
+**Phase 2: Function-like Operations**
+- [x] handshake.func-style custom parse/print with shared arguments
+- [x] Cmt2FunctionLike interface (FunctionOpInterface-compatible for two-region ops)
+- [x] arg_attrs and res_attrs support
+- [x] Comprehensive interface methods (type manipulation, body handling, attribute access)
 
-Note: Function-like operations (RuleOp, MethodOp, ValueOp) now support handshake.func-style syntax with shared arguments for both guard and body regions: `cmt2.method @start(%a: i32, %b: i32) -> () { guard } { body }`. The Cmt2FunctionLike interface provides full FunctionOpInterface-compatible features while supporting two-region operations, which FunctionOpInterface cannot handle.
+**Phase 3: Integration**
+- [x] Update gcd.mlir to new syntax
+- [x] Test complete workflow
 
-**Phase 3: Integration and Testing**
-- [x] Update gcd.mlir to use new syntax (ModuleOp, ExtModuleHwOp, RuleOp)
-- [x] Test complete file with circt-opt
-- [x] Verify all operations work correctly
-
-Phase 1, 2, and 3 are complete! The "Better Parse/Print Support" task has been successfully implemented with:
-- Custom parse/print for ModuleOp and ExtModuleHwOp (hw.module-style with argument lists)
-- Custom parse/print for function-like operations with handshake.func-style shared argument syntax
-- Cmt2FunctionLike interface providing comprehensive FunctionOpInterface-compatible features:
-  - Symbol name handling, function kind identification
-  - Type queries and manipulation methods
-  - Body/region handling (isExternal, getFunctionBody)
-  - Argument/result counts and attribute access
-  - Support for both two-region operations (RuleOp, MethodOp, ValueOp) and no-region operations (BindMethodOp, BindValueOp)
-- arg_attrs and res_attrs attributes for all function-like operations
-- Consistent syntax across all operations
-- Successful parsing and printing with gcd.mlir test case
-
-Key achievement: Unlike FunctionOpInterface which requires single-region operations, Cmt2FunctionLike supports two-region operations (guard and body) while maintaining full compatibility with FunctionOpInterface patterns.
+**Key Achievement:** Cmt2FunctionLike interface supports two-region operations (guard + body) while maintaining full FunctionOpInterface compatibility - something FunctionOpInterface itself cannot handle.
 
 ### Inline Transform
 
@@ -281,47 +251,19 @@ build/bin/circt-opt test/Dialect/Cmt2/inline.mlir -cmt2-inline-modules | build/b
 
 #### TODO List
 
-- [x] Study FIRRTL ModuleInliner implementation
-- [x] Design simplified Cmt2 module inlining strategy
-- [x] Implement Cmt2ModuleInliner pass (lib/Dialect/Cmt2/Transforms/ModuleInliner.cpp)
-- [x] Create test case with synthesis attribute (test/Dialect/Cmt2/inline.mlir, inline-simple.mlir)
-- [x] Debug and fix SSA value use-def issues in the inline transform
-- [x] Fix operand remapping when cloning instances
-- [x] Fix symbol reference remapping in cloned CallOps
-- [x] Test and verify successful inlining
-- [x] Subinstances' name resolution: When inlining a module `Leaf`, which is instantiated as `@leaf` in module `Parent`, its instance `@x` is cloned to `Parent` with the updated instance name `@leaf.x`. The hierarchical name uses `.` as a separator and is implemented as a StringAttr, preserving the hierarchy path for debugging and analysis purposes.
+- [x] Cmt2ModuleInliner pass implementation
+- [x] Hierarchical instance naming (`@leaf.storage` for subinstances)
+- [x] SSA value and operand remapping with IRMapping
+- [x] CallOp symbol reference remapping
+- [x] Test cases (inline.mlir)
 
 **Status: ✅ COMPLETE**
 
-The module inliner pass has been successfully implemented and tested with the following features:
-
-**Features:**
-- Identifies modules that should NOT be inlined: top-level modules (modules with no uses), external modules (ExtModuleHwOp), and modules with `synthesis=true` attribute
-- Inlines modules iteratively until no more inlining is possible by:
-  1. Mapping module block arguments to instance operands (crucial for correct SSA value mapping)
-  2. Cloning subinstances from target module to parent with proper operand mapping and **hierarchical naming**
-  3. Tracking instance name mappings for updating CallOp references
-  4. Inlining calls to the instance's methods/values by cloning method/value bodies
-  5. Remapping CallOp callee references to point to cloned instances with hierarchical names
-  6. Removing the inlined instance
-- Removes unused modules after all inlining is complete
-- **Hierarchical Instance Naming**: When inlining module `@Leaf` instantiated as `@leaf`, its subinstance `@storage` is renamed to `@leaf.storage`, preserving the full instantiation path for clarity and avoiding name conflicts
-
-**Key Implementation Details:**
-- Uses `IRMapping` to map SSA values during cloning
-- Uses `DenseMap<StringAttr, StringAttr>` to map instance names for CallOp remapping
-- Properly handles module block arguments by mapping them to instance operands before cloning
-- Updates CallOp callee symbols to reference cloned instances
-
-**Test Results:**
-Both test cases pass successfully:
-- `test/Dialect/Cmt2/inline.mlir` - Multi-level hierarchical inlining
-
-**Files Modified:**
-- `include/circt/Dialect/Cmt2/Cmt2Passes.td` - Added ModuleInliner pass definition
-- `lib/Dialect/Cmt2/Transforms/ModuleInliner.cpp` - Main implementation (~320 lines)
-- `lib/Dialect/Cmt2/Transforms/CMakeLists.txt` - Added ModuleInliner.cpp to build
-- `test/Dialect/Cmt2/inline.mlir` - Test case with multi-level module hierarchy
+**Key Features:**
+- Identifies modules to NOT inline: top-level, external, or `synthesis=true`
+- Iterative inlining: subinstances → call inlining → instance removal
+- Hierarchical naming preserves instantiation paths
+- Removes unused modules after inlining
 
 
 ### ConflictMatrix Analysis
@@ -358,57 +300,20 @@ build/bin/circt-opt test/Dialect/Cmt2/gcd.mlir -cmt2-print-conflict-matrix
 
 #### TODO List
 
-- [x] Design ConflictMatrix data structure (Relationship enum, ModuleConflictMatrix, ConflictMatrixAnalysis)
-- [x] Create Cmt2ConflictMatrix.h and Cmt2ConflictMatrix.cpp with analysis implementation
-- [x] Parse conflict matrix attributes from ExtModuleHwOp (conflict, conflictFree, sequenceBefore)
-- [x] Implement topological order traversal for bottom-up analysis
-- [x] Implement inference rules for conflict relationships
-- [x] Add PrintConflictMatrix pass to print conflict matrices
-- [x] Test with gcd.mlir and verify conflict matrix output
+- [x] ConflictMatrix data structures (Relationship enum, ModuleConflictMatrix, ConflictMatrixAnalysis)
+- [x] Parse conflict attributes from ExtModuleHwOp (conflict, conflictFree, sequenceBefore)
+- [x] Implement four inference rules (conflict propagation, SB propagation, merge, default CF)
+- [x] Topological order traversal (bottom-up analysis)
+- [x] PrintConflictMatrix pass
+- [x] Testing with gcd.mlir
 
 **Status: ✅ COMPLETE**
 
-The conflict matrix analysis has been successfully implemented and tested with the following features:
-
-**Features:**
-- Parses conflict matrices from external modules via attributes:
-  - `conflict`: [[@f1, @f2], ...] - functions that cannot execute in the same cycle
-  - `conflictFree`: [[@f1, @f2], ...] - functions that can execute in any order
-  - `sequenceBefore`: [[@f1, @f2], ...] - f1 must execute before f2
-- Infers conflict matrices for regular modules using four inference rules:
-  1. If `i.m0 <> i.m1` in instance's module, then `fx <> fy` (Conflict propagation)
-  2. If `i.m0 < i.m1` in instance's module, then `fx < fy` (Sequential Before propagation)
-  3. If `fx < fy` AND `fy < fx`, then `fx <> fy` (Merge to Conflict)
-  4. Default to ConflictFree if no relationships inferred
-- Analyzes modules in topological order (bottom-up) to ensure submodules are analyzed first
-- Collects calls from both guard and body regions of functions
-- Prints conflict matrices in human-readable format grouped by relationship type
-
-**Key Implementation Details:**
-- Uses `ModuleConflictMatrix` to store relationships for each module
-- Uses normalized function pairs (sorted order) for consistent lookup
-- Implements topological sort using dependency tracking
-- Handles external modules (ExtModuleHwOp) and regular modules (ModuleOp)
-
-**Test Results:**
-Successfully tested with `test/Dialect/Cmt2/gcd.mlir`:
-- External module `@reg`: correctly parsed conflict, sequenceBefore, and conflictFree relationships
-- Module `@gcd`: correctly inferred conflicts between rules/methods/values based on their calls to instance methods
-
-Example inferred relationships:
-- `@start <> @swap`: both call `@write` on instances, and `@write <> @write` in `@reg`
-- `@result / @sub`: conflict-free because they call different methods/instances
-- `@doing / @result`: conflict-free because both only call `@read`, which is conflict-free with itself
-
-**Files Created:**
-- `include/circt/Dialect/Cmt2/Cmt2ConflictMatrix.h` - Header file with data structures
-- `lib/Dialect/Cmt2/Cmt2ConflictMatrix.cpp` - Main analysis implementation (~400 lines)
-- `lib/Dialect/Cmt2/Transforms/PrintConflictMatrix.cpp` - Print pass implementation
-
-**Files Modified:**
-- `include/circt/Dialect/Cmt2/Cmt2Passes.td` - Added PrintConflictMatrix pass definition
-- `lib/Dialect/Cmt2/CMakeLists.txt` - Added Cmt2ConflictMatrix.cpp to build
-- `lib/Dialect/Cmt2/Transforms/CMakeLists.txt` - Added PrintConflictMatrix.cpp to build
+**Key Features:**
+- Parses conflict matrices from external modules via attributes
+- Infers relationships for regular modules using 4 inference rules
+- Bottom-up analysis (topological order)
+- Three relationships: Conflict (<>), SequentialBefore (<), ConflictFree (/)
 
 ### PrivateFunc Analysis and Transform
 
@@ -429,72 +334,18 @@ build/bin/circt-opt test/Dialect/Cmt2/gcd.mlir -cmt2-inline-private-funcs
 
 #### TODO List
 
-- [x] Design PrivateFuncAnalysis data structure
-- [x] Create PrivateFuncAnalysis.h and PrivateFuncAnalysis.cpp with analysis implementation
-- [x] Implement private function identification using CallInfo
-- [x] Add InlinePrivateFuncs pass definition to Cmt2Passes.td
-- [x] Create InlinePrivateFuncs transform pass implementation
-- [x] Update CMakeLists.txt files
-- [x] Test with gcd.mlir and verify private function inlining
+- [x] PrivateFuncAnalysis (identify functions only called via `@this`)
+- [x] InlinePrivateFuncs transform pass
+- [x] Function body inlining with IRMapping
+- [x] Testing with gcd.mlir (`@doing` inlined)
 
 **Status: ✅ COMPLETE**
 
-The private function analysis and transform has been successfully implemented and tested with the following features:
-
-**Features:**
-- Identifies private functions in each module:
-  - A private function is a method or value that is ONLY called via `@this` instance
-  - All calls must be from functions in the same module
-  - If a function is called from outside the module or from a different instance, it's not private
-- Inlines private functions by:
-  1. Identifying all private functions using the PrivateFuncAnalysis
-  2. For each private function, finding all call sites (CallOps with `@this` callee)
-  3. Cloning the function body at each call site with proper SSA value mapping
-  4. Replacing the call results with the inlined results
-  5. Removing the private function definition after all calls are inlined
-
-**Key Implementation Details:**
-- Uses `PrivateFuncAnalysis` class to identify private functions
-- Analyzes CallInfo to determine which functions are called and from where
-- Supports both MethodOp and ValueOp private functions
-- Uses `IRMapping` to map function arguments to call inputs during inlining
-- Properly handles SSA values and maintains correctness
-
-**Test Results:**
-Successfully tested with `test/Dialect/Cmt2/gcd.mlir`:
-- Function `@doing` was correctly identified as a private function (only called via `@this`)
-- All calls to `@doing` in rules `@swap`, `@sub`, and methods `@start`, `@result` were inlined
-- The inlined code correctly reads from `@y @read` and checks if it's not equal to 0
-- The `@doing` function definition was removed after inlining
-
-Example transformation:
-```mlir
-// Before (original @doing function):
-cmt2.value @doing() -> (i1) {} {
-  %y = cmt2.call @y @read () : () -> (i32)
-  %0 = hw.constant 0: i32
-  %1 = comb.icmp ne %y, %0 : i32
-  cmt2.return %1 : i1
-}
-
-// Before (call site in @swap rule):
-%3 = cmt2.call @this @doing () : () -> (i1)
-
-// After (inlined at call site):
-%3 = cmt2.call @y @read() : () -> i32
-%c0_i32 = hw.constant 0 : i32
-%4 = comb.icmp ne %3, %c0_i32 : i32
-// %4 is used instead of %3
-```
-
-**Files Created:**
-- `include/circt/Dialect/Cmt2/Transforms/PrivateFuncAnalysis.h` - Header file for private function analysis
-- `lib/Dialect/Cmt2/Transforms/PrivateFuncAnalysis.cpp` - Analysis implementation (~150 lines)
-- `lib/Dialect/Cmt2/Transforms/InlinePrivateFuncs.cpp` - Transform pass implementation (~160 lines)
-
-**Files Modified:**
-- `include/circt/Dialect/Cmt2/Cmt2Passes.td` - Added InlinePrivateFuncs pass definition
-- `lib/Dialect/Cmt2/Transforms/CMakeLists.txt` - Added PrivateFuncAnalysis.cpp and InlinePrivateFuncs.cpp to build
+**Key Features:**
+- Identifies private functions (only called via `@this` in same module)
+- Inlines function bodies at call sites with proper SSA mapping
+- Removes private function definitions after inlining
+- Supports both MethodOp and ValueOp
 
 ### Interface Support
 
@@ -537,79 +388,18 @@ build/bin/circt-opt test/Dialect/Cmt2/interface-inline.mlir -cmt2-inline-modules
 
 #### TODO List
 
-- [x] Understand interface mechanism (InterfaceOp, InterfaceDefOp, InterfaceDeclOp, interface_binds)
-- [x] Update CallInfo analysis to resolve interface calls to actual instance.method pairs
-- [x] Verify ConflictMatrix analysis works with updated CallInfo (it automatically benefits)
-- [x] Update ModuleInliner to handle interface bindings during module inlining
-- [x] Verify PrivateFuncInliner works correctly (no changes needed)
-- [x] Test all analyses and transforms with gcd.mlir
-- [x] Create comprehensive interface-inline.mlir test case
-- [x] Test CallInfo, ConflictMatrix, and ModuleInliner with interface-inline.mlir
+- [x] Update CallInfo to resolve interface calls (InterfaceDefOp → instance.method)
+- [x] Update ModuleInliner to handle interface bindings (interface_binds remapping)
+- [x] Test with gcd.mlir and interface-inline.mlir
+- [x] ConflictMatrix and PrivateFuncInliner (no changes needed - work automatically)
 
 **Status: ✅ COMPLETE**
 
-The interface support has been successfully implemented with the following key changes:
-
-**Understanding:**
-- **InterfaceOp**: Defines an interface with method/value signatures (e.g., `@Read` with `@read` method)
-- **InterfaceDefOp**: Maps interface methods to actual instance.method pairs (e.g., `@ReadX : @Read [[@x, @read, @read]]`)
-- **InterfaceDeclOp**: Declares that a module requires an interface parameter (e.g., `@reader : @Read`)
-- **InstanceOp with interface_binds**: Binds interface definitions to declarations during instantiation
-
-**Implementation:**
-- **CallInfo Analysis**: Updated to resolve interface calls to actual instance.method pairs
-  - When a CallOp references an InterfaceDefOp (e.g., `cmt2.call @ReadX @read()`), the analysis resolves it to the actual instance and method (e.g., `@x.@read`)
-  - The resolution happens during analysis building by looking up InterfaceDefOp and extracting the mapping from the `methods` attribute
-  - Format: [[@instance, @instanceMethod, @interfaceMethod], ...] where the third element matches the call's method
-  - Once resolved, the CallInfo stores the actual instance and method, making the rest of the analysis infrastructure transparent to interfaces
-
-- **ConflictMatrix Analysis**: No changes needed - automatically benefits from CallInfo's interface resolution
-
-- **ModuleInliner**: Updated to handle interface bindings during module inlining
-  - When inlining a module instance, extract `interface_binds` attribute to build an `interfaceBindingMap` (interfaceDecl -> interfaceDef)
-  - During CallOp cloning, remap interface declaration references to interface definition references
-  - Two-stage remapping: first remap interface declarations, then remap to hierarchical instance names if needed
-  - Format of interface_binds: [[@interfaceDef, @interfaceDecl], ...] where interfaceDecl is from child module and interfaceDef is from parent
-
-- **PrivateFuncInliner**: No changes needed - works correctly with interface-using functions
-
-**Test Results:**
-All analyses and transforms tested successfully with `test/Dialect/Cmt2/gcd.mlir`:
-- CallInfo correctly analyzes calls (interface resolution code path tested but gcd.mlir has no actual interface method calls in functions)
-- ConflictMatrix produces correct conflict relationships
-- ModuleInliner handles modules with interface definitions
-- PrivateFuncInliner correctly inlines `@doing` value method
-
-Comprehensive testing with `test/Dialect/Cmt2/interface-inline.mlir`:
-- **Test case structure**:
-  - `@child` module with `@reader` interface declaration (InterfaceDeclOp)
-  - `@child` has `@process` method and `@doubleData` value that call through `@reader @getData`
-  - `@parent` module defines `@StorageReader` interface (InterfaceDefOp) binding to `@storage` instance
-  - `@parent` instantiates `@child` with interface binding: `with [[@StorageReader, @reader]]`
-  - `@compute` rule in `@parent` calls `@processor @process` and `@processor @doubleData`
-- **CallInfo test**: Shows `@process` and `@doubleData` in `@child` call `@reader @getData` (not yet resolved - correct for modules with InterfaceDeclOp)
-- **ConflictMatrix test**: Correctly analyzes conflict relationships
-- **ModuleInliner test**: Successfully inlines `@child` into `@parent`
-  - Removes `@processor` instance
-  - Inlines `@process` and `@doubleData` bodies into `@compute` rule
-  - Remaps `@reader @getData` calls to `@StorageReader @getData` using interface binding
-  - Removes unused `@child` module
-  - Result: `@compute` now directly calls `@StorageReader @getData` (interface definition in parent)
-
-**Files Modified:**
-- `include/circt/Dialect/Cmt2/Transforms/CallInfo.h` - Added overloaded `determineCalleeType` method
-- `lib/Dialect/Cmt2/Transforms/CallInfo.cpp` - Implemented interface resolution logic in `processEntity` method (~30 lines added)
-- `lib/Dialect/Cmt2/Transforms/ModuleInliner.cpp` - Added interface binding support (~50 lines modified/added)
-
-**Files Created:**
-- `test/Dialect/Cmt2/interface-inline.mlir` - Comprehensive test case demonstrating interface mechanism with module inlining (~105 lines)
-
-**Key Technical Details:**
-- Interface resolution is performed by looking up InterfaceDefOp using the callee symbol
-- The `methods` attribute is an ArrayAttr of ArrayAttrs with format [instance, instanceMethod, interfaceMethod]
-- Matching is done by comparing the interfaceMethod with the CallOp's methodOrValue
-- Once matched, the actual instance and method are used for CallInfo and call type determination
-- This design keeps interface resolution at the analysis layer, not requiring IR transformation
+**Key Features:**
+- **CallInfo**: Resolves interface calls to actual instance.method pairs during analysis
+- **ModuleInliner**: Remaps interface declarations to definitions during inlining using `interface_binds`
+- **Test**: interface-inline.mlir demonstrates `@child` inlining with `@reader` interface remapped to `@StorageReader`
+- Interface mechanism: InterfaceOp (signature) → InterfaceDefOp (mapping) → InterfaceDeclOp (parameter) → interface_binds (instantiation)
 
 
 ### Attributes
@@ -626,41 +416,18 @@ Note that, these attributes don't need to be arguments of the operations. Howeve
 
 #### TODO List
 
-- [x] Remove unused `explicit` attributes from Cmt2Ops.td (RuleOp, MethodOp, ValueOp)
-- [x] Add optional attribute support to Cmt2FunctionLike interface
-- [x] Implement getter/setter methods for readyName and enableName
-- [x] Build and test the changes
+- [x] Remove unused `explicit` attributes from Cmt2Ops.td
+- [x] Add optional `readyName` and `enableName` to Cmt2FunctionLike
+- [x] Implement getter/setter methods in Cmt2OpInterfaces.td
+- [x] Build and test
 
 **Status: ✅ COMPLETE**
 
-The attributes task has been successfully implemented with the following changes:
-
-**Changes Made:**
-1. **Removed `explicit` attributes**: Cleaned up unused `explicit` attribute documentation from RuleOp (Cmt2Ops.td:433-434), ValueOp (Cmt2Ops.td:499-500), and MethodOp (Cmt2Ops.td:561-562) descriptions
-2. **Added optional attributes to Cmt2FunctionLike**: Added `readyName` and `enableName` optional attributes that can be set on any Cmt2FunctionLike operation (RuleOp, MethodOp, ValueOp, BindMethodOp, BindValueOp)
-3. **Implemented interface methods** in `Cmt2OpInterfaces.td`:
-   - `getReadyNameAttr()` - Returns StringAttr or nullptr
-   - `getReadyName()` - Returns StringRef (empty if not set)
-   - `setReadyNameAttr(StringAttr)` - Sets the ready signal name
-   - `removeReadyName()` - Removes the attribute
-   - `getEnableNameAttr()` - Returns StringAttr or nullptr
-   - `getEnableName()` - Returns StringRef (empty if not set)
-   - `setEnableNameAttr(StringAttr)` - Sets the enable signal name
-   - `removeEnableName()` - Removes the attribute
-
-**Implementation Details:**
-- Attributes are stored as optional attributes on operations (not as operation arguments)
-- Methods use `$_op->getAttr()` and `$_op->setAttr()` to access/modify attributes
-- All methods are inline implementations in the interface definition
-- Compatible with all Cmt2FunctionLike operations
-
-**Files Modified:**
-- `include/circt/Dialect/Cmt2/Cmt2Ops.td` - Removed explicit attribute documentation
-- `include/circt/Dialect/Cmt2/Cmt2OpInterfaces.td` - Added readyName/enableName methods to Cmt2FunctionLike
-
-**Testing:**
-- Build successful
-- Verified with `circt-opt test/Dialect/Cmt2/gcd.mlir` - parses and prints correctly
+**Key Features:**
+- Removed unused `explicit` attribute documentation
+- Added `readyName` and `enableName` optional attributes to Cmt2FunctionLike
+- Interface methods: get/set/remove for both attributes
+- Works with all Cmt2FunctionLike operations (RuleOp, MethodOp, ValueOp, BindMethodOp, BindValueOp)
 
 ### Scheduler Analysis
 
@@ -703,98 +470,92 @@ build/bin/circt-opt test/Dialect/Cmt2/gcd.mlir -cmt2-print-scheduler
 
 #### TODO List
 
-- [x] Design Scheduler data structures (ScheduleGroup, SchedulerResult)
-- [x] Implement union-find for grouping conflict-free functions
+- [x] Scheduler data structures (ScheduleGroup, ModuleScheduleResult)
+- [x] Union-find for grouping conflict-free functions
 - [x] Parse precedence attribute from ModuleOp
-- [x] Implement optimization solver for each group (topological sort with precedence)
-- [x] Create Scheduler analysis class (Cmt2Scheduler.h/cpp)
-- [x] Add PrintScheduler pass for testing
-- [x] Test with gcd.mlir
+- [x] Greedy topological sort (hard constraints: precedence, soft: SequentialBefore)
+- [x] Private function detection and warning
+- [x] Preventing Firing analysis (violation reporting)
+- [x] PrintScheduler pass and testing with gcd.mlir
 
 **Status: ✅ COMPLETE**
 
-The scheduler analysis has been successfully implemented with the following features:
+**Key Features:**
+- **Private function detection**: Warns and filters out functions only called via `@this`
+- **Grouping**: Union-find groups functions with Conflict/SequentialBefore relationships
+- **Optimization**: Greedy topological sort that never violates precedence (<<) and minimizes SequentialBefore (<) violations
+- **Preventing Firing**: Reports all violations where `c[i] > c[j]` but `f[i] < f[j]` or `f[i] <> f[j]`
+- **Input**: ConflictMatrix + precedence attribute → **Output**: Ordered function groups
 
-**Features:**
-- **Private Function Detection**: Automatically detects and filters out private functions (functions only called via `@this`)
-  - Warns when private functions are found and suggests running `-cmt2-inline-private-funcs` first
-  - Excludes private functions from scheduling to ensure correct analysis
-- Collects all non-private functions (rules/methods/values) in each module
-- Uses ConflictMatrix analysis to determine relationships between functions
-- Parses precedence constraints from module's `precedence` attribute
-- Groups functions using union-find:
-  - Functions with Conflict or SequentialBefore relationships must be in the same group
-  - Functions in different groups are conflict-free and can be scheduled independently
-- Solves scheduling optimization problem within each group:
-  - **Hard constraints**: Precedence relationships (fi << fj) from module attributes - must never violate
-  - **Soft constraints**: SequentialBefore relationships (fi < fj) from conflict matrix - minimize violations
-  - Uses greedy topological sort to find optimal ordering
-  - At each step, picks the candidate that maximizes satisfied soft constraints
-  - Produces ordered function lists that never violate precedence and minimize SequentialBefore violations
-- **Preventing Firing Analysis**: Reports all violations where `c[i] > c[j]` but `f[i] < f[j]` or `f[i] <> f[j]`
-  - Shows which functions are scheduled in wrong order relative to their relationships
-  - Displays relationship type (SequentialBefore or Conflict) for each violation
-  - Provides total violation count for quick assessment
+### Cmt2ToHw Conversion
 
-**Key Implementation Details:**
-- `UnionFind` class embedded in SchedulerAnalysis for efficient grouping
-- `ScheduleGroup` class holds ordered functions in a group
-- `ModuleScheduleResult` contains all schedule groups for a module
-- `SchedulerAnalysis` class runs complete analysis on circuit
-- Greedy topological sort algorithm:
-  1. Hard constraints from precedence chains (fi << fj) - must never violate
-  2. Soft constraints from SequentialBefore relationships (fi < fj) - minimize violations
-  3. Greedy selection: at each step, pick candidate that satisfies most soft constraints
-- Ensures no cycles in hard constraints with proper error handling
+#### Spec
 
-**Algorithm:**
-1. **Collect functions**: Gather all Cmt2FunctionLike operations in module
-2. **Get conflict matrix**: Retrieve relationships from ConflictMatrixAnalysis
-3. **Parse precedence**: Extract precedence chains from module attribute
-4. **Group with union-find**:
-   - Unite functions with Conflict or SequentialBefore relationships
-   - Assign group IDs to connected components
-5. **Solve each group** (optimization problem):
-   - Build hard constraint graph from **precedence constraints only** (fx << fy)
-   - Build soft constraint map from **SequentialBefore relationships** (fi < fj)
-   - Use greedy topological sort:
-     * At each step, find all candidates (functions with no unsatisfied precedence constraints)
-     * Among candidates, pick the one that maximizes satisfied SequentialBefore preferences
-     * Score = number of unscheduled functions that this function should precede
-     * This minimizes violations of fi < fj relationships
-   - Report ordered function list that:
-     * **Never violates** precedence constraints (fi << fj)
-     * **Minimizes violations** of SequentialBefore preferences (fi < fj)  
+For each `cmt2` module, we need to convert it into a `hw.module`.
 
-**Test Results:**
-Successfully tested with `test/Dialect/Cmt2/gcd.mlir`:
-- **Private Function Warning**: Correctly detects `@doing` as a private function and warns:
-  ```
-  Warning: Module @gcd contains private functions that should be inlined before scheduling:
-    @doing
-  Run -cmt2-inline-private-funcs before scheduling.
-  ```
-- Module `@placeholder`: Empty (no functions) - No violations
-- Module `@gcd`: Non-private functions grouped together `[@swap, @sub, @start, @result]`
-  - Functions have conflicts through their calls to `@x @write` and `@y @write`
-  - Single group indicates they must be carefully scheduled
-  - **Preventing Firing Analysis** reports 5 violations:
-    - `@sub` scheduled before `@swap` (violates: swap <> sub)
-    - `@start` scheduled before `@swap` (violates: swap <> start)
-    - `@start` scheduled before `@sub` (violates: sub <> start)
-    - `@result` scheduled before `@swap` (violates: swap <> result)
-    - `@result` scheduled before `@start` (violates: start <> result)
+How to do?
 
-**Files Created:**
-- `include/circt/Dialect/Cmt2/Transforms/Scheduler.h` - Header with data structures and analysis class
-- `lib/Dialect/Cmt2/Transforms/Scheduler.cpp` - Main implementation (~320 lines)
-- `lib/Dialect/Cmt2/Transforms/PrintScheduler.cpp` - Print pass implementation
+For every module, run Scheduler analysis to get the schedule solution.
 
-**Files Modified:**
-- `include/circt/Dialect/Cmt2/Cmt2Passes.td` - Added PrintScheduler pass definition
-- `lib/Dialect/Cmt2/Transforms/CMakeLists.txt` - Added Scheduler.cpp and PrintScheduler.cpp to build
+For a group in a schedule, generate logic for its included functions in order. For current function `fi`:
+- Do a checking, fetch the called functions in `fi` as a sequence. If there are conflicts or "sequence before violations" (that is `fx < fy` but fy is called before fx). Raise an error messasge.
+- Construct the `guard` logic and the `body` logic. This should replace `cmt2.call` operations with signal assignments. Calling a method should assign `1` to `enable`. Argument signals and results should be connected, either.
+- Generate a `ready` signal (whose name is either specified in the function's attributes, or default to `<funcName>_ready`). The `ready` signal's value is define by `AND` the following:
+  - the guard result
+  - the `ready` signals of called functions
+  - `NOT` (any preceding functions with conflicts fired). This is determined by the ConflixMatrix. Two conflict cases: `Conflict` and `Sequence Before` violation.
+- If `fi` is a method, also generate an `enable` signal (with the similar naming convention).
+- Generate a `fire` signal. For value/rule, it's equal to the `ready` signal. For method, it's equal to the `ready AND enable`.
+- Insert the `guard` and `body` logic to the module. The `body` logic should be guarded by the `fire` signal.
+- The interface mechanism needs special processing.
 
-**Command to test:**
+You can look at:
+- `lib/Conversion/CalyxToHW/CalyxToHW.cpp`
+- `lib/Conversion/FIRRTLToHW/LowerToHW.cpp`
+- and other conversions
+
+to learn how to write a conversion.
+
+You should test on `test/Dialect/Cmt2/gcd.mlir` with the command:
 ```shell
-build/bin/circt-opt test/Dialect/Cmt2/gcd.mlir -cmt2-print-scheduler
+# Test basic conversion
+build/bin/circt-opt --lower-cmt2-to-hw test/Conversion/Cmt2ToHW/basic.mlir
+
+# Test method and value conversion
+build/bin/circt-opt -cmt2-inline-private-funcs --lower-cmt2-to-hw test/Conversion/Cmt2ToHW/method-value.mlir
 ```
+
+#### TODO List
+
+**Infrastructure:**
+- [x] Pass definition, header, build integration
+- [x] SignalTracker (ready/enable/fire signals, body results)
+- [x] ModuleConversionContext (per-module state with IRMapping)
+- [x] Integration with Scheduler, ConflictMatrix, CallInfo
+
+**Core Logic:**
+- [x] Guard/body region cloning with globalMapping
+- [x] cmt2.call conversion to signal references
+- [x] Signal generation: ready (guard AND called ready AND NOT conflicts), enable (methods), fire (ready or ready AND enable)
+- [x] Output ports: methods (enable in, ready out), values (ready out, data outs), rules (none)
+- [x] Call sequence validation (conflict matrix checking)
+- [x] Method call enable signal assignments
+- [x] Result wiring for `@this` calls (SignalTracker lookup)
+
+**Status: ✅ COMPLETE (core features, interface conversion pending)**
+
+**Key Features:**
+- Converts cmt2.module → hw.module with proper port definitions
+- Processes schedule groups to generate function logic in dependency order
+- Control signal generation: ready/enable/fire per function
+- SSA value mapping with IRMapping (module arguments → guard/body cloning)
+- Tracks preceding conflicts to prevent simultaneous execution
+- Test cases: basic.mlir, method-value.mlir, result-wiring.mlir, gcd-simple.mlir ✅
+
+**Design Decisions:**
+- Stateful operations guarded at method call level via enable signals
+- Data flows through call sites using SSA values, not module ports
+
+**Remaining Work:**
+- Interface mechanism conversion
+- Circuit cleanup after conversion

@@ -857,4 +857,27 @@ def ConvertDatapathToComb : Pass<"convert-datapath-to-comb"> {
   ];
 }
 
+//===----------------------------------------------------------------------===//
+// Cmt2ToHW
+//===----------------------------------------------------------------------===//
+
+def Cmt2ToHW : Pass<"lower-cmt2-to-hw", "mlir::ModuleOp"> {
+  let summary = "Lower Cmt2 to HW";
+  let description = [{
+    This pass lowers Cmt2 dialect operations to HW dialect operations.
+    It converts cmt2.circuit and cmt2.module operations into hw.module operations,
+    generating control logic (ready, enable, fire signals) for rules, methods, and values.
+
+    The pass performs the following steps:
+    1. Runs Scheduler analysis to determine execution order
+    2. Validates call sequences for conflicts and sequence violations
+    3. Generates guard and body logic for each function
+    4. Creates ready, enable, and fire signals with proper naming
+    5. Connects instances and handles interface mechanisms
+  }];
+  let constructor = "circt::createCmt2ToHWPass()";
+  let dependentDialects = ["comb::CombDialect", "hw::HWDialect",
+                           "seq::SeqDialect", "sv::SVDialect"];
+}
+
 #endif // CIRCT_CONVERSION_PASSES_TD
