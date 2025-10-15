@@ -15,6 +15,10 @@
 include "circt/Support/InstanceGraphInterface.td"
 include "mlir/Interfaces/CallInterfaces.td"
 
+// Define FIRRTL type constraint for use in operation definitions
+def FIRRTLBaseType : Type<CPred<"llvm::isa<::circt::firrtl::FIRRTLBaseType>($_self)">,
+                          "a FIRRTL base type", "::circt::firrtl::FIRRTLBaseType">;
+
 // MethodSymbol is an attribute constraint. It has the form (instance, method).
 def CircuitOp : Cmt2Op<
   "circuit", [
@@ -52,8 +56,8 @@ def CircuitOp : Cmt2Op<
   }];
 }
 
-def ExtModuleHwOp : Cmt2Op<
-  "module.extern.hw", [
+def ExtModuleFirrtlOp : Cmt2Op<
+  "module.extern.firrtl", [
     HasParent<"CircuitOp">,
     IsolatedFromAbove,
     SingleBlock,
@@ -64,9 +68,9 @@ def ExtModuleHwOp : Cmt2Op<
     DeclareOpInterfaceMethods<InstanceGraphModuleOpInterface>,
     Cmt2ModuleLike,
   ]> {
-  let summary = "Binding a `hw.module` to Cmt2 ExtModule.";
+  let summary = "Binding a `firrtl.module` to Cmt2 ExtModule.";
   let description = [{
-    The `cmt2.module.extern.hw` binds a `hw.module` to a Cmt2 external module.
+    The `cmt2.module.extern.firrtl` binds a `firrtl.module` to a Cmt2 external module.
 
     Attributes:
     - `sequenceBefore` ('<'): A list of 2-tuples.
@@ -74,7 +78,7 @@ def ExtModuleHwOp : Cmt2Op<
     - `conflictFree` ('/'): A list of 2-tuples.
 
     Arguments:
-    - `ext_module_name`: The symbol name of the `hw.module` to bind to.
+    - `ext_module_name`: The symbol name of the `firrtl.module` to bind to.
     - Input ports (as block arguments): clock, reset, and other signals
 
     Results: None
@@ -84,8 +88,8 @@ def ExtModuleHwOp : Cmt2Op<
 
     Assembly format:
     ```mlir
-    cmt2.module.extern.hw @extmod1 : @hwmod1(in %clk: i1, in %rst: i1) {
-      cmt2.bind.bare %clk, @clock : i1
+    cmt2.module.extern.firrtl @extmod1 : @firrtlmod1(in %clk: !firrtl.clock, in %rst: !firrtl.uint<1>) {
+      cmt2.bind.bare %clk, @clock : !firrtl.clock
       cmt2.bind.value ...
       cmt2.bind.method ...
     } {sequenceBefore = [...], conflict = [...], conflictFree = [...]}
@@ -111,7 +115,7 @@ def ExtModuleHwOp : Cmt2Op<
 
 def BindBareOp : Cmt2Op<
   "bind.bare", [
-    HasParent<"ExtModuleHwOp">
+    HasParent<"ExtModuleFirrtlOp">
   ]> {
   let summary = "Binding a signal to a port";
   let description = [{
@@ -122,14 +126,14 @@ def BindBareOp : Cmt2Op<
     - `port`: The port (attribute) of the external module to which the signal is bound.
 
     Results: None
-    
+
     Assembly format:
     ```mlir
-    cmt2.bind.bare %signal, @port : 
+    cmt2.bind.bare %signal, @port : !firrtl.uint<1>
     ```
   }];
-  let arguments = (ins 
-    HWIntegerType:$signal,
+  let arguments = (ins
+    FIRRTLBaseType:$signal,
     FlatSymbolRefAttr:$port
   );
   let assemblyFormat = [{
@@ -139,13 +143,13 @@ def BindBareOp : Cmt2Op<
 
 def BindValueOp : Cmt2Op<
   "bind.value", [
-    HasParent<"ExtModuleHwOp">,
+    HasParent<"ExtModuleFirrtlOp">,
     DeclareOpInterfaceMethods<Cmt2FunctionLike, ["getCallableRegion", "getArgumentTypes", "getResultTypes", "isExternal", "getFunctionBody"]>,
     Symbol
   ]> {
   let summary = "Binding a value method";
   let description = [{
-    The "cmt2.bind.value" operations binds a value method to hw.module logic.
+    The "cmt2.bind.value" operations binds a value method to firrtl.module logic.
     
     Note: The value method cannot have input arguments.
 
@@ -188,7 +192,7 @@ def BindValueOp : Cmt2Op<
 
 def BindMethodOp : Cmt2Op<
   "bind.method", [
-    HasParent<"ExtModuleHwOp">,
+    HasParent<"ExtModuleFirrtlOp">,
     DeclareOpInterfaceMethods<Cmt2FunctionLike, ["getCallableRegion", "getArgumentTypes", "getResultTypes", "isExternal", "getFunctionBody"]>,
     Symbol,
     NoTerminator,
@@ -196,7 +200,7 @@ def BindMethodOp : Cmt2Op<
   ]> {
   let summary = "Binding a method";
   let description = [{
-    The "cmt2.bind.method" operation binds a method to hw.module logic. 
+    The "cmt2.bind.method" operation binds a method to firrtl.module logic. 
     The method follows the ready-enable protocol.
 
     Arguments:
@@ -346,7 +350,7 @@ def InstanceOp : Cmt2Op<
   // arguments which need to pass to non-scheduler modules.
   let arguments = (ins
     SymbolNameAttr:$sym_name,
-    Variadic<HWIntegerType>:$args,
+    Variadic<FIRRTLBaseType>:$args,
     FlatSymbolRefAttr:$module_name,
     OptionalAttr<ArrayAttr>:$interface_binds
   );
@@ -398,7 +402,7 @@ def ReturnOp : Cmt2Op<
   }];
 
   let arguments = (ins
-    Variadic<HWIntegerType>:$outputs
+    Variadic<FIRRTLBaseType>:$outputs
   );
 
   let assemblyFormat = [{
@@ -623,13 +627,13 @@ def CallOp : Cmt2Op<
     ```
   }];
   let arguments = (ins
-    Variadic<HWIntegerType>:$inputs,
+    Variadic<FIRRTLBaseType>:$inputs,
     SymbolRefAttr:$callee,
     SymbolRefAttr:$methodOrValue,
     OptionalAttr<ArrayAttr>:$arg_attrs,
     OptionalAttr<ArrayAttr>:$res_attrs
   );
-  let results = (outs Variadic<HWIntegerType>:$outputs);
+  let results = (outs Variadic<FIRRTLBaseType>:$outputs);
   let assemblyFormat = [{
     $callee $methodOrValue `(` $inputs `)` attr-dict `:` functional-type($inputs, results)
   }];

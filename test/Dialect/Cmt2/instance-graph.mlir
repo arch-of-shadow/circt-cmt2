@@ -4,30 +4,30 @@
 
 builtin.module {
     "hw.module"() ({
-        ^bb0(%data: i32, %clock: !seq.clock):
+        ^bb0(%data: !firrtl.uint<32>, %clock: !seq.clock):
         %init = seq.initial () {
             %c0_i32 = "hw.constant"() {value = 0 : i32} : () -> i32
-            seq.yield %c0_i32 : i32
+            seq.yield %c0_i32 : !firrtl.uint<32>
         } : ()  -> !seq.immutable<i32>
-        %out = seq.compreg %data, %clock initial %init : i32
+        %out = seq.compreg %data, %clock initial %init : !firrtl.uint<32>
         %ready = "hw.constant"() {value = 1 : i1} : () -> i1
-        "hw.output"(%ready, %out) : (i1, i32) -> ()
+        "hw.output"(%ready, %out) : (!firrtl.uint<1>, !firrtl.uint<32>) -> ()
         }) {
         argNames = ["data", "clock"],
         comment = "",
         parameters = [],
         resultNames = ["ready", "out"],
         sym_name = "Register",
-        module_type = !hw.modty<input data : i32, input clock : !seq.clock, output ready : i1, output out : i32>
+        module_type = !hw.modty<input data : !firrtl.uint<32>, input clock : !seq.clock, output ready : !firrtl.uint<1>, output out : i32>
     } : () -> ()
 
     cmt2.circuit {
         // Base register module
-        cmt2.module.extern.hw @reg : @Register {
-            ^bb0(%clk: i1, %rst: i1):
-            cmt2.bind.bare %clk, @clock : i1
-            cmt2.bind.value @read : (i1) -> (i32) [ ready = @ready, data = [@out]]
-            cmt2.bind.method @write : (i1, i32) -> (i1) [
+        cmt2.module.extern.firrtl @reg : @Register {
+            ^bb0(%clk: !firrtl.uint<1>, %rst: !firrtl.uint<1>):
+            cmt2.bind.bare %clk, @clock : !firrtl.uint<1>
+            cmt2.bind.value @read : (!firrtl.uint<1>) -> (!firrtl.uint<32>) [ ready = @ready, data = [@out]]
+            cmt2.bind.method @write : (!firrtl.uint<1>, !firrtl.uint<32>) -> (!firrtl.uint<1>) [
                 enable = @writeEnable,
                 ready = @ready,
                 inputs = [@data],
@@ -41,31 +41,31 @@ builtin.module {
 
         // Counter module - uses a register
         cmt2.module @counter {
-            ^bb0(%clk: i1, %rst: i1):
-            cmt2.instance @cnt = @reg (%clk, %rst) : i1, i1
+            ^bb0(%clk: !firrtl.uint<1>, %rst: !firrtl.uint<1>):
+            cmt2.instance @cnt = @reg (%clk, %rst) : !firrtl.uint<1>,  !firrtl.uint<1>
 
             cmt2.method @increment : () -> () {
                 cmt2.return
             } {
-                %val = cmt2.call @cnt @read () : () -> (i32)
+                %val = cmt2.call @cnt @read () : () -> (!firrtl.uint<32>)
                 %c1 = "hw.constant"() {value = 1 : i32} : () -> i32
-                %next = "comb.add"(%val, %c1) : (i32, i32) -> i32
-                cmt2.call @cnt @write (%next) : (i32) -> ()
+                %next = "comb.add"(%val, %c1) : (i32, !firrtl.uint<32>) -> i32
+                cmt2.call @cnt @write (%next) : (!firrtl.uint<32>) -> ()
             }
 
             cmt2.value @getValue : () -> () {
                 cmt2.return
             } {
-                %val = cmt2.call @cnt @read () : () -> (i32)
-                cmt2.return %val : i32
+                %val = cmt2.call @cnt @read () : () -> (!firrtl.uint<32>)
+                cmt2.return %val : !firrtl.uint<32>
             }
         }
 
         // Pair module - uses two counters
         cmt2.module @pair {
-            ^bb0(%clk: i1, %rst: i1):
-            cmt2.instance @left = @counter (%clk, %rst) : i1, i1
-            cmt2.instance @right = @counter (%clk, %rst) : i1, i1
+            ^bb0(%clk: !firrtl.uint<1>, %rst: !firrtl.uint<1>):
+            cmt2.instance @left = @counter (%clk, %rst) : !firrtl.uint<1>,  !firrtl.uint<1>
+            cmt2.instance @right = @counter (%clk, %rst) : !firrtl.uint<1>,  !firrtl.uint<1>
 
             cmt2.method @incrementLeft : () -> () {
                 cmt2.return
@@ -82,18 +82,18 @@ builtin.module {
             cmt2.value @getSum : () -> () {
                 cmt2.return
             } {
-                %l = cmt2.call @left @getValue () : () -> (i32)
-                %r = cmt2.call @right @getValue () : () -> (i32)
-                %sum = "comb.add"(%l, %r) : (i32, i32) -> i32
-                cmt2.return %sum : i32
+                %l = cmt2.call @left @getValue () : () -> (!firrtl.uint<32>)
+                %r = cmt2.call @right @getValue () : () -> (!firrtl.uint<32>)
+                %sum = "comb.add"(%l, %r) : (i32, !firrtl.uint<32>) -> i32
+                cmt2.return %sum : !firrtl.uint<32>
             }
         }
 
         // Top module - uses a pair and a counter
         cmt2.module @top {
-            ^bb0(%clk: i1, %rst: i1):
-            cmt2.instance @p = @pair (%clk, %rst) : i1, i1
-            cmt2.instance @c = @counter (%clk, %rst) : i1, i1
+            ^bb0(%clk: !firrtl.uint<1>, %rst: !firrtl.uint<1>):
+            cmt2.instance @p = @pair (%clk, %rst) : !firrtl.uint<1>,  !firrtl.uint<1>
+            cmt2.instance @c = @counter (%clk, %rst) : !firrtl.uint<1>,  !firrtl.uint<1>
 
             cmt2.rule @incrementAll {
                 cmt2.return

@@ -121,8 +121,8 @@ CallType CallInfoView::determineCalleeType(CallOp callOp, ModuleOp currentModule
               circuit, moduleNameAttr)) {
         targetModule = module;
       }
-      // Then try ExtModuleHwOp
-      else if (auto extModule = mlir::SymbolTable::lookupNearestSymbolFrom<ExtModuleHwOp>(
+      // Then try ExtModuleFirrtlOp
+      else if (auto extModule = mlir::SymbolTable::lookupNearestSymbolFrom<ExtModuleFirrtlOp>(
               circuit, moduleNameAttr)) {
         targetModule = extModule;
       }

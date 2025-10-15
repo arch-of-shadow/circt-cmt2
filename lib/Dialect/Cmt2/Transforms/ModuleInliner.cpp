@@ -65,7 +65,7 @@ private:
 
 bool ModuleInlinerPass::shouldNotInline(Cmt2ModuleLike module) {
   // Don't inline external modules
-  if (isa<ExtModuleHwOp>(module.getOperation()))
+  if (isa<ExtModuleFirrtlOp>(module.getOperation()))
     return true;
 
   // Don't inline modules with synthesis=true

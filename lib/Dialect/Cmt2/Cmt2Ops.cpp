@@ -10,6 +10,7 @@
 //
 //===----------------------------------------------------------------------===//
 #include "circt/Dialect/Cmt2/Cmt2Ops.h"
+#include "circt/Dialect/FIRRTL/FIRRTLTypes.h"
 #include "circt/Dialect/HW/HWOps.h"
 #include "circt/Dialect/HW/HWTypes.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -26,7 +27,7 @@ namespace circt {
 namespace cmt2 {
 
 //===----------------------------------------------------------------------===//
-// Module-like Operations (ModuleOp, ExtModuleHwOp)
+// Module-like Operations (ModuleOp, ExtModuleFirrtlOp)
 //===----------------------------------------------------------------------===//
 
 static ParseResult parseModuleLikeOp(OpAsmParser &parser,
@@ -137,14 +138,14 @@ void ModuleOp::getAsmBlockArgumentNames(Region &region,
 }
 
 //===----------------------------------------------------------------------===//
-// ExtModuleHwOp
+// ExtModuleFirrtlOp
 //===----------------------------------------------------------------------===//
 
-ParseResult ExtModuleHwOp::parse(OpAsmParser &parser, OperationState &result) {
+ParseResult ExtModuleFirrtlOp::parse(OpAsmParser &parser, OperationState &result) {
   return parseModuleLikeOp(parser, result, true);
 }
 
-void ExtModuleHwOp::print(OpAsmPrinter &p) {
+void ExtModuleFirrtlOp::print(OpAsmPrinter &p) {
   p << ' ';
   p.printSymbolName(getSymName());
   p << " : ";
@@ -154,7 +155,7 @@ void ExtModuleHwOp::print(OpAsmPrinter &p) {
   printModuleLikeOp(p, *this, getArgNames(), getBody(), elidedAttrs);
 }
 
-void ExtModuleHwOp::getAsmBlockArgumentNames(Region &region,
+void ExtModuleFirrtlOp::getAsmBlockArgumentNames(Region &region,
                                                OpAsmSetValueNameFn setNameFn) {
   getAsmBlockArgumentNamesImpl(getArgNames(), region, setNameFn);
 }

@@ -15,6 +15,7 @@
 // #include "llvm/ADT/Any.h"
 #include "circt/Dialect/Cmt2/Cmt2Dialect.h"
 #include "circt/Dialect/Cmt2/Cmt2OpInterfaces.h"
+#include "circt/Dialect/FIRRTL/FIRRTLTypes.h"
 #include "circt/Dialect/HW/HWAttributes.h"
 #include "circt/Dialect/HW/HWOpInterfaces.h"
 #include "circt/Dialect/HW/HWTypes.h"

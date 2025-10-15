@@ -142,7 +142,7 @@ void ConflictMatrixAnalysis::runAnalysis() {
   LLVM_DEBUG(llvm::dbgs() << "=== ConflictMatrix Analysis ===\n");
 
   // First, parse conflict matrices from external modules
-  circuit.walk([&](ExtModuleHwOp extModule) {
+  circuit.walk([&](ExtModuleFirrtlOp extModule) {
     parseExternalModuleMatrix(extModule);
   });
 
@@ -192,7 +192,7 @@ void ConflictMatrixAnalysis::runAnalysis() {
 }
 
 void ConflictMatrixAnalysis::parseExternalModuleMatrix(
-    ExtModuleHwOp extModule) {
+    ExtModuleFirrtlOp extModule) {
   StringAttr moduleName = extModule.getSymNameAttr();
   LLVM_DEBUG(llvm::dbgs() << "Parsing external module: @"
                           << moduleName.getValue() << "\n");
