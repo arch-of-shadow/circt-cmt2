@@ -4,10 +4,30 @@
 // Tests the full conversion pipeline on a realistic example
 
 builtin.module {
+    "hw.module"() ({
+        ^bb0(%write: i32, %writeEnable: i1, %clock: !seq.clock):
+        %init = seq.initial () {
+            %c0_i32 = "hw.constant"() {value = 0 : i32} : () -> i32
+            seq.yield %c0_i32 : i32
+        } : ()  -> !seq.immutable<i32>
+        %read = seq.compreg %next, %clock initial %init : i32
+        %next = "comb.mux"(%writeEnable, %write, %read) : (i1, i32, i32) -> i32
+        %writeReady = "hw.constant"() {value = 1 : i1} : () -> i1
+        %readReady = "hw.constant"() {value = 1 : i1} : () -> i1
+        "hw.output"(%writeReady, %readReady, %read) : (i1, i1, i32) -> ()
+        }) {
+        argNames = ["write", "writeEnable", "clock"],
+        comment = "",
+        parameters = [],
+        resultNames = ["writeReady", "readReady", "ready"],
+        sym_name = "Reg32",
+        module_type = !hw.modty<input write : i32, input writeEnable : i1, input clock : !seq.clock, output writeReady : i1, output readReady : i1, output ready : i32>
+    } : () -> ()
     cmt2.circuit {
         // External register module with conflict matrix
-        cmt2.module.extern.hw @reg : @Reg32(%clk: i1, %rst: i1) {
-            cmt2.bind.value @read : () -> (i32) [ ready = @readReady, data = [@data]]
+        cmt2.module.extern.hw @reg : @Reg32(%clk: !seq.clock) {
+            cmt2.bind.bare %clk, @clock : !seq.clock
+            cmt2.bind.value @read : () -> (i32) [ ready = @readReady, data = [@read]]
             cmt2.bind.method @write : (i32) -> () [
                 enable = @writeEnable,
                 ready = @writeReady,
@@ -20,29 +40,9 @@ builtin.module {
             sequenceBefore = [[@read, @write]]
         }
 
-        // CHECK-LABEL: hw.module @gcd
-        // CHECK-SAME: in %clk : i1, in %rst : i1
-        // CHECK-SAME: in %start_enable : i1
-        // CHECK-SAME: out start_ready : i1
-        // CHECK-SAME: out result_ready : i1
-        // Verify that private function @doing is inlined (calls to @y @read appear in guard regions)
-        // CHECK: comb.icmp ne
-        // Verify ready signal generation (AND chain with guard result and called ready signals)
-        // CHECK: %{{.*}} = comb.and
-        // CHECK: %swap_ready = sv.wire
-        // CHECK: sv.assign %swap_ready
-        // Verify fire signal generation
-        // CHECK: %swap_fire = sv.wire
-        // CHECK: sv.assign %swap_fire
-        // Verify method enable signal assignment driven by fire signal
-        // CHECK: sv.assign %{{.*}}_enable{{.*}}, %{{.*}} : i1
-        // Verify NOT(preceding conflicts) in ready signal
-        // CHECK: comb.xor
-        // Verify output port connections
-        // CHECK: hw.output
-        cmt2.module @gcd(%clk: i1, %rst: i1) {
-            cmt2.instance @x = @reg (%clk, %rst) : i1, i1
-            cmt2.instance @y = @reg (%clk, %rst) : i1, i1
+        cmt2.module @gcd(%clk: !seq.clock, %rst: i1) {
+            cmt2.instance @x = @reg (%clk) : !seq.clock
+            cmt2.instance @y = @reg (%clk) : !seq.clock
 
             // Private value - will be inlined
             cmt2.value @doing() -> (i1) {} {

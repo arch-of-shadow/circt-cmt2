@@ -128,8 +128,8 @@ def BindBareOp : Cmt2Op<
     cmt2.bind.bare %signal, @port : 
     ```
   }];
-  let arguments = (ins 
-    HWIntegerType:$signal,
+  let arguments = (ins
+    AnyType:$signal,
     FlatSymbolRefAttr:$port
   );
   let assemblyFormat = [{
@@ -346,7 +346,7 @@ def InstanceOp : Cmt2Op<
   // arguments which need to pass to non-scheduler modules.
   let arguments = (ins
     SymbolNameAttr:$sym_name,
-    Variadic<HWIntegerType>:$args,
+    Variadic<AnyType>:$args,
     FlatSymbolRefAttr:$module_name,
     OptionalAttr<ArrayAttr>:$interface_binds
   );

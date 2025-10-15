@@ -877,7 +877,7 @@ def Cmt2ToHW : Pass<"lower-cmt2-to-hw", "mlir::ModuleOp"> {
   }];
   let constructor = "circt::createCmt2ToHWPass()";
   let dependentDialects = ["comb::CombDialect", "hw::HWDialect",
-                           "seq::SeqDialect", "sv::SVDialect"];
+                           "seq::SeqDialect"];
 }
 
 #endif // CIRCT_CONVERSION_PASSES_TD
