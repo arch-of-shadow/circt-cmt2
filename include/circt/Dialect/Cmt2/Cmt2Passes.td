@@ -85,6 +85,23 @@ def InlinePrivateFuncs : Pass<"cmt2-inline-private-funcs", "cmt2::CircuitOp"> {
   }];
 }
 
+def PrintScheduler : Pass<"cmt2-print-scheduler", "cmt2::CircuitOp"> {
+  let summary = "Print scheduler analysis results for Cmt2 modules.";
+  let description = [{
+    This pass computes and prints the scheduling analysis results for each module
+    in a Cmt2 circuit. The scheduler:
+    1. Collects all functions (rules/methods/values) to be scheduled
+    2. Uses conflict matrix analysis to determine relationships
+    3. Parses precedence constraints from module attributes
+    4. Groups functions that must be in the same scheduling group
+    5. Computes optimal ordering within each group
+
+    The output shows groups of functions where each group can be scheduled
+    independently (conflict-free with other groups), and functions within each
+    group are ordered to satisfy SequentialBefore and precedence constraints.
+  }];
+}
+
 // def InferRules : Pass<"cmt2-infer-rules", "cmt2::CircuitOp"> {
 //   let summary = "generate all Cmt2::RuleRefOp for a circuit.";
 //   let description = [{
