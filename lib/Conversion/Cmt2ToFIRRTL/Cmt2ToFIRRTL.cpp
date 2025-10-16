@@ -215,9 +215,6 @@ private:
                                    ImplicitLocOpBuilder &builder);
 
   // Helper utilities
-  LogicalResult validateCallSequence(const SmallVector<CallInfo> &calls,
-                                       const ModuleConflictMatrix *conflictMatrix,
-                                       Cmt2FunctionLike func);
   FModuleOp findFIRRTLModule(StringRef moduleName, Operation *searchRoot);
   std::optional<size_t> getPortIndex(firrtl::InstanceOp inst, StringAttr portName);
   cmt2::ModuleOp findTopModule(cmt2::CircuitOp circuit);
@@ -875,21 +872,6 @@ LogicalResult LowerCmt2ToFIRRTLPass::connectOutputPorts(cmt2::ModuleOp module,
 LogicalResult LowerCmt2ToFIRRTLPass::processFunction(Cmt2FunctionLike func,
                                                    ModuleConversionContext &ctx,
                                                    ImplicitLocOpBuilder &builder) {
-  // Check for @this calls (private functions should be inlined before conversion)
-  bool hasThisCall = false;
-  func.walk([&](CallOp call) {
-    if (call.getCallee().getRootReference().getValue() == "this") {
-      hasThisCall = true;
-      return WalkResult::interrupt();
-    }
-    return WalkResult::advance();
-  });
-
-  if (hasThisCall) {
-    return func.emitError(
-        "Function contains @this calls. Run --cmt2-inline-private-funcs before conversion.");
-  }
-
   // Get calls for this function from CallInfo analysis
   const ModuleCallInfo *callInfo = ctx.getCallInfo();
   SmallVector<CallInfo> calls;
@@ -898,11 +880,6 @@ LogicalResult LowerCmt2ToFIRRTLPass::processFunction(Cmt2FunctionLike func,
     if (it != callInfo->end()) {
       calls.assign(it->second.begin(), it->second.end());
     }
-  }
-
-  // Validate that the call sequence respects the conflict matrix
-  if (failed(validateCallSequence(calls, ctx.getConflictMatrix(), func))) {
-    return failure();
   }
 
   // Map function parameters to FIRRTL module ports
@@ -1463,32 +1440,6 @@ LogicalResult LowerCmt2ToFIRRTLPass::connectValueCall(
 //===----------------------------------------------------------------------===//
 // Helper Utilities
 //===----------------------------------------------------------------------===//
-
-LogicalResult LowerCmt2ToFIRRTLPass::validateCallSequence(
-    const SmallVector<CallInfo> &calls,
-    const ModuleConflictMatrix *conflictMatrix,
-    Cmt2FunctionLike func) {
-
-  if (!conflictMatrix || calls.size() < 2)
-    return success();
-
-  // Check for sequential before violations (calling in wrong order)
-  for (size_t i = 0; i < calls.size(); ++i) {
-    for (size_t j = i + 1; j < calls.size(); ++j) {
-      auto rel = conflictMatrix->getRelationship(
-          calls[j].calleeEntity.getLeafReference(),
-          calls[i].calleeEntity.getLeafReference());
-
-      if (rel == Relationship::SequentialBefore) {
-        // calls[j] < calls[i], but calls[i] appears before calls[j] - violation!
-        return func.emitError("Sequential before violation: ")
-               << calls[j].calleeEntity << " should be called before " << calls[i].calleeEntity;
-      }
-    }
-  }
-
-  return success();
-}
 
 FModuleOp LowerCmt2ToFIRRTLPass::findFIRRTLModule(StringRef moduleName,
                                                     Operation *searchRoot) {

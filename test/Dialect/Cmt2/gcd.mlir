@@ -50,7 +50,7 @@ builtin.module {
               cmt2.return %1 : !firrtl.uint<1>
             }
 
-            cmt2.rule @swap() -> !firrtl.uint<1> {
+            cmt2.rule @swap() {
                 %0 = cmt2.call @x @read () : () -> (!firrtl.uint<32>)
                 %1 = cmt2.call @y @read () : () -> (!firrtl.uint<32>)
                 %2 = firrtl.gt %1, %0 : (!firrtl.uint<32>, !firrtl.uint<32>) -> !firrtl.uint<1>
@@ -65,7 +65,7 @@ builtin.module {
                 cmt2.call @y @write (%0) : (!firrtl.uint<32>) -> ()
             }
 
-            cmt2.rule @sub() -> !firrtl.uint<1> {
+            cmt2.rule @sub() {
                 %0 = cmt2.call @x @read () : () -> (!firrtl.uint<32>)
                 %1 = cmt2.call @y @read () : () -> (!firrtl.uint<32>)
                 %2 = firrtl.leq %1, %0 : (!firrtl.uint<32>, !firrtl.uint<32>) -> !firrtl.uint<1>

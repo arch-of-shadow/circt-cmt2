@@ -518,7 +518,6 @@ Note: `test/Dialect/Cmt2/hello.mlir` demonstrates both interface usage patterns:
 - Clones body regions inside firrtl.when blocks guarded by fire signals
 - Handles SSA value remapping during region cloning with IRMapping
 - Converts cmt2.call to FIRRTL signal accesses and connections
-- Validates call sequences for sequential ordering violations
 - Integrates with Scheduler, ConflictMatrix, and CallInfo analyses
 - Properly connects module arguments (clock, reset) for both external and regular cmt2 modules
 - Initializes all instance input ports to satisfy FIRRTL full initialization requirements
@@ -534,6 +533,37 @@ Note: `test/Dialect/Cmt2/hello.mlir` demonstrates both interface usage patterns:
 - ✅ Successfully tested with hello.mlir showing correct interface port generation and connections
 - ✅ **Top module interface declarations**: Top-level modules can declare interfaces for outward method calls (creates output ports: `enable`, `data`; input ports: `ready`)
 - ✅ Full pipeline working: Cmt2 with interfaces → FIRRTL → SystemVerilog
+
+**Validation Passes:**
+- ✅ Separated validation logic from conversion pass into dedicated passes:
+  - `-cmt2-verify-private-funcs-inlined`: Verifies all @this calls have been inlined
+  - `-cmt2-verify-call-sequence`: Validates call sequences respect conflict matrix constraints
+- ✅ Created `populateCmt2ToFIRRTLPipeline()` utility for programmatic pipeline construction
+- ✅ **Recommended pipeline for Cmt2 to FIRRTL conversion:**
+  ```shell
+  # Full pipeline with validation
+  build/bin/circt-opt INPUT.mlir \
+    -cmt2-inline-private-funcs \
+    -cmt2-verify-private-funcs-inlined \
+    -cmt2-verify-call-sequence \
+    --lower-cmt2-to-firrtl
+
+  # Example with gcd.mlir
+  build/bin/circt-opt test/Dialect/Cmt2/gcd.mlir \
+    -cmt2-inline-private-funcs \
+    -cmt2-verify-private-funcs-inlined \
+    -cmt2-verify-call-sequence \
+    --lower-cmt2-to-firrtl
+
+  # Generate SystemVerilog with full pipeline
+  build/bin/circt-opt test/Dialect/Cmt2/gcd.mlir \
+    -cmt2-inline-private-funcs \
+    -cmt2-verify-private-funcs-inlined \
+    -cmt2-verify-call-sequence \
+    --lower-cmt2-to-firrtl | \
+    build/bin/firtool --format=mlir --disable-reg-randomization
+  ```
+- ✅ For programmatic use, include `circt/Dialect/Cmt2/Cmt2Passes.h` and call `populateCmt2ToFIRRTLPipeline(pm)` to add all passes to a PassManager
 
 
 ### Cycle Detection
