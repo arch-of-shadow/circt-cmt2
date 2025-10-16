@@ -76,6 +76,11 @@ def Cmt2FunctionLike : OpInterface<"Cmt2FunctionLike"> {
     "::mlir::Region *", "getCallableRegion", (ins)>,
 
     InterfaceMethod<[{
+      Get the function type attribute.
+    }],
+    "::mlir::FunctionType", "getFunctionType", (ins)>,
+
+    InterfaceMethod<[{
       Get the argument types from the function type.
     }],
     "::llvm::ArrayRef<::mlir::Type>", "getArgumentTypes", (ins)>,

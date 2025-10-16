@@ -422,3 +422,68 @@ You should update the tests under `test/Dialect/Cmt2` to use `firrtl` instead of
 - `i1` → `!firrtl.uint<1>`
 - `i32` → `!firrtl.uint<32>`
 - Clock signals remain as `!seq.clock` (not migrated to FIRRTL clock type)
+
+
+### Cmt2ToFIRRTL Conversion
+
+#### Spec
+
+For each `cmt2` module, we need to convert it into a `firrtl.module`.
+
+How to do?
+
+For every module, run Scheduler analysis to get the schedule solution.
+
+For a group in a schedule, generate logic for its included functions in order. For current function `fi`:
+- Do a checking, fetch the called functions in `fi` as a sequence. If there are conflicts or "sequence before violations" (that is `fx < fy` but fy is called before fx). Raise an error messasge.
+- Any @this call is not allowed. Emit error to suggest run `-cmt2-inline-private-funcs` before conversion.
+- Construct the `guard` logic and the `body` logic. This should replace `cmt2.call` operations with signal assignments. Calling a method should assign `1` to `enable`. Argument signals and results should be connected, either.
+- Generate a `ready` signal (whose name is either specified in the function's attributes, or default to `<funcName>_ready`). The `ready` signal's value is define by `AND` the following:
+  - the guard result
+  - the `ready` signals of called functions
+  - `NOT` (any preceding functions with conflicts fired). This is determined by the ConflixMatrix. Two conflict cases: `Conflict` and `Sequence Before` violation.
+- If `fi` is a method, also generate an `enable` signal (with the similar naming convention).
+- Generate a `fire` signal. For value/rule, it's equal to the `ready` signal. For method, it's equal to the `ready AND enable`.
+- Insert the `guard` and `body` logic to the module. The `body` logic should be guarded (`firrtl.when`) by the `fire` signal.
+- The interface mechanism needs special processing: add ports on modules and do signal assignments.
+
+You can look at:
+- `lib/Conversion/CalyxToHW/CalyxToHW.cpp`
+- and other conversions
+
+to learn how to write a conversion.
+
+During the conversion, you'd better create meaningful names for variables.
+
+You should test on `test/Dialect/Cmt2/gcd.mlir` with the command:
+```shell
+# Test basic conversion
+build/bin/circt-opt --lower-cmt2-to-firrtl test/Conversion/Cmt2ToFIRRTL/basic.mlir
+
+# Test method and value conversion
+build/bin/circt-opt -cmt2-inline-private-funcs --lower-cmt2-to-firrtl test/Conversion/Cmt2ToFIRRTL/method-value.mlir
+
+# Test gcd without interface
+build/bin/circt-opt -cmt2-inline-private-funcs --lower-cmt2-to-firrtl test/Conversion/Cmt2ToFIRRTL/gcd-simple.mlir
+```
+where the `gcd-simple.mlir` is a simplied version with interface mechanism removed temporarily.
+
+#### Progress
+
+✅ **COMPLETE** - Cmt2ToFIRRTL conversion pass successfully converts Cmt2 to FIRRTL and generates valid SystemVerilog.
+
+**Features:**
+- Converts cmt2.circuit → firrtl.circuit with correct top module name
+- Converts cmt2.module → firrtl.module with proper ports (enable, ready, args, results)
+- Creates and initializes firrtl.instance for external modules with proper port connections
+- Clones guard regions to compute ready conditions
+- Generates ready signals based on guards, called functions, and conflict matrix
+- Generates fire signals (ready for rules/values, ready AND enable for methods)
+- Clones body regions inside firrtl.when blocks guarded by fire signals
+- Handles SSA value remapping during region cloning with IRMapping
+- Converts cmt2.call to FIRRTL signal accesses and connections
+- Validates call sequences for sequential ordering violations
+- Integrates with Scheduler, ConflictMatrix, and CallInfo analyses
+- Properly connects bare arguments (clock, reset) from module args to instance ports
+- Initializes all instance input ports to satisfy FIRRTL full initialization requirements
+- Successfully generates valid, synthesizable SystemVerilog via firtool

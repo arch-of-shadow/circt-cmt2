@@ -857,4 +857,25 @@ def ConvertDatapathToComb : Pass<"convert-datapath-to-comb"> {
   ];
 }
 
+//===----------------------------------------------------------------------===//
+// Cmt2ToFIRRTL
+//===----------------------------------------------------------------------===//
+
+def LowerCmt2ToFIRRTL : Pass<"lower-cmt2-to-firrtl", "mlir::ModuleOp"> {
+  let summary = "Lower Cmt2 to FIRRTL";
+  let description = [{
+    This pass lowers Cmt2 modules to FIRRTL modules. It converts cmt2.circuit
+    operations containing cmt2.module operations into firrtl.circuit operations
+    with firrtl.module operations. The conversion uses the Scheduler, ConflictMatrix,
+    and CallInfo analyses to generate ready/enable/fire signals and properly schedule
+    functions within each module.
+  }];
+  let constructor = "circt::createLowerCmt2ToFIRRTLPass()";
+  let dependentDialects = [
+    "circt::cmt2::Cmt2Dialect",
+    "circt::firrtl::FIRRTLDialect",
+    "circt::comb::CombDialect"
+  ];
+}
+
 #endif // CIRCT_CONVERSION_PASSES_TD
