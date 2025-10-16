@@ -499,6 +499,10 @@ build/bin/circt-opt test/Dialect/Cmt2/hello.mlir --lower-cmt2-to-firrtl
 build/bin/circt-opt test/Dialect/Cmt2/hello.mlir --lower-cmt2-to-firrtl | build/bin/firtool --format=mlir --verilog
 ```
 
+Note: `test/Dialect/Cmt2/hello.mlir` demonstrates both interface usage patterns:
+1. **Interface definitions for child modules** (`@child` has `cmt2.interface.decl @reader` for inward interface ports)
+2. **Interface declarations in top modules** (`@hello` has `cmt2.interface.decl @writer` for outward method call ports)
+
 
 #### Progress
 
@@ -528,4 +532,8 @@ build/bin/circt-opt test/Dialect/Cmt2/hello.mlir --lower-cmt2-to-firrtl | build/
 - ✅ Properly handles interface bindings during instance creation (interface_binds attribute)
 - ✅ Includes interface call ready signals in generateReadySignal()
 - ✅ Successfully tested with hello.mlir showing correct interface port generation and connections
+- ✅ **Top module interface declarations**: Top-level modules can declare interfaces for outward method calls (creates output ports: `enable`, `data`; input ports: `ready`)
 - ✅ Full pipeline working: Cmt2 with interfaces → FIRRTL → SystemVerilog
+
+
+### Cycle Detection

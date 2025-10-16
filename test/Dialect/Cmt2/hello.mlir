@@ -43,6 +43,10 @@ builtin.module {
             cmt2.value @getData() -> (!firrtl.uint<32>) {}{}
         }
 
+        cmt2.interface @Writer {
+            cmt2.method @store(%data: !firrtl.uint<32>) {}{}
+        }
+
         cmt2.module @child(%clk: !firrtl.clock, %rst: !firrtl.uint<1>) {
             cmt2.interface.decl @reader : @Reader
             cmt2.instance @r = @reg (%clk, %rst) : !firrtl.clock, !firrtl.uint<1>
@@ -61,6 +65,9 @@ builtin.module {
         }
 
         cmt2.module @hello(%clk: !firrtl.clock, %rst: !firrtl.uint<1>) {
+            // Interface declaration for outward calls - creates module ports
+            cmt2.interface.decl @writer : @Writer
+
             cmt2.instance @x = @reg (%clk, %rst) : !firrtl.clock, !firrtl.uint<1>
             cmt2.interface.def @ReadX : @Reader [
                 [@x, @read, @getData]
@@ -86,6 +93,8 @@ builtin.module {
                 %sum = firrtl.add %v, %c1 : (!firrtl.uint<32>, !firrtl.uint<32>) -> !firrtl.uint<33>
                 %3 = firrtl.bits %sum 31 to 0 : (!firrtl.uint<33>) -> !firrtl.uint<32>
                 cmt2.call @x @write(%3) : (!firrtl.uint<32>) -> ()
+                // Call through interface declaration - becomes module output port
+                cmt2.call @writer @store(%3) : (!firrtl.uint<32>) -> ()
                 cmt2.return
             }
         } {
