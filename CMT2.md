@@ -464,18 +464,41 @@ build/bin/circt-opt --lower-cmt2-to-firrtl test/Conversion/Cmt2ToFIRRTL/basic.ml
 build/bin/circt-opt -cmt2-inline-private-funcs --lower-cmt2-to-firrtl test/Conversion/Cmt2ToFIRRTL/method-value.mlir
 
 # Test gcd without interface
-build/bin/circt-opt -cmt2-inline-private-funcs --lower-cmt2-to-firrtl test/Conversion/Cmt2ToFIRRTL/gcd-simple.mlir
+build/bin/circt-opt -cmt2-inline-private-funcs --lower-cmt2-to-firrtl test/Dialect/gcd.mlir
 ```
-where the `gcd-simple.mlir` is a simplied version with interface mechanism removed temporarily.
 
-We should also generate SystemVerilog from a `test/Conversion/Cmt2ToFIRRTL/gcd-simple.mlir` design by the command:
+We should also generate SystemVerilog from a `test/Dialect/gcd.mlir` design by the command:
 ```shell
 # Generate SystemVerilog from Cmt2 design
-build/bin/circt-opt test/Conversion/Cmt2ToFIRRTL/gcd-simple.mlir -cmt2-inline-private-funcs --lower-cmt2-to-firrtl | build/bin/firtool --format=mlir
+build/bin/circt-opt test/Dialect/gcd.mlir -cmt2-inline-private-funcs --lower-cmt2-to-firrtl | build/bin/firtool --format=mlir
 
 # Or save to a file
-build/bin/circt-opt test/Conversion/Cmt2ToFIRRTL/gcd-simple.mlir -cmt2-inline-private-funcs --lower-cmt2-to-firrtl | build/bin/firtool --format=mlir --disable-reg-randomization -o /tmp/gcd.sv
+build/bin/circt-opt test/Dialect/gcd.mlir -cmt2-inline-private-funcs --lower-cmt2-to-firrtl | build/bin/firtool --format=mlir --disable-reg-randomization -o /tmp/gcd.sv
 ```
+
+You should provide interface mechanism support. Look at `test/Dialect/Cmt2/hello.mlir` for an example. The module `@child` includes `cmt2.interface.decl @reader : @Reader`, which means the corresponding `firrtl.module` should have ports to call `@Reader`'s methods/values. When encountering a call to `@reader @getData`, the conversion should connect the ports (`enable` for method, arguments, results) properly. Also, the `@reader` also opens a `ready` signal, which should affect the `ready` and `fire` signal of the caller function. For the parent module `@hello`, it has
+```
+cmt2.interface.def @ReadX : @Read [
+    [@x, @read, @getData]
+]
+```
+Then, when 
+```
+cmt2.instance @c = @child(%clk, %rst) : !firrtl.clock, !firrtl.uint<1> with [
+    [@ReadX, @reader]
+]
+```
+bind @ReadX to @child @c's @reader, the conversion should connect the wires to the ports of `@child` properly. Note that we can pass a `cmt2.interface.decl` to deeper instances, and the ports should be connected properly.
+
+The implementation should be robust and test on `test/Dialect/Cmt2/hello.mlir`:
+```shell
+# Test interface mechanism with hello.mlir
+build/bin/circt-opt test/Dialect/Cmt2/hello.mlir --lower-cmt2-to-firrtl
+
+# Generate SystemVerilog from hello.mlir to verify end-to-end
+build/bin/circt-opt test/Dialect/Cmt2/hello.mlir --lower-cmt2-to-firrtl | build/bin/firtool --format=mlir --verilog
+```
+
 
 #### Progress
 
@@ -493,6 +516,16 @@ build/bin/circt-opt test/Conversion/Cmt2ToFIRRTL/gcd-simple.mlir -cmt2-inline-pr
 - Converts cmt2.call to FIRRTL signal accesses and connections
 - Validates call sequences for sequential ordering violations
 - Integrates with Scheduler, ConflictMatrix, and CallInfo analyses
-- Properly connects bare arguments (clock, reset) from module args to instance ports
+- Properly connects module arguments (clock, reset) for both external and regular cmt2 modules
 - Initializes all instance input ports to satisfy FIRRTL full initialization requirements
 - Successfully generates valid, synthesizable SystemVerilog via firtool
+
+**Interface Mechanism Support:**
+- ✅ Creates interface ports on modules for InterfaceDeclOp operations (enable, ready, args, results)
+- ✅ Detects and handles interface calls in convertCallOp()
+- ✅ Connects interface calls to module ports in connectInterfaceCall()
+- ✅ Connects child interface ports to parent instance ports based on InterfaceDefOp bindings
+- ✅ Properly handles interface bindings during instance creation (interface_binds attribute)
+- ✅ Includes interface call ready signals in generateReadySignal()
+- ✅ Successfully tested with hello.mlir showing correct interface port generation and connections
+- ✅ Full pipeline working: Cmt2 with interfaces → FIRRTL → SystemVerilog

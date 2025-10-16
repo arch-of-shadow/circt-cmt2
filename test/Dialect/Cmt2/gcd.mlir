@@ -38,27 +38,8 @@ builtin.module {
             conflictFree = [[@read, @read]],
             sequenceBefore = [[@read, @write]]
         }
-        
-        // interface Read
-        cmt2.interface @Read {
-            cmt2.method @read() -> (!firrtl.uint<32>) {}{}
-        }
-
-        // a placeholder module to test interface
-        cmt2.module @placeholder {
-            cmt2.interface.decl @reader : @Read
-        }
 
         cmt2.module @gcd(%clk: !firrtl.clock, %rst: !firrtl.uint<1>) {
-            cmt2.interface.def @ReadX : @Read [
-                [@x, @read, @read]
-            ]
-
-            // instance to test interface
-            cmt2.instance @_ = @placeholder with [
-                [@ReadX, @reader]
-            ]
-
             cmt2.instance @x = @reg (%clk, %rst) : !firrtl.clock, !firrtl.uint<1>
             cmt2.instance @y = @reg (%clk, %rst) : !firrtl.clock, !firrtl.uint<1>
 
@@ -72,7 +53,7 @@ builtin.module {
             cmt2.rule @swap() -> !firrtl.uint<1> {
                 %0 = cmt2.call @x @read () : () -> (!firrtl.uint<32>)
                 %1 = cmt2.call @y @read () : () -> (!firrtl.uint<32>)
-                %2 = firrtl.gt %0, %1 : (!firrtl.uint<32>, !firrtl.uint<32>) -> !firrtl.uint<1>
+                %2 = firrtl.gt %1, %0 : (!firrtl.uint<32>, !firrtl.uint<32>) -> !firrtl.uint<1>
                 %3 = cmt2.call @this @doing () : () -> (!firrtl.uint<1>)
                 %4 = firrtl.and %2, %3 : (!firrtl.uint<1>, !firrtl.uint<1>) -> !firrtl.uint<1>
                 cmt2.return %4 : !firrtl.uint<1>
@@ -87,7 +68,7 @@ builtin.module {
             cmt2.rule @sub() -> !firrtl.uint<1> {
                 %0 = cmt2.call @x @read () : () -> (!firrtl.uint<32>)
                 %1 = cmt2.call @y @read () : () -> (!firrtl.uint<32>)
-                %2 = firrtl.leq %0, %1 : (!firrtl.uint<32>, !firrtl.uint<32>) -> !firrtl.uint<1>
+                %2 = firrtl.leq %1, %0 : (!firrtl.uint<32>, !firrtl.uint<32>) -> !firrtl.uint<1>
                 %3 = cmt2.call @this @doing () : () -> (!firrtl.uint<1>)
                 %4 = firrtl.and %2, %3 : (!firrtl.uint<1>, !firrtl.uint<1>) -> !firrtl.uint<1>
                 cmt2.return %4 : !firrtl.uint<1>
