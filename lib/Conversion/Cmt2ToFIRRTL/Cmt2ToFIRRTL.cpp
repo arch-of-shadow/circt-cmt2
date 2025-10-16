@@ -720,10 +720,14 @@ LogicalResult LowerCmt2ToFIRRTLPass::processFunction(Cmt2FunctionLike func,
     ArrayAttr bodyResNames = getBodyResNames(func);
 
     // Create wires for result values (to escape the when block's region)
-    // Only create wires if there are actual results
+    // Only create wires for Methods and Values (which have output ports), not for Rules
     auto funcType = cast<FunctionType>(func.getFunctionType());
     SmallVector<Value> resultWires;
-    if (!funcType.getResults().empty()) {
+    bool needsResultWires = (func.getFunctionKind() == FunctionKind::Method ||
+                             func.getFunctionKind() == FunctionKind::Value) &&
+                            !funcType.getResults().empty();
+
+    if (needsResultWires) {
       for (auto [idx, resType] : llvm::enumerate(funcType.getResults())) {
         auto firrtlType = cast<FIRRTLBaseType>(resType);
         StringRef resName = bodyResNames && idx < bodyResNames.size()
@@ -731,6 +735,11 @@ LogicalResult LowerCmt2ToFIRRTLPass::processFunction(Cmt2FunctionLike func,
                                 : ("result" + std::to_string(idx));
         auto wire = builder.create<WireOp>(func.getLoc(), firrtlType,
                                             builder.getStringAttr(func.functionName().str() + "_" + resName.str()));
+
+        // Initialize wire with invalidvalue to satisfy FIRRTL's full initialization requirement
+        Value invalid = builder.create<InvalidValueOp>(func.getLoc(), firrtlType);
+        builder.create<ConnectOp>(func.getLoc(), wire.getResult(), invalid);
+
         resultWires.push_back(wire.getResult());
       }
     }
