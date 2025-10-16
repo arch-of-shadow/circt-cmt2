@@ -468,6 +468,15 @@ build/bin/circt-opt -cmt2-inline-private-funcs --lower-cmt2-to-firrtl test/Conve
 ```
 where the `gcd-simple.mlir` is a simplied version with interface mechanism removed temporarily.
 
+We should also generate SystemVerilog from a `test/Conversion/Cmt2ToFIRRTL/gcd-simple.mlir` design by the command:
+```shell
+# Generate SystemVerilog from Cmt2 design
+build/bin/circt-opt test/Conversion/Cmt2ToFIRRTL/gcd-simple.mlir -cmt2-inline-private-funcs --lower-cmt2-to-firrtl | build/bin/firtool --format=mlir
+
+# Or save to a file
+build/bin/circt-opt test/Conversion/Cmt2ToFIRRTL/gcd-simple.mlir -cmt2-inline-private-funcs --lower-cmt2-to-firrtl | build/bin/firtool --format=mlir --disable-reg-randomization -o /tmp/gcd.sv
+```
+
 #### Progress
 
 ✅ **COMPLETE** - Cmt2ToFIRRTL conversion pass successfully converts Cmt2 to FIRRTL and generates valid SystemVerilog.
