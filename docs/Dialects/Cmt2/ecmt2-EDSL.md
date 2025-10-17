@@ -293,20 +293,23 @@ private:
     }
 };
 
-// Clock signal
+// Clock signal - wraps a module argument
 class Clock {
 public:
-    explicit Clock(mlir::OpBuilder& builder, mlir::Location loc);
+    Clock() = default;
+    explicit Clock(mlir::Value value) : value_(value) {}
     mlir::Value getValue() const { return value_; }
 
 private:
     mlir::Value value_;
 };
 
-// Reset signal
+// Reset signal - wraps a module argument
 class Reset : public UInt {
 public:
-    explicit Reset(mlir::OpBuilder& builder, mlir::Location loc);
+    Reset() = default;
+    explicit Reset(mlir::Value value, mlir::OpBuilder* builder, mlir::Location loc)
+        : UInt(value, builder) {}
 };
 
 } // namespace ecmt2

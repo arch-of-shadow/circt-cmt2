@@ -1065,6 +1065,7 @@ Value LowerCmt2ToFIRRTLPass::generateReadySignal(
   }
 
   // AND with NOT(preceding conflicting functions fired)
+  // Only ConflictMatrix relationships prevent concurrent firing
   const auto &funcs = group.getFunctions();
   auto funcIt = llvm::find(funcs, func.functionNameAttr());
   if (funcIt != funcs.end()) {
