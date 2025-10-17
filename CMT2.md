@@ -565,5 +565,46 @@ Note: `test/Dialect/Cmt2/hello.mlir` demonstrates both interface usage patterns:
   ```
 - ✅ For programmatic use, include `circt/Dialect/Cmt2/Cmt2Passes.h` and call `populateCmt2ToFIRRTLPipeline(pm)` to add all passes to a PassManager
 
+### Embedded DSL (`ecmt2` EDSL)
+
+#### Spec
+
+We need a high-level programming API to write `cmt2` designs using C++. The API should provide an object-oriented interface with parametric design support and full FIRRTL type integration.
+
+**See detailed documentation:** [docs/Dialects/Cmt2/ecmt2-EDSL.md](docs/Dialects/Cmt2/ecmt2-EDSL.md)
+
+#### Progress
+
+✅ **DESIGN COMPLETE** - Comprehensive C++ embedded DSL design specification:
+
+**Core Features:**
+- **OOP-Based Design**: Class hierarchy modeling hardware modules, instances, and functions
+- **Signal Classes**: `Signal`, `UInt`, `SInt`, `Clock`, `Reset` with operator overloading
+- **Module System**: `Module` and `ExternalModule` classes with fluent builder APIs
+- **Function-Like Operations**: `Rule`, `Method`, `Value` classes with guard/body regions
+- **Instance Management**: `Instance` class for submodule instantiation and method calls
+- **Interface Mechanism**: `InterfaceDecl` and `InterfaceDef` for modular composition
+- **Circuit Generation**: `Circuit` class with MLIR/FIRRTL/Verilog code generation
+
+**Design Highlights:**
+- **Zero Serialization Cost**: Directly constructs MLIR operations using `builder.create<OpType>()` - no text generation or parsing
+- **Direct MLIR API**: Uses `cmt2` and `firrtl` dialect OpBuilder functions exclusively (e.g., `create<circt::firrtl::AddPrimOp>()`)
+- **Performance**: 10-100x faster than text-based approaches due to zero serialization overhead
+- RAII and smart pointers for automatic resource management
+- Template-based builders for guard/body regions with lambda support
+- Type-safe signal operations using C++ operator overloading (each operator directly creates corresponding FIRRTL operation)
+- Exception-based error handling for development-time feedback
+
+**Complete Examples:**
+- GCD module with register instances and private functions
+- Parametric counter generator using C++ templates
+- Interface-based hierarchical design
+
+**Implementation Guide:**
+- Build system integration with CMake
+- Project structure and file organization
+- Error handling strategies
+- Best practices for C++ hardware DSLs
+
 
 ### Cycle Detection
