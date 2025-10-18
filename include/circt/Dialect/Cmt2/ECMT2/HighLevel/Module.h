@@ -14,6 +14,7 @@
 #define CIRCT_DIALECT_CMT2_ECMT2_HIGHLEVEL_MODULE_H
 
 #include "circt/Dialect/Cmt2/ECMT2/Module.h"
+#include "circt/Dialect/Cmt2/ECMT2/HighLevel/Registry.h"
 #include "llvm/ADT/StringRef.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/Location.h"
@@ -25,6 +26,21 @@ namespace ecmt2 {
 namespace highlevel {
 
 class Circuit;
+
+/// Build context that stores current builder and location
+/// This enables implicit context for helper functions
+class BuildContext {
+public:
+  BuildContext(mlir::OpBuilder *builder, mlir::Location loc)
+      : builder_(builder), loc_(loc) {}
+
+  mlir::OpBuilder &builder() { return *builder_; }
+  mlir::Location loc() const { return loc_; }
+
+private:
+  mlir::OpBuilder *builder_;
+  mlir::Location loc_;
+};
 
 /// Base class for all high-level Cmt2 modules
 /// Wraps the low-level ecmt2::Module class
@@ -43,6 +59,9 @@ public:
   /// Module name
   llvm::StringRef name() const { return name_; }
 
+  /// Get current build context (for helper functions)
+  static BuildContext *getCurrentContext() { return currentContext_; }
+
 protected:
   /// Called by Circuit to set up low-level module
   void setLowLevelModule(ecmt2::Module *module) {
@@ -53,11 +72,24 @@ protected:
   mlir::OpBuilder &builder() { return lowLevelModule_->getBuilder(); }
   mlir::Location loc() const { return lowLevelModule_->getLoc(); }
 
+  /// Access to member registry for macro-based registration
+  MemberRegistry &getRegistry() { return registry_; }
+
+  /// Set current build context (used internally by function builders)
+  static void setCurrentContext(BuildContext *ctx) { currentContext_ = ctx; }
+
 private:
   std::string name_;
   ecmt2::Module *lowLevelModule_ = nullptr;
+  MemberRegistry registry_;
+
+  /// Thread-local current context for implicit builder access
+  static thread_local BuildContext *currentContext_;
 
   friend class Circuit;
+  template <typename RetType> friend class Value;
+  template <typename RetType, typename... Args> friend class Method;
+  friend class Rule;
 };
 
 } // namespace highlevel

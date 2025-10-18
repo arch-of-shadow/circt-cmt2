@@ -8,9 +8,13 @@ add_circt_dialect_library(CIRCTECMT2
   Interface.cpp
   Circuit.cpp
   ModuleLibrary.cpp
+  HighLevel/Circuit.cpp
+  HighLevel/Module.cpp
+  HighLevel/FunctionLike.cpp
 
   ADDITIONAL_HEADER_DIRS
   ${CIRCT_MAIN_INCLUDE_DIR}/circt/Dialect/Cmt2/ECMT2
+  ${CIRCT_MAIN_INCLUDE_DIR}/circt/Dialect/Cmt2/ECMT2/HighLevel
 
   DEPENDS
   MLIRCmt2IncGen
