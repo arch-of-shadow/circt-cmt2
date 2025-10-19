@@ -43,9 +43,10 @@ int main() {
   Circuit circuit("Counter", context);
 
   // Create a register external module from library with width=32
+  // Name is auto-generated from parameters: Reg_width32_init0
   llvm::StringMap<int64_t> regParams;
   regParams["width"] = 32;
-  auto *regMod = circuit.addExternalModule("reg", "FIRRTLReg", regParams);
+  auto *regMod = circuit.addExternalModule("FIRRTLReg", regParams);
   regMod->bindClock("clk", "clock")
         .bindReset("rst", "reset")
         .bindValue("read", "read_ready", {"read_data"})

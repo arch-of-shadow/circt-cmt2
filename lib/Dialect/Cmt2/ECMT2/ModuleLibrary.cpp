@@ -100,6 +100,50 @@ mlir::LogicalResult ModuleLibrary::loadManifest(llvm::StringRef path) {
       info.description = content.substr(descStart, descEnd - descStart);
     }
 
+    // Parse parameters section (for Chisel modules)
+    size_t paramsPos = content.find("parameters:", pathPos);
+    if (paramsPos != std::string::npos && paramsPos < content.find("- name:", pos + 1)) {
+      // Find all parameter entries
+      size_t paramPos = content.find("- name:", paramsPos);
+      size_t nextModulePos = content.find("- name:", pos + 1);
+      size_t buildSectionPos = content.find("build:", paramsPos);
+
+      while (paramPos != std::string::npos && paramPos < buildSectionPos) {
+        ModuleInfo::ParamInfo paramInfo;
+
+        // Extract parameter name
+        size_t pnameStart = content.find("\"", paramPos) + 1;
+        size_t pnameEnd = content.find("\"", pnameStart);
+        paramInfo.name = content.substr(pnameStart, pnameEnd - pnameStart);
+
+        // Extract default value (optional)
+        size_t defaultPos = content.find("default:", paramPos);
+        if (defaultPos != std::string::npos && defaultPos < content.find("- name:", paramPos + 1)) {
+          size_t defaultStart = defaultPos + 8; // Skip "default:"
+          while (defaultStart < content.size() && std::isspace(content[defaultStart])) defaultStart++;
+          size_t defaultEnd = defaultStart;
+          while (defaultEnd < content.size() && std::isdigit(content[defaultEnd])) defaultEnd++;
+          if (defaultEnd > defaultStart) {
+            paramInfo.defaultValue = std::stoll(content.substr(defaultStart, defaultEnd - defaultStart));
+          }
+        }
+
+        // Extract required flag (optional)
+        size_t requiredPos = content.find("required:", paramPos);
+        if (requiredPos != std::string::npos && requiredPos < content.find("- name:", paramPos + 1)) {
+          paramInfo.required = content.find("true", requiredPos) != std::string::npos;
+        } else {
+          paramInfo.required = false;
+        }
+
+        info.parameters.push_back(paramInfo);
+
+        // Find next parameter
+        paramPos = content.find("- name:", pnameEnd);
+        if (paramPos >= buildSectionPos) break;
+      }
+    }
+
     // For Chisel modules, extract build info
     if (info.type == ModuleInfo::Chisel) {
       ModuleInfo::BuildInfo buildInfo;
@@ -241,10 +285,44 @@ mlir::LogicalResult ModuleLibrary::buildChiselModule(
   // Create command to cd to directory and run script
   std::string bashCmd = "cd " + buildDir.str().str() + " && " + buildScript.str().str();
 
-  // Add parameters as arguments
-  for (const auto &param : params) {
-    bashCmd += " " + std::to_string(param.getValue());
+  // Debug: Print module info
+  llvm::errs() << "DEBUG: Building module " << info.name << "\n";
+  llvm::errs() << "DEBUG: Number of parameters in manifest: " << info.parameters.size() << "\n";
+  llvm::errs() << "DEBUG: Number of parameters provided: " << params.size() << "\n";
+  for (const auto &p : params) {
+    llvm::errs() << "DEBUG: Provided param: " << p.getKey() << " = " << p.getValue() << "\n";
   }
+
+  // Add parameters as named arguments (key=value style)
+  for (const auto &paramInfo : info.parameters) {
+    llvm::errs() << "DEBUG: Processing manifest param: " << paramInfo.name << "\n";
+
+    auto it = params.find(paramInfo.name);
+    int64_t value;
+
+    if (it != params.end()) {
+      // Use provided value
+      value = it->getValue();
+      llvm::errs() << "DEBUG: Using provided value: " << value << "\n";
+    } else if (paramInfo.defaultValue) {
+      // Use default value
+      value = *paramInfo.defaultValue;
+      llvm::errs() << "DEBUG: Using default value: " << value << "\n";
+    } else if (paramInfo.required) {
+      // Required parameter not provided
+      llvm::errs() << "Required parameter " << paramInfo.name << " not provided\n";
+      return mlir::failure();
+    } else {
+      // No value and not required - skip
+      llvm::errs() << "DEBUG: Skipping optional param with no value\n";
+      continue;
+    }
+
+    bashCmd += " " + paramInfo.name + "=" + std::to_string(value);
+    llvm::errs() << "DEBUG: Added to command: " << paramInfo.name << "=" << value << "\n";
+  }
+
+  llvm::errs() << "DEBUG: Full command: " << bashCmd << "\n";
 
   llvm::SmallVector<llvm::StringRef, 8> args;
   args.push_back("/bin/bash");
@@ -262,7 +340,15 @@ mlir::LogicalResult ModuleLibrary::buildChiselModule(
   }
 
   // Determine output file path
-  std::string outputPattern = substituteParams(info.buildInfo->outputPattern, params);
+  // Create complete parameter map (merge provided params with defaults)
+  llvm::StringMap<int64_t> completeParams = params;
+  for (const auto &paramInfo : info.parameters) {
+    if (completeParams.find(paramInfo.name) == completeParams.end() && paramInfo.defaultValue) {
+      completeParams[paramInfo.name] = *paramInfo.defaultValue;
+    }
+  }
+
+  std::string outputPattern = substituteParams(info.buildInfo->outputPattern, completeParams);
   llvm::SmallString<256> outputFile(buildDir);
   llvm::sys::path::append(outputFile, outputPattern);
 
@@ -325,7 +411,8 @@ ModuleLibrary::loadModule(llvm::StringRef name,
 
 mlir::LogicalResult ModuleLibrary::insertModuleIntoCircuit(
     llvm::StringRef name, const llvm::StringMap<int64_t> &params,
-    mlir::OpBuilder &builder, mlir::Location loc) {
+    mlir::OpBuilder &builder, mlir::Location loc,
+    std::string &actualModuleName) {
 
   auto moduleOpResult = loadModule(name, params, *builder.getContext());
   if (mlir::failed(moduleOpResult))
@@ -343,6 +430,15 @@ mlir::LogicalResult ModuleLibrary::insertModuleIntoCircuit(
   if (!loadedCircuit) {
     llvm::errs() << "No firrtl.circuit found in loaded module\n";
     return mlir::failure();
+  }
+
+  // Extract the actual FIRRTL module name (with parameters)
+  // This will be returned to the caller
+  for (auto &op : loadedCircuit.getBodyBlock()->getOperations()) {
+    if (auto firrtlMod = mlir::dyn_cast<circt::firrtl::FModuleOp>(op)) {
+      actualModuleName = firrtlMod.getModuleName().str();
+      break;
+    }
   }
 
   // Find or create a firrtl.circuit to insert the modules into

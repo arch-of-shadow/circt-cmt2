@@ -13,6 +13,7 @@
 package cmt2.lib
 
 import chisel3._
+import chisel3.stage.ChiselStage
 import chisel3.util._
 
 /**
@@ -56,7 +57,7 @@ object FIRRTLRegMain extends App {
   val width = if (args.length > 0) args(0).toInt else 32
 
   // Generate FIRRTL using emitFirrtl
-  val firrtl = chisel3.emitFirrtl(new FIRRTLReg(width))
+  val firrtl = ChiselStage.emitFirrtl(new FIRRTLReg(width))
 
   // Output filename
   val outputFile = s"Reg_width${width}.fir"

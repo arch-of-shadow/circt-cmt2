@@ -83,7 +83,7 @@ library.loadManifest("lib/Dialect/Cmt2/ModuleLibrary/manifest.yaml");
 // Create register with width=32
 llvm::StringMap<int64_t> params;
 params["width"] = 32;
-auto *regMod = circuit.addExternalModule("reg", "FIRRTLReg", params);
+auto *regMod = circuit.addExternalModule("FIRRTLReg", params);
 
 // Bind interfaces
 regMod->bindClock("clock")

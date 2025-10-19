@@ -10,6 +10,10 @@ modules:
         type: "integer"
         default: 32
         required: false
+      - name: "init"
+        type: "integer"
+        default: 0
+        required: false
     ports:
       clock: "!firrtl.clock"
       reset: "!firrtl.uint<1>"
@@ -27,5 +31,5 @@ modules:
     build:
       command: "./build.sh"
       args: []
-      output_pattern: "Reg_width${width}.mlir"
+      output_pattern: "Reg_width${width}_init${init}.mlir"
       cache: true

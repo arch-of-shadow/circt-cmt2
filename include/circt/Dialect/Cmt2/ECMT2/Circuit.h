@@ -39,11 +39,16 @@ public:
 
   /// Module management
   Module *addModule(llvm::StringRef name);
-  ExternalModule *addExternalModule(llvm::StringRef name,
-                                   llvm::StringRef firrtlModule);
-  ExternalModule *addExternalModule(llvm::StringRef name,
-                                   llvm::StringRef firrtlModule,
-                                   const llvm::StringMap<int64_t> &params);
+
+  /// Add external FIRRTL module
+  /// @param firrtlModule - Module name from library manifest (e.g., "FIRRTLReg")
+  /// @param name - Optional CMT2 module name. If empty, uses actual FIRRTL module name
+  /// @param params - Optional parameters for parameterized modules
+  ExternalModule *addExternalModule(llvm::StringRef firrtlModule,
+                                   llvm::StringRef name = "");
+  ExternalModule *addExternalModule(llvm::StringRef firrtlModule,
+                                   const llvm::StringMap<int64_t> &params,
+                                   llvm::StringRef name = "");
 
   /// Interface management
   Interface *addInterface(llvm::StringRef name);

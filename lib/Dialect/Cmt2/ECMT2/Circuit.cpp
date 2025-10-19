@@ -59,15 +59,16 @@ Module *Circuit::addModule(llvm::StringRef name) {
   return ptr;
 }
 
-ExternalModule *Circuit::addExternalModule(llvm::StringRef name,
-                                           llvm::StringRef firrtlModule) {
+ExternalModule *Circuit::addExternalModule(llvm::StringRef firrtlModule,
+                                           llvm::StringRef name) {
   llvm::StringMap<int64_t> emptyParams;
-  return addExternalModule(name, firrtlModule, emptyParams);
+  return addExternalModule(firrtlModule, emptyParams, name);
 }
 
 ExternalModule *Circuit::addExternalModule(
-    llvm::StringRef name, llvm::StringRef firrtlModule,
-    const llvm::StringMap<int64_t> &params) {
+    llvm::StringRef firrtlModule,
+    const llvm::StringMap<int64_t> &params,
+    llvm::StringRef name) {
 
   // Check library for the FIRRTL module
   auto &library = ModuleLibrary::getInstance();
@@ -82,8 +83,9 @@ ExternalModule *Circuit::addExternalModule(
     // Set insertion point to the mlirModule body (same level as cmt2.circuit)
     builder_.setInsertionPointToEnd(mlirModule_->getBody());
 
-    // Load and insert the FIRRTL module
-    if (mlir::failed(library.insertModuleIntoCircuit(firrtlModule, params, builder_, loc_))) {
+    // Load and insert the FIRRTL module, getting the actual parameterized module name
+    std::string actualModuleName;
+    if (mlir::failed(library.insertModuleIntoCircuit(firrtlModule, params, builder_, loc_, actualModuleName))) {
       llvm::errs() << "Warning: Failed to insert module from library: "
                    << firrtlModule << "\n";
     }
@@ -91,9 +93,12 @@ ExternalModule *Circuit::addExternalModule(
     // Restore insertion point
     builder_.restoreInsertionPoint(savedIP);
 
-    // Create ExternalModule wrapper with metadata
+    // Use provided name if given, otherwise use the actual FIRRTL module name
+    std::string cmt2ModuleName = name.empty() ? actualModuleName : name.str();
+
+    // Create ExternalModule wrapper with metadata using the actual parameterized module name
     auto extModule =
-        std::make_unique<ExternalModule>(name, firrtlModule, builder_, loc_);
+        std::make_unique<ExternalModule>(cmt2ModuleName, actualModuleName, builder_, loc_);
 
     // Apply conflict matrix from library
     if (moduleInfo) {

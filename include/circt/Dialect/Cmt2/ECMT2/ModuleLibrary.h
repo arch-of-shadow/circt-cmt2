@@ -96,10 +96,12 @@ public:
 
   /// Insert module into circuit
   /// This is called automatically by Circuit::addExternalModule
+  /// Returns the actual FIRRTL module name (with parameters) via actualModuleName
   mlir::LogicalResult insertModuleIntoCircuit(llvm::StringRef name,
                                               const llvm::StringMap<int64_t> &params,
                                               mlir::OpBuilder &builder,
-                                              mlir::Location loc);
+                                              mlir::Location loc,
+                                              std::string &actualModuleName);
 
   /// Set library base path (for testing)
   void setLibraryPath(llvm::StringRef path) { libraryBasePath_ = path.str(); }

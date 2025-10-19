@@ -14,48 +14,74 @@
 
 set -e  # Exit on error
 
-# Get width parameter (default: 32)
-WIDTH=${1:-32}
+# Debug: Echo all arguments received
+# echo "DEBUG: build.sh called with $# arguments:" >&2
+# echo "DEBUG: \$@ = '$@'" >&2
+# echo "DEBUG: PWD = $(pwd)" >&2
 
-# Output filename
-OUTPUT_FILE="Reg_width${WIDTH}.mlir"
+# Parse named parameters (key=value format)
+WIDTH=32  # Default
+INIT=0    # Default
 
-# Check if we can use Chisel (requires SBT)
-if command -v sbt &> /dev/null; then
-    echo "Building FIRRTLReg with Chisel (width=$WIDTH)..." >&2
+for arg in "$@"; do
+  case $arg in
+    width=*)
+      WIDTH="${arg#*=}"
+      # echo "DEBUG: Parsed width=$WIDTH" >&2
+      ;;
+    init=*)
+      INIT="${arg#*=}"
+      # echo "DEBUG: Parsed init=$INIT" >&2
+      ;;
+    *)
+      # echo "DEBUG: Unknown parameter: $arg" >&2
+      ;;
+  esac
+done
 
-    # Run Chisel to generate FIRRTL
-    sbt "runMain cmt2.lib.FIRRTLRegMain $WIDTH" > /dev/null 2>&1
+# echo "DEBUG: Final WIDTH=$WIDTH, INIT=$INIT" >&2
 
-    # Check if FIRRTL was generated
-    FIRRTL_FILE="Reg_width${WIDTH}.fir"
-    if [ -f "$FIRRTL_FILE" ]; then
-        # Convert FIRRTL to MLIR using firtool
-        if command -v firtool &> /dev/null; then
-            echo "Converting FIRRTL to MLIR using firtool..." >&2
-            firtool --format=fir --ir-fir "$FIRRTL_FILE" > "$OUTPUT_FILE"
+# Output filename includes both width and init
+OUTPUT_FILE="Reg_width${WIDTH}_init${INIT}.mlir"
+# Module name matches the output filename (without .mlir)
+MODULE_NAME="Reg_width${WIDTH}_init${INIT}"
 
-            # Clean up intermediate FIRRTL file
-            rm -f "$FIRRTL_FILE"
-        else
-            echo "Warning: firtool not found, cannot convert to MLIR" >&2
-            echo "Falling back to direct MLIR generation..." >&2
-        fi
-    else
-        echo "Warning: Chisel did not generate $FIRRTL_FILE" >&2
-        echo "Falling back to direct MLIR generation..." >&2
-    fi
-fi
+# # Check if we can use Chisel (requires SBT)
+# if command -v sbt &> /dev/null; then
+#     echo "Building FIRRTLReg with Chisel (width=$WIDTH)..." >&2
+
+#     # Run Chisel to generate FIRRTL
+#     sbt "runMain cmt2.lib.FIRRTLRegMain $WIDTH" > /dev/null 2>&1
+
+#     # Check if FIRRTL was generated
+#     FIRRTL_FILE="Reg_width${WIDTH}.fir"
+#     if [ -f "$FIRRTL_FILE" ]; then
+#         # Convert FIRRTL to MLIR using firtool
+#         if command -v firtool &> /dev/null; then
+#             echo "Converting FIRRTL to MLIR using firtool..." >&2
+#             firtool --format=fir --ir-fir "$FIRRTL_FILE" > "$OUTPUT_FILE"
+
+#             # Clean up intermediate FIRRTL file
+#             rm -f "$FIRRTL_FILE"
+#         else
+#             echo "Warning: firtool not found, cannot convert to MLIR" >&2
+#             echo "Falling back to direct MLIR generation..." >&2
+#         fi
+#     else
+#         echo "Warning: Chisel did not generate $FIRRTL_FILE" >&2
+#         echo "Falling back to direct MLIR generation..." >&2
+#     fi
+# fi
 
 # If Chisel build failed or firtool is not available, generate MLIR directly
 # This is a fallback for development/testing
 if [ ! -f "$OUTPUT_FILE" ]; then
-    echo "Generating MLIR directly (fallback mode)..." >&2
+    echo "Generating MLIR directly (fallback mode) (width=$WIDTH)..." >&2
 
     cat > "$OUTPUT_FILE" << EOF
 module {
-  firrtl.circuit "FIRRTLReg" {
-    firrtl.module @FIRRTLReg(
+  firrtl.circuit "${MODULE_NAME}" {
+    firrtl.module @${MODULE_NAME}(
       in %clock: !firrtl.clock,
       in %reset: !firrtl.uint<1>,
       in %write_enable: !firrtl.uint<1>,
@@ -64,8 +90,9 @@ module {
       out %read_data: !firrtl.uint<${WIDTH}>,
       out %write_ready: !firrtl.uint<1>
     ) {
-      // Internal register
-      %reg = firrtl.reg %clock : !firrtl.clock, !firrtl.uint<${WIDTH}>
+      // Internal register with reset
+      %c${INIT}_ui${WIDTH} = firrtl.constant ${INIT} : !firrtl.uint<${WIDTH}>
+      %reg = firrtl.regreset %clock, %reset, %c${INIT}_ui${WIDTH} : !firrtl.clock, !firrtl.uint<1>, !firrtl.uint<${WIDTH}>, !firrtl.uint<${WIDTH}>
 
       // Read is always ready, returns current register value
       %c1_ui1 = firrtl.constant 1 : !firrtl.uint<1>
