@@ -101,8 +101,8 @@ static void printModuleLikeOp(OpAsmPrinter &p, Operation *op,
   p << ' ';
   p.printRegion(body, /*printEntryBlockArgs=*/false);
 
-  // Print trailing attributes after body
-  p.printOptionalAttrDictWithKeyword(op->getAttrs(), elidedAttrs);
+  // Print trailing attributes after body (without "attributes" keyword)
+  p.printOptionalAttrDict(op->getAttrs(), elidedAttrs);
 }
 
 static void getAsmBlockArgumentNamesImpl(ArrayAttr argNames, Region &region,
@@ -151,7 +151,7 @@ void ExtModuleFirrtlOp::print(OpAsmPrinter &p) {
   p << " : ";
   p.printSymbolName(getExtModuleName());
 
-  SmallVector<StringRef> elidedAttrs = {"sym_name", "ext_module_name", "argNames"};
+  SmallVector<StringRef> elidedAttrs = {"sym_name", "ext_module_name", "argNames", "methods", "values"};
   printModuleLikeOp(p, *this, getArgNames(), getBody(), elidedAttrs);
 }
 

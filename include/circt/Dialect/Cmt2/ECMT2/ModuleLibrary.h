@@ -103,6 +103,12 @@ public:
                                               mlir::Location loc,
                                               std::string &actualModuleName);
 
+  /// Get the actual FIRRTL module name that would be generated (without building)
+  /// This is used for deduplication - to check if a module already exists
+  mlir::LogicalResult getActualModuleName(llvm::StringRef name,
+                                          const llvm::StringMap<int64_t> &params,
+                                          std::string &actualModuleName) const;
+
   /// Set library base path (for testing)
   void setLibraryPath(llvm::StringRef path) { libraryBasePath_ = path.str(); }
 

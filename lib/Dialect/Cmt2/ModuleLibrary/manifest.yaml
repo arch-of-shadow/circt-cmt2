@@ -33,3 +33,70 @@ modules:
       args: []
       output_pattern: "Reg_width${width}_init${init}.mlir"
       cache: true
+
+  - name: "Mem1r1w"
+    type: "chisel"
+    path: "firrtl/mem1r1w"
+    description: "1R1W synchronous memory (read and write latency = 1)"
+    parameters:
+      - name: "data_width"
+        type: "integer"
+        default: 32
+        required: false
+      - name: "addr_width"
+        type: "integer"
+        default: 10
+        required: false
+      - name: "depth"
+        type: "integer"
+        default: 1024
+        required: false
+    ports:
+      clock: "!firrtl.clock"
+      reset: "!firrtl.uint<1>"
+    methods:
+      - name: "rd0"
+        ready: false
+        enable: true
+        inputs: ["raddr: !firrtl.uint<${addr_width}>"]
+      - name: "rd1"
+        ready: true
+        enable: false
+        outputs: ["rdata: !firrtl.uint<${data_width}>"]
+      - name: "write"
+        ready: false
+        enable: true
+        inputs: ["wdata: !firrtl.uint<${data_width}>", "waddr: !firrtl.uint<${addr_width}>"]
+    conflict_matrix:
+      - [write, write, "Conflict"]
+      - [rd0, rd0, "Conflict"]
+    build:
+      command: "./build.sh"
+      args: []
+      output_pattern: "Mem1r1w_w${data_width}_a${addr_width}_d${depth}.mlir"
+      cache: true
+
+  - name: "Wire"
+    type: "firrtl"
+    path: "firrtl/wire"
+    description: "Combinational wire with write enable"
+    parameters:
+      - name: "width"
+        type: "integer"
+        default: 32
+        required: false
+    methods:
+      - name: "write"
+        ready: false
+        enable: true
+        inputs: ["write_data: !firrtl.uint<${width}>"]
+    values:
+      - name: "read"
+        ready: false
+        enable: false
+        outputs: ["read_data: !firrtl.uint<${width}>"]
+    build:
+      command: "./build.sh"
+      args: []
+      output_pattern: "Wire_w${width}.mlir"
+      cache: true

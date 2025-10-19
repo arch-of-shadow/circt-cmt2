@@ -85,6 +85,9 @@ private:
   std::vector<std::unique_ptr<Module>> modules_;
   std::vector<std::unique_ptr<ExternalModule>> externalModules_;
   std::vector<std::unique_ptr<Interface>> interfaces_;
+
+  /// Track external modules by their FIRRTL module name to avoid duplicates
+  llvm::StringMap<ExternalModule*> externalModuleMap_;
 };
 
 } // namespace ecmt2

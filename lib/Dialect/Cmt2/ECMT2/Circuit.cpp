@@ -76,31 +76,51 @@ ExternalModule *Circuit::addExternalModule(
     // Get module info for conflict matrix, etc.
     auto moduleInfo = library.getModuleInfo(firrtlModule);
 
-    // Insert the FIRRTL module into the MLIR module (at module level, not inside cmt2.circuit)
+    // First, compute the actual module name that will be generated
+    std::string actualModuleName;
+    if (mlir::failed(library.getActualModuleName(firrtlModule, params, actualModuleName))) {
+      llvm::errs() << "Warning: Failed to get actual module name for: "
+                   << firrtlModule << "\n";
+    }
+
+    // Check if we already have an external module with this FIRRTL module name
+    auto it = externalModuleMap_.find(actualModuleName);
+    if (it != externalModuleMap_.end()) {
+      // Module already exists, return the existing one
+      return it->second;
+    }
+
     // Save current insertion point
     auto savedIP = builder_.saveInsertionPoint();
 
+    // Insert the FIRRTL module into the MLIR module (at module level, not inside cmt2.circuit)
     // Set insertion point to the mlirModule body (same level as cmt2.circuit)
     builder_.setInsertionPointToEnd(mlirModule_->getBody());
 
-    // Load and insert the FIRRTL module, getting the actual parameterized module name
-    std::string actualModuleName;
-    if (mlir::failed(library.insertModuleIntoCircuit(firrtlModule, params, builder_, loc_, actualModuleName))) {
+    // Load and insert the FIRRTL module
+    std::string insertedModuleName;
+    if (mlir::failed(library.insertModuleIntoCircuit(firrtlModule, params, builder_, loc_, insertedModuleName))) {
       llvm::errs() << "Warning: Failed to insert module from library: "
                    << firrtlModule << "\n";
     }
 
-    // Restore insertion point
-    builder_.restoreInsertionPoint(savedIP);
-
     // Use provided name if given, otherwise use the actual FIRRTL module name
     std::string cmt2ModuleName = name.empty() ? actualModuleName : name.str();
+
+    // Create ExternalModule at circuit level
+    // Save the current insertion point and ensure we create at circuit level
+    auto savedIPForExtMod = builder_.saveInsertionPoint();
+    builder_.setInsertionPointToEnd(&circuitOp_.getBody().front());
 
     // Create ExternalModule wrapper with metadata using the actual parameterized module name
     auto extModule =
         std::make_unique<ExternalModule>(cmt2ModuleName, actualModuleName, builder_, loc_);
 
+    // Restore insertion point immediately after creating the ExternalModule op
+    builder_.restoreInsertionPoint(savedIPForExtMod);
+
     // Apply conflict matrix from library
+    // (these methods modify attributes, not insertion point)
     if (moduleInfo) {
       for (auto &entry : moduleInfo->conflictMatrix) {
         switch (entry.relation) {
@@ -118,15 +138,39 @@ ExternalModule *Circuit::addExternalModule(
     }
 
     auto *ptr = extModule.get();
+    externalModuleMap_[actualModuleName] = ptr;  // Track this external module
     externalModules_.push_back(std::move(extModule));
+
+    // Restore original insertion point
+    builder_.restoreInsertionPoint(savedIP);
+
     return ptr;
   }
 
   // Module not in library - create basic external reference
+  std::string firrtlModuleStr = firrtlModule.str();
+
+  // Check if already exists
+  auto it = externalModuleMap_.find(firrtlModuleStr);
+  if (it != externalModuleMap_.end()) {
+    return it->second;
+  }
+
+  // Save current insertion point
+  auto savedIP = builder_.saveInsertionPoint();
+
+  // Set insertion point to circuit body for creating the external module declaration
+  builder_.setInsertionPointToEnd(&circuitOp_.getBody().front());
+
   auto extModule =
       std::make_unique<ExternalModule>(name, firrtlModule, builder_, loc_);
   auto *ptr = extModule.get();
+  externalModuleMap_[firrtlModuleStr] = ptr;  // Track this external module
   externalModules_.push_back(std::move(extModule));
+
+  // Restore insertion point
+  builder_.restoreInsertionPoint(savedIP);
+
   return ptr;
 }
 
