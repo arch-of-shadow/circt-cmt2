@@ -2,6 +2,7 @@
 
 add_circt_dialect_library(CIRCTECMT2
   Signal.cpp
+  SignalHelpers.cpp
   Module.cpp
   FunctionLike.cpp
   Instance.cpp

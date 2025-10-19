@@ -143,6 +143,62 @@ public:
       : UInt(value, builder, loc) {}
 };
 
+/// Bundle signal - aggregate of named elements (like a struct)
+class Bundle : public Signal {
+public:
+  Bundle() = default;
+
+  /// Create a bundle with specified elements
+  /// Elements are specified as {name, isFlip, type} tuples
+  explicit Bundle(llvm::ArrayRef<firrtl::BundleType::BundleElement> elements,
+                  mlir::OpBuilder &builder, mlir::Location loc);
+
+  /// Wrap an existing bundle value
+  explicit Bundle(mlir::Value value, mlir::OpBuilder *builder,
+                  mlir::Location loc)
+      : Signal(value, builder, loc) {}
+
+  /// Access a field by name, returns a Signal wrapping the subfield
+  Signal operator[](llvm::StringRef fieldName) const;
+
+  /// Get the bundle type
+  firrtl::BundleType getBundleType() const;
+
+private:
+  static mlir::Value createWire(
+      llvm::ArrayRef<firrtl::BundleType::BundleElement> elements,
+      mlir::OpBuilder &builder, mlir::Location loc);
+};
+
+/// FVector signal - fixed-size collection of elements (like an array)
+class FVector : public Signal {
+public:
+  FVector() = default;
+
+  /// Create a vector with specified element type and size
+  explicit FVector(firrtl::FIRRTLBaseType elementType, size_t numElements,
+                   mlir::OpBuilder &builder, mlir::Location loc);
+
+  /// Wrap an existing vector value
+  explicit FVector(mlir::Value value, mlir::OpBuilder *builder,
+                   mlir::Location loc)
+      : Signal(value, builder, loc) {}
+
+  /// Access an element by index, returns a Signal wrapping the indexed element
+  Signal operator[](unsigned index) const;
+
+  /// Get the vector type
+  firrtl::FVectorType getVectorType() const;
+
+  /// Get the number of elements
+  size_t getNumElements() const;
+
+private:
+  static mlir::Value createWire(firrtl::FIRRTLBaseType elementType,
+                                size_t numElements, mlir::OpBuilder &builder,
+                                mlir::Location loc);
+};
+
 } // namespace ecmt2
 } // namespace cmt2
 } // namespace circt

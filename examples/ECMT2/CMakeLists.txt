@@ -126,3 +126,39 @@ target_include_directories(ecmt2-hello-v3-example
   PRIVATE
   ${CIRCT_MAIN_INCLUDE_DIR}
 )
+
+add_executable(ecmt2-bundle-vector-example
+  bundle_vector_example.cpp
+)
+
+target_link_libraries(ecmt2-bundle-vector-example
+  PRIVATE
+  CIRCTECMT2
+  CIRCTCmt2
+  CIRCTFIRRTL
+  MLIRIR
+  MLIRSupport
+)
+
+target_include_directories(ecmt2-bundle-vector-example
+  PRIVATE
+  ${CIRCT_MAIN_INCLUDE_DIR}
+)
+
+add_executable(ecmt2-bundle-vector-highlevel-example
+  bundle_vector_highlevel_example.cpp
+)
+
+target_link_libraries(ecmt2-bundle-vector-highlevel-example
+  PRIVATE
+  CIRCTECMT2
+  CIRCTCmt2
+  CIRCTFIRRTL
+  MLIRIR
+  MLIRSupport
+)
+
+target_include_directories(ecmt2-bundle-vector-highlevel-example
+  PRIVATE
+  ${CIRCT_MAIN_INCLUDE_DIR}
+)

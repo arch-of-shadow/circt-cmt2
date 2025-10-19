@@ -92,4 +92,9 @@ private:
 #define INIT_VALUE(member) (CMT2_REGISTER(member), member)
 #define INIT_METHOD(member) (CMT2_REGISTER(member), member)
 
+// Macros for custom types (bundles/vectors)
+// These use the same registration mechanism but work with CustomMethod/CustomValue
+#define INIT_CUSTOM_VALUE(member) (CMT2_REGISTER(member), member)
+#define INIT_CUSTOM_METHOD(member) (CMT2_REGISTER(member), member)
+
 #endif // CIRCT_DIALECT_CMT2_ECMT2_HIGHLEVEL_REGISTRY_H

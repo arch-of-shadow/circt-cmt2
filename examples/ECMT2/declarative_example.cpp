@@ -33,12 +33,12 @@ public:
 
   void build() override {
     auto *module = lowLevelModule();
-    auto &builder = module->getBuilder();
+    // auto &builder = module->getBuilder();
     auto loc = module->getLoc();
 
     // Add clock and reset arguments
-    Clock clk = module->addClockArgument("clk");
-    Reset rst = module->addResetArgument("rst");
+    // Clock clk = module->addClockArgument("clk");
+    // Reset rst = module->addResetArgument("rst");
 
     // Define rule behavior using lambdas
     incrementRule.guard([&](mlir::OpBuilder &b) {

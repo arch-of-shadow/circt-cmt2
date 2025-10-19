@@ -93,39 +93,28 @@ CMT2_REGISTER_INSTANCE(instanceName, modulePtr, arg1, arg2, ...);
 ### Function Templates
 
 ```cpp
-// Value: read-only function returning data
-template <typename RetType>
-class Value {
-    template <typename Func>
-    Value &guard(Func &&f);
+// For simple types (UInt/SInt with known width)
+template <typename RetType, typename... Args> class Method;
+template <typename RetType> class Value;
+class Rule;
 
-    template <typename Func>
-    Value &body(Func &&f);
-};
+// For complex types (bundles/vectors)
+class CustomMethod;
+class CustomValue;
 
-// Method: function with side effects
-template <typename RetType, typename... Args>
-class Method {
-    template <typename Func>
-    Method &guard(Func &&f);
+// Usage
+highlevel::Value<UInt<32>> myValue;
+highlevel::Method<UInt<16>, UInt<32>> myMethod;
+highlevel::Rule myRule;
+highlevel::CustomMethod bundleMethod;
+highlevel::CustomValue bundleValue;
 
-    template <typename Func>
-    Method &body(Func &&f);
-};
-
-// Rule: autonomous behavior
-class Rule {
-    template <typename Func>
-    Rule &guard(Func &&f);
-
-    template <typename Func>
-    Rule &body(Func &&f);
-};
-
-// Registration macros
-INIT_VALUE(valueName).guard(...).body(...);
-INIT_METHOD(methodName).guard(...).body(...);
-INIT_RULE(ruleName).guard(...).body(...);
+// Registration with fluent API
+INIT_VALUE(myValue).guard(...).body(...);
+INIT_METHOD(myMethod).guard(...).body(...);
+INIT_RULE(myRule).guard(...).body(...);
+INIT_CUSTOM_METHOD(bundleMethod).argType(...).returnType(...).guard(...).body(...);
+INIT_CUSTOM_VALUE(bundleValue).returnType(...).guard(...).body(...);
 ```
 
 ### Interface Templates
@@ -170,6 +159,64 @@ Method<UInt<32>, UInt<16>> myMethod;  // Takes UInt<32>, returns UInt<16>
 Value<SInt<64>> myValue;              // Returns SInt<64>
 ```
 
+### Bundle and Vector Helpers
+
+**Header:** `#include "circt/Dialect/Cmt2/ECMT2/HighLevel/Helpers.h"`
+
+#### 1. Creating Bundles and Vectors
+
+```cpp
+// Fluent bundle builder (in .body() lambda)
+auto packet = MakeBundle()
+                  .addVector("data", UIntType::get(ctx, 8), 4)
+                  .addUInt("valid", 1)
+                  .build();
+
+// Create vector
+auto vec = MakeVector(UIntType::get(ctx, 32), 4);
+
+// Access fields and elements
+auto dataVec = GetField(packet, "data");
+auto byte0 = GetElement(dataVec, 0);
+```
+
+#### 2. Bundle/Vector Types in Method/Value Signatures
+
+**Header:** `#include "circt/Dialect/Cmt2/ECMT2/HighLevel/FunctionLike.h"`
+
+For methods/values with bundle/vector arguments or return types, use `CustomMethod` and `CustomValue`:
+
+```cpp
+// High-level declarative API (in constructor)
+highlevel::CustomMethod transformCoord;
+highlevel::CustomValue getPacket;
+
+INIT_CUSTOM_METHOD(transformCoord)
+    .argType("coord", MakeBundleType().addUInt("x", 16).addUInt("y", 16))
+    .returnType(MakeBundleType().addUInt("x", 16).addUInt("y", 16))
+    .guard([](mlir::OpBuilder &b, llvm::ArrayRef<mlir::BlockArgument> args) { Return(); })
+    .body([](mlir::OpBuilder &b, llvm::ArrayRef<mlir::BlockArgument> args) {
+        auto coord = args[0];
+        auto x = GetField(coord, "x");
+        auto y = GetField(coord, "y");
+        // ... transform logic
+        Return(MakeBundle().addUInt("x", 16).addUInt("y", 16).build());
+    });
+
+INIT_CUSTOM_VALUE(getPacket)
+    .returnType(MakeVectorType("uint", 8, 4))
+    .guard([](mlir::OpBuilder &b) { Return(); })
+    .body([](mlir::OpBuilder &b) {
+        Return(MakeVector(firrtl::UIntType::get(b.getContext(), 8), 4));
+    });
+```
+
+**Key Features:**
+- Fluent type specification: `.argType(name, descriptor)`, `.returnType(descriptor)`
+- Works with `BundleTypeDescriptor` and `VectorTypeDescriptor`
+- Empty `build()` method - fully declarative in constructor
+- 70% less code than low-level API
+
 ## Helper Functions
 
 ```cpp
@@ -211,6 +258,57 @@ mlir::Value Bits(mlir::Value val, unsigned high, unsigned low);
 ```
 
 ## Usage Examples
+
+### Example 0: Bundle and Vector Operations
+
+```cpp
+class BundleVectorExample : public Cmt2Module {
+public:
+    highlevel::Value<UInt<8>> getByte0;           // Simple return type
+    highlevel::CustomValue getPacket;              // Bundle return type
+    highlevel::CustomMethod processCoord;          // Bundle argument type
+
+    BundleVectorExample() : Cmt2Module("BundleVectorExample") {
+        // Value returning simple type from bundle field access
+        INIT_VALUE(getByte0)
+            .guard([](mlir::OpBuilder &b) { Return(); })
+            .body([](mlir::OpBuilder &b) {
+                auto packet = MakeBundle()
+                    .addVector("data", firrtl::UIntType::get(b.getContext(), 8), 4)
+                    .addUInt("valid", 1)
+                    .build();
+                Return(GetElement(GetField(packet, "data"), 0));
+            });
+
+        // CustomValue returning bundle type
+        INIT_CUSTOM_VALUE(getPacket)
+            .returnType(MakeBundleType()
+                            .addVector("data", "uint", 8, 4)
+                            .addUInt("valid", 1))
+            .guard([](mlir::OpBuilder &b) { Return(); })
+            .body([](mlir::OpBuilder &b) {
+                Return(MakeBundle()
+                    .addVector("data", firrtl::UIntType::get(b.getContext(), 8), 4)
+                    .addUInt("valid", 1)
+                    .build());
+            });
+
+        // CustomMethod with bundle argument and return
+        INIT_CUSTOM_METHOD(processCoord)
+            .argType("coord", MakeBundleType().addUInt("x", 16).addUInt("y", 16))
+            .returnType(MakeBundleType().addUInt("x", 16).addUInt("y", 16))
+            .guard([](mlir::OpBuilder &b, llvm::ArrayRef<mlir::BlockArgument> args) { Return(); })
+            .body([](mlir::OpBuilder &b, llvm::ArrayRef<mlir::BlockArgument> args) {
+                auto x = GetField(args[0], "x");
+                auto y = GetField(args[0], "y");
+                auto newX = Add(y, UIntConst(100, 16));
+                Return(MakeBundle().addUInt("x", 16).addUInt("y", 16).build());
+            });
+    }
+
+    void build() override {}
+};
+```
 
 ### Example 1: Simple Counter
 
@@ -572,6 +670,8 @@ int main() {
 - **Zero `lowLevelModule()` calls**: Fully declarative members
 - **Interface Templates**: `InterfaceDecl<T>`, `InterfaceDef<T>`
 - **Empty `build()`**: Most logic in constructor
+- **Custom Type Support**: `CustomMethod`, `CustomValue` for bundle/vector signatures
+- **Bundle/Vector Helpers**: `MakeBundle()`, `MakeVector()`, `GetField()`, `GetElement()`
 
 ## Code Comparison
 

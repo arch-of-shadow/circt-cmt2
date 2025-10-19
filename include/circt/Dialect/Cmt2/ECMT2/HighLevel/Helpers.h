@@ -159,6 +159,85 @@ inline mlir::Value Bit(mlir::Value val, unsigned index) {
   return Bits(val, index, index);
 }
 
+//===----------------------------------------------------------------------===//
+// Bundle and Vector Helpers
+//===----------------------------------------------------------------------===//
+
+/// Create a bundle value with fluent API
+/// Example: auto bundle = MakeBundle()
+///                           .addUInt("addr", 32)
+///                           .addUInt("data", 64)
+///                           .build();
+class BundleBuilder {
+public:
+  BundleBuilder() : context_(B().getContext()) {}
+
+  BundleBuilder &addUInt(llvm::StringRef name, unsigned width, bool isFlip = false) {
+    auto nameAttr = mlir::StringAttr::get(context_, name);
+    auto type = circt::firrtl::UIntType::get(context_, width);
+    elements_.push_back(circt::firrtl::BundleType::BundleElement(nameAttr, isFlip, type));
+    return *this;
+  }
+
+  BundleBuilder &addSInt(llvm::StringRef name, unsigned width, bool isFlip = false) {
+    auto nameAttr = mlir::StringAttr::get(context_, name);
+    auto type = circt::firrtl::SIntType::get(context_, width);
+    elements_.push_back(circt::firrtl::BundleType::BundleElement(nameAttr, isFlip, type));
+    return *this;
+  }
+
+  BundleBuilder &addVector(llvm::StringRef name, mlir::Type elemType,
+                           size_t numElems, bool isFlip = false) {
+    auto nameAttr = mlir::StringAttr::get(context_, name);
+    auto vecType = circt::firrtl::FVectorType::get(
+        mlir::cast<circt::firrtl::FIRRTLBaseType>(elemType), numElems);
+    elements_.push_back(circt::firrtl::BundleType::BundleElement(nameAttr, isFlip, vecType));
+    return *this;
+  }
+
+  BundleBuilder &addField(llvm::StringRef name, mlir::Type type, bool isFlip = false) {
+    auto nameAttr = mlir::StringAttr::get(context_, name);
+    auto firrtlType = mlir::cast<circt::firrtl::FIRRTLBaseType>(type);
+    elements_.push_back(circt::firrtl::BundleType::BundleElement(nameAttr, isFlip, firrtlType));
+    return *this;
+  }
+
+  mlir::Value build() {
+    auto bundleType = circt::firrtl::BundleType::get(context_, elements_);
+    return B().create<circt::firrtl::InvalidValueOp>(L(), bundleType);
+  }
+
+  llvm::ArrayRef<circt::firrtl::BundleType::BundleElement> getElements() const {
+    return elements_;
+  }
+
+private:
+  mlir::MLIRContext *context_;
+  llvm::SmallVector<circt::firrtl::BundleType::BundleElement> elements_;
+};
+
+/// Factory function for BundleBuilder
+inline BundleBuilder MakeBundle() {
+  return BundleBuilder();
+}
+
+/// Create a vector value
+inline mlir::Value MakeVector(mlir::Type elemType, size_t numElements) {
+  auto vecType = circt::firrtl::FVectorType::get(
+      mlir::cast<circt::firrtl::FIRRTLBaseType>(elemType), numElements);
+  return B().create<circt::firrtl::InvalidValueOp>(L(), vecType);
+}
+
+/// Access a bundle field
+inline mlir::Value GetField(mlir::Value bundle, llvm::StringRef fieldName) {
+  return B().create<circt::firrtl::SubfieldOp>(L(), bundle, fieldName);
+}
+
+/// Access a vector element
+inline mlir::Value GetElement(mlir::Value vector, unsigned index) {
+  return B().create<circt::firrtl::SubindexOp>(L(), vector, index);
+}
+
 } // namespace highlevel
 } // namespace ecmt2
 } // namespace cmt2

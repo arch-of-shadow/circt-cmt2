@@ -104,6 +104,8 @@ private:
   template <typename RetType> friend class Value;
   template <typename RetType, typename... Args> friend class Method;
   friend class Rule;
+  friend class CustomValue;
+  friend class CustomMethod;
 };
 
 } // namespace highlevel

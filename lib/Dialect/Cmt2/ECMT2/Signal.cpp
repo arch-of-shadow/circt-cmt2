@@ -212,3 +212,93 @@ SInt SInt::constant(int64_t value, unsigned width, mlir::OpBuilder &builder,
 //===----------------------------------------------------------------------===//
 
 // Reset now only wraps existing values - no auto-creation
+
+//===----------------------------------------------------------------------===//
+// Bundle
+//===----------------------------------------------------------------------===//
+
+Bundle::Bundle(llvm::ArrayRef<firrtl::BundleType::BundleElement> elements,
+               mlir::OpBuilder &builder, mlir::Location loc)
+    : Signal(createWire(elements, builder, loc), &builder, loc) {}
+
+mlir::Value Bundle::createWire(
+    llvm::ArrayRef<firrtl::BundleType::BundleElement> elements,
+    mlir::OpBuilder &builder, mlir::Location loc) {
+  auto type = firrtl::BundleType::get(builder.getContext(), elements);
+  // Create a constant of the bundle type initialized to zero
+  // The actual wire will be created during Cmt2-to-FIRRTL lowering
+  auto constOp = builder.create<firrtl::InvalidValueOp>(loc, type);
+  return constOp.getResult();
+}
+
+Signal Bundle::operator[](llvm::StringRef fieldName) const {
+  auto bundleType = getBundleType();
+  auto elements = bundleType.getElements();
+
+  // Find the field index
+  std::optional<unsigned> fieldIndex;
+  for (unsigned i = 0; i < elements.size(); ++i) {
+    if (elements[i].name.getValue() == fieldName) {
+      fieldIndex = i;
+      break;
+    }
+  }
+
+  if (!fieldIndex) {
+    llvm::errs() << "Field '" << fieldName << "' not found in bundle type\n";
+    // Return an invalid signal with null values
+    return Signal(mlir::Value(), builder_, loc_);
+  }
+
+  // Create a subfield operation
+  auto subfieldOp = builder_->create<firrtl::SubfieldOp>(
+      loc_, value_, *fieldIndex);
+  return Signal(subfieldOp.getResult(), builder_, loc_);
+}
+
+firrtl::BundleType Bundle::getBundleType() const {
+  return mlir::cast<firrtl::BundleType>(value_.getType());
+}
+
+//===----------------------------------------------------------------------===//
+// FVector
+//===----------------------------------------------------------------------===//
+
+FVector::FVector(firrtl::FIRRTLBaseType elementType, size_t numElements,
+                 mlir::OpBuilder &builder, mlir::Location loc)
+    : Signal(createWire(elementType, numElements, builder, loc), &builder,
+             loc) {}
+
+mlir::Value FVector::createWire(firrtl::FIRRTLBaseType elementType,
+                                size_t numElements, mlir::OpBuilder &builder,
+                                mlir::Location loc) {
+  auto type = firrtl::FVectorType::get(elementType, numElements);
+  // Create a constant of the vector type initialized to invalid
+  // The actual wire will be created during Cmt2-to-FIRRTL lowering
+  auto constOp = builder.create<firrtl::InvalidValueOp>(loc, type);
+  return constOp.getResult();
+}
+
+Signal FVector::operator[](unsigned index) const {
+  auto vectorType = getVectorType();
+
+  if (index >= vectorType.getNumElements()) {
+    llvm::errs() << "Index " << index << " out of bounds for vector of size "
+                 << vectorType.getNumElements() << "\n";
+    // Return an invalid signal with null values
+    return Signal(mlir::Value(), builder_, loc_);
+  }
+
+  // Create a subindex operation
+  auto subindexOp = builder_->create<firrtl::SubindexOp>(
+      loc_, value_, index);
+  return Signal(subindexOp.getResult(), builder_, loc_);
+}
+
+firrtl::FVectorType FVector::getVectorType() const {
+  return mlir::cast<firrtl::FVectorType>(value_.getType());
+}
+
+size_t FVector::getNumElements() const {
+  return getVectorType().getNumElements();
+}

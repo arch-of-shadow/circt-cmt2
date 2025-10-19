@@ -60,6 +60,69 @@ struct UInt {};
 template <unsigned Width>
 struct SInt {};
 
+// Forward declarations for Bundle and Vector type descriptors
+struct BundleTypeDescriptor;
+struct VectorTypeDescriptor;
+
+/// Runtime bundle type descriptor
+/// Used to specify bundle types for Method/Value arguments and return types
+class BundleTypeDescriptor {
+public:
+  BundleTypeDescriptor() = default;
+
+  BundleTypeDescriptor &addUInt(llvm::StringRef name, unsigned width, bool isFlip = false) {
+    fields_.push_back({name.str(), "uint", width, 0, isFlip});
+    return *this;
+  }
+
+  BundleTypeDescriptor &addSInt(llvm::StringRef name, unsigned width, bool isFlip = false) {
+    fields_.push_back({name.str(), "sint", width, 0, isFlip});
+    return *this;
+  }
+
+  BundleTypeDescriptor &addVector(llvm::StringRef name, llvm::StringRef elemKind,
+                                   unsigned elemWidth, size_t numElems, bool isFlip = false) {
+    fields_.push_back({name.str(), "vector", elemWidth, numElems, isFlip, elemKind.str()});
+    return *this;
+  }
+
+  mlir::Type toMLIRType(mlir::MLIRContext *ctx) const;
+
+private:
+  struct FieldSpec {
+    std::string name;
+    std::string kind; // "uint", "sint", "vector", "bundle"
+    unsigned width;
+    size_t numElems; // For vectors
+    bool isFlip;
+    std::string elemKind; // For nested types
+  };
+  llvm::SmallVector<FieldSpec, 4> fields_;
+};
+
+/// Runtime vector type descriptor
+class VectorTypeDescriptor {
+public:
+  VectorTypeDescriptor(llvm::StringRef elemKind, unsigned elemWidth, size_t numElems)
+      : elemKind_(elemKind.str()), elemWidth_(elemWidth), numElems_(numElems) {}
+
+  mlir::Type toMLIRType(mlir::MLIRContext *ctx) const;
+
+private:
+  std::string elemKind_; // "uint", "sint"
+  unsigned elemWidth_;
+  size_t numElems_;
+};
+
+// Helper functions to create type descriptors
+inline BundleTypeDescriptor MakeBundleType() {
+  return BundleTypeDescriptor();
+}
+
+inline VectorTypeDescriptor MakeVectorType(llvm::StringRef elemKind, unsigned elemWidth, size_t numElems) {
+  return VectorTypeDescriptor(elemKind, elemWidth, numElems);
+}
+
 // Specializations for templated FIRRTL types
 template <unsigned Width>
 struct TypeTraits<UInt<Width>> {
@@ -173,6 +236,136 @@ private:
   std::string name_;
   std::function<void(mlir::OpBuilder &)> guardFn_;
   std::function<void(mlir::OpBuilder &)> bodyFn_;
+};
+
+//===----------------------------------------------------------------------===//
+// Custom Type Support for Bundle/Vector Methods and Values
+//===----------------------------------------------------------------------===//
+
+/// CustomValue: Value with runtime-specified types (for bundles/vectors)
+/// Used when return types cannot be specified at compile time
+class CustomValue {
+public:
+  CustomValue() = default;
+
+  /// Specify return type using type descriptor
+  CustomValue &returnType(const BundleTypeDescriptor &desc) {
+    returnTypeDesc_ = desc;
+    hasCustomReturnType_ = true;
+    returnTypeKind_ = TypeKind::Bundle;
+    return *this;
+  }
+
+  CustomValue &returnType(const VectorTypeDescriptor &desc) {
+    vectorReturnTypeDesc_ = desc;
+    hasCustomReturnType_ = true;
+    returnTypeKind_ = TypeKind::Vector;
+    return *this;
+  }
+
+  /// Define guard condition
+  template <typename Func>
+  CustomValue &guard(Func &&f) {
+    guardFn_ = std::forward<Func>(f);
+    return *this;
+  }
+
+  /// Define body computation
+  template <typename Func>
+  CustomValue &body(Func &&f) {
+    bodyFn_ = std::forward<Func>(f);
+    return *this;
+  }
+
+  /// Initialize with parent module
+  void init(Cmt2Module *parent, llvm::StringRef name);
+
+  void setName(llvm::StringRef name) { name_ = name.str(); }
+  llvm::StringRef getName() const { return name_; }
+
+private:
+  enum class TypeKind { Bundle, Vector };
+
+  std::string name_;
+  BundleTypeDescriptor returnTypeDesc_;
+  VectorTypeDescriptor vectorReturnTypeDesc_{"uint", 32, 1}; // Default placeholder
+  bool hasCustomReturnType_ = false;
+  TypeKind returnTypeKind_ = TypeKind::Bundle;
+  std::function<void(mlir::OpBuilder &)> guardFn_;
+  std::function<void(mlir::OpBuilder &)> bodyFn_;
+};
+
+/// CustomMethod: Method with runtime-specified types (for bundles/vectors)
+/// Used when argument or return types cannot be specified at compile time
+class CustomMethod {
+public:
+  CustomMethod() = default;
+
+  /// Specify return type using type descriptor
+  CustomMethod &returnType(const BundleTypeDescriptor &desc) {
+    returnTypeDescs_.clear();
+    returnTypeDescs_.push_back(desc);
+    returnTypeKind_ = TypeKind::Bundle;
+    return *this;
+  }
+
+  CustomMethod &returnType(const VectorTypeDescriptor &desc) {
+    vectorReturnTypeDescs_.clear();
+    vectorReturnTypeDescs_.push_back(desc);
+    returnTypeKind_ = TypeKind::Vector;
+    return *this;
+  }
+
+  /// Specify argument types (can be called multiple times for multiple args)
+  CustomMethod &argType(llvm::StringRef name, const BundleTypeDescriptor &desc) {
+    argNames_.push_back(name.str());
+    argTypeDescs_.push_back(desc);
+    argTypeKinds_.push_back(TypeKind::Bundle);
+    return *this;
+  }
+
+  CustomMethod &argType(llvm::StringRef name, const VectorTypeDescriptor &desc) {
+    argNames_.push_back(name.str());
+    vectorArgTypeDescs_.push_back(desc);
+    argTypeKinds_.push_back(TypeKind::Vector);
+    return *this;
+  }
+
+  /// Define guard condition
+  template <typename Func>
+  CustomMethod &guard(Func &&f) {
+    guardFn_ = std::forward<Func>(f);
+    return *this;
+  }
+
+  /// Define body computation
+  template <typename Func>
+  CustomMethod &body(Func &&f) {
+    bodyFn_ = std::forward<Func>(f);
+    return *this;
+  }
+
+  /// Initialize with parent module
+  void init(Cmt2Module *parent, llvm::StringRef name);
+
+  void setName(llvm::StringRef name) { name_ = name.str(); }
+  llvm::StringRef getName() const { return name_; }
+
+private:
+  enum class TypeKind { Bundle, Vector };
+
+  std::string name_;
+  llvm::SmallVector<std::string, 4> argNames_;
+  llvm::SmallVector<BundleTypeDescriptor, 4> argTypeDescs_;
+  llvm::SmallVector<VectorTypeDescriptor, 4> vectorArgTypeDescs_;
+  llvm::SmallVector<TypeKind, 4> argTypeKinds_;
+  llvm::SmallVector<BundleTypeDescriptor, 1> returnTypeDescs_;
+  llvm::SmallVector<VectorTypeDescriptor, 1> vectorReturnTypeDescs_;
+  TypeKind returnTypeKind_ = TypeKind::Bundle;
+  std::function<void(mlir::OpBuilder &, llvm::ArrayRef<mlir::BlockArgument>)>
+      guardFn_;
+  std::function<void(mlir::OpBuilder &, llvm::ArrayRef<mlir::BlockArgument>)>
+      bodyFn_;
 };
 
 } // namespace highlevel
