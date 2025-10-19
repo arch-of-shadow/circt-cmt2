@@ -112,9 +112,9 @@ ExternalModule *Circuit::addExternalModule(
     auto savedIPForExtMod = builder_.saveInsertionPoint();
     builder_.setInsertionPointToEnd(&circuitOp_.getBody().front());
 
-    // Create ExternalModule wrapper with metadata using the actual parameterized module name
+    // Create ExternalModule wrapper with metadata using the actual FIRRTL module name
     auto extModule =
-        std::make_unique<ExternalModule>(cmt2ModuleName, actualModuleName, builder_, loc_);
+        std::make_unique<ExternalModule>(cmt2ModuleName, insertedModuleName, builder_, loc_);
 
     // Restore insertion point immediately after creating the ExternalModule op
     builder_.restoreInsertionPoint(savedIPForExtMod);

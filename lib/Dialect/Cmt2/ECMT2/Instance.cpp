@@ -149,9 +149,30 @@ CallBuilder::buildCall(Instance *instance, llvm::StringRef entity,
         }
       }
     }
+  } else if (auto cmt2Mod = mlir::dyn_cast<cmt2::ModuleOp>(moduleOp)) {
+    // For regular Cmt2 modules, look up the method/value operation to get result types
+    auto entityAttr = builder.getStringAttr(entity);
+
+    for (auto &bodyOp : cmt2Mod.getBodyRegion().front()) {
+      if (auto method = mlir::dyn_cast<cmt2::MethodOp>(bodyOp)) {
+        if (method.getSymNameAttr() == entityAttr) {
+          // Get result types from MethodOp
+          for (auto resultType : method.getResultTypes()) {
+            resultTypes.push_back(resultType);
+          }
+          break;
+        }
+      } else if (auto value = mlir::dyn_cast<cmt2::ValueOp>(bodyOp)) {
+        if (value.getSymNameAttr() == entityAttr) {
+          // Get result types from ValueOp
+          for (auto resultType : value.getResultTypes()) {
+            resultTypes.push_back(resultType);
+          }
+          break;
+        }
+      }
+    }
   }
-  // If module type is not ExternalModule or bind op not found, resultTypes remains empty
-  // which might be acceptable for regular Cmt2 modules
 
   // Create call operation
   // CallOp signature: (TypeRange outputs, ValueRange inputs, callee, methodOrValue, arg_attrs, res_attrs)

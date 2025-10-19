@@ -235,23 +235,23 @@ target_include_directories(ecmt2-signal-args-example
 #   ${CIRCT_MAIN_INCLUDE_DIR}
 # )
 
-add_executable(ecmt2-fifo1-push-module
-  fifo1_push_module.cpp
-)
+# add_executable(ecmt2-fifo1-push-module
+#   fifo1_push_module.cpp
+# )
 
-target_link_libraries(ecmt2-fifo1-push-module
-  PRIVATE
-  CIRCTECMT2
-  CIRCTCmt2
-  CIRCTFIRRTL
-  MLIRIR
-  MLIRSupport
-)
+# target_link_libraries(ecmt2-fifo1-push-module
+#   PRIVATE
+#   CIRCTECMT2
+#   CIRCTCmt2
+#   CIRCTFIRRTL
+#   MLIRIR
+#   MLIRSupport
+# )
 
-target_include_directories(ecmt2-fifo1-push-module
-  PRIVATE
-  ${CIRCT_MAIN_INCLUDE_DIR}
-)
+# target_include_directories(ecmt2-fifo1-push-module
+#   PRIVATE
+#   ${CIRCT_MAIN_INCLUDE_DIR}
+# )
 
 add_executable(ecmt2-fifo-library
   fifo_library.cpp
