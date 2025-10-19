@@ -37,7 +37,6 @@ add_subdirectory(VerifToSMT)
 add_subdirectory(SMTToZ3LLVM)
 add_subdirectory(VerifToSV)
 add_subdirectory(CalyxNative)
-add_subdirectory(Cmt2ToHW)
 add_subdirectory(LTLToCore)
 
 if(CIRCT_SLANG_FRONTEND_ENABLED)
