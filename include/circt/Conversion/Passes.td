@@ -858,26 +858,24 @@ def ConvertDatapathToComb : Pass<"convert-datapath-to-comb"> {
 }
 
 //===----------------------------------------------------------------------===//
-// Cmt2ToHW
+// Cmt2ToFIRRTL
 //===----------------------------------------------------------------------===//
 
-def Cmt2ToHW : Pass<"lower-cmt2-to-hw", "mlir::ModuleOp"> {
-  let summary = "Lower Cmt2 to HW";
+def LowerCmt2ToFIRRTL : Pass<"lower-cmt2-to-firrtl", "mlir::ModuleOp"> {
+  let summary = "Lower Cmt2 to FIRRTL";
   let description = [{
-    This pass lowers Cmt2 dialect operations to HW dialect operations.
-    It converts cmt2.circuit and cmt2.module operations into hw.module operations,
-    generating control logic (ready, enable, fire signals) for rules, methods, and values.
-
-    The pass performs the following steps:
-    1. Runs Scheduler analysis to determine execution order
-    2. Validates call sequences for conflicts and sequence violations
-    3. Generates guard and body logic for each function
-    4. Creates ready, enable, and fire signals with proper naming
-    5. Connects instances and handles interface mechanisms
+    This pass lowers Cmt2 modules to FIRRTL modules. It converts cmt2.circuit
+    operations containing cmt2.module operations into firrtl.circuit operations
+    with firrtl.module operations. The conversion uses the Scheduler, ConflictMatrix,
+    and CallInfo analyses to generate ready/enable/fire signals and properly schedule
+    functions within each module.
   }];
-  let constructor = "circt::createCmt2ToHWPass()";
-  let dependentDialects = ["comb::CombDialect", "hw::HWDialect",
-                           "seq::SeqDialect"];
+  let constructor = "circt::createLowerCmt2ToFIRRTLPass()";
+  let dependentDialects = [
+    "circt::cmt2::Cmt2Dialect",
+    "circt::firrtl::FIRRTLDialect",
+    "circt::comb::CombDialect"
+  ];
 }
 
 #endif // CIRCT_CONVERSION_PASSES_TD

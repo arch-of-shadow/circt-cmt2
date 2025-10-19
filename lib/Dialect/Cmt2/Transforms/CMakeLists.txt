@@ -13,6 +13,9 @@ add_circt_dialect_library(CIRCTCmt2Transforms
   InlinePrivateFuncs.cpp
   Scheduler.cpp
   PrintScheduler.cpp
+  VerifyPrivateFuncsInlined.cpp
+  VerifyCallSequence.cpp
+  Cmt2ToFIRRTLPipeline.cpp
 
   DEPENDS
   CIRCTCmt2TransformsIncGen
@@ -22,6 +25,7 @@ add_circt_dialect_library(CIRCTCmt2Transforms
   CIRCTHW
   CIRCTSupport
   CIRCTCmt2
+  CIRCTCmt2ToFIRRTL
   MLIRIR
   MLIRPass
   MLIRTransformUtils

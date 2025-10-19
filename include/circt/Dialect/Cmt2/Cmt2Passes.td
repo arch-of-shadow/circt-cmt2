@@ -102,6 +102,35 @@ def PrintScheduler : Pass<"cmt2-print-scheduler", "cmt2::CircuitOp"> {
   }];
 }
 
+def VerifyPrivateFuncsInlined : Pass<"cmt2-verify-private-funcs-inlined", "cmt2::CircuitOp"> {
+  let summary = "Verify that all private functions have been inlined.";
+  let description = [{
+    This pass verifies that all private functions have been inlined before
+    conversion to FIRRTL. It checks each function in every module to ensure
+    there are no @this calls remaining.
+
+    If any @this calls are found, the pass fails with an error indicating
+    which function contains the call. This validation should be run after
+    the cmt2-inline-private-funcs pass and before the Cmt2 to FIRRTL conversion.
+  }];
+}
+
+def VerifyCallSequence : Pass<"cmt2-verify-call-sequence", "cmt2::CircuitOp"> {
+  let summary = "Verify that call sequences respect conflict matrix constraints.";
+  let description = [{
+    This pass validates that the order of calls within each function respects
+    the SequentialBefore relationships defined in the conflict matrix.
+
+    For each function, it examines all calls and verifies that if method A
+    must be called before method B (A < B in the conflict matrix), then A
+    actually appears before B in the call sequence.
+
+    If any violations are found, the pass fails with an error indicating
+    which methods are called in the wrong order. This validation should be
+    run before the Cmt2 to FIRRTL conversion.
+  }];
+}
+
 // def InferRules : Pass<"cmt2-infer-rules", "cmt2::CircuitOp"> {
 //   let summary = "generate all Cmt2::RuleRefOp for a circuit.";
 //   let description = [{

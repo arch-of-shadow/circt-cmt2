@@ -22,11 +22,11 @@ Docs are maintained at `docs/Dialects/Cmt2/RationaleCmt2.md`
 
 ## Tasks
 
-For every task, you should create a TODO list to record the status.
+For every task, you should create a Progress to record the status.
 
 There are code blocks in "Spec" sections, which you should fill when conducting the task.
 
-You should record the progress in the "TODO List" sections.
+You should record the progress in the "Progress" sections.
 
 
 ### InstanceGraph Analysis
@@ -122,12 +122,9 @@ build/bin/circt-opt test/Dialect/Cmt2/instance-graph.mlir -cmt2-print-instance-g
 build/bin/circt-opt test/Dialect/Cmt2/instance-graph.mlir
 ```
 
-#### TODO List
+#### Progress
 
-- [x] InstanceGraph interfaces (ModuleOpInterface, InstanceOpInterface)
-- [x] Cmt2InstanceGraph class
-- [x] PrintInstanceGraph pass
-- [x] Test case (instance-graph.mlir)
+✅ **COMPLETE** - InstanceGraph support with interfaces for ModuleOp/ExtModuleHwOp/InstanceOp, Cmt2InstanceGraph class, and PrintInstanceGraph pass.
 
 ### CallInfo Analysis
 
@@ -168,12 +165,9 @@ You should use the `gcd.mlir` (`test/Dialect/Cmt2/gcd.mlir`) to test the CallInf
 build/bin/circt-opt test/Dialect/Cmt2/gcd.mlir -cmt2-print-call-info
 ```
 
-#### TODO List
+#### Progress
 
-- [x] CallInfo data structures (CallType, CallInfo, ModuleCallInfo, CallInfoView)
-- [x] Analysis implementation (Cmt2CallInfo.h/cpp)
-- [x] PrintCallInfo pass
-- [x] Testing with gcd.mlir
+✅ **COMPLETE** - CallInfo analysis tracking rule/method/value calls with CallInfoView data structure and PrintCallInfo pass.
 
 ### Better Parse/Print Support
 
@@ -204,24 +198,9 @@ You should update the `test/Dialect/Cmt2/gcd.mlir` to use the new syntax. You sh
 build/bin/circt-opt test/Dialect/Cmt2/gcd.mlir
 ```
 
-#### TODO List
+#### Progress
 
-**Phase 1: Module-like Operations**
-- [x] hw.module-style custom parse/print for ModuleOp/ExtModuleHwOp
-- [x] argNames attribute and argument list parsing
-- [x] Build and test with gcd.mlir
-
-**Phase 2: Function-like Operations**
-- [x] handshake.func-style custom parse/print with shared arguments
-- [x] Cmt2FunctionLike interface (FunctionOpInterface-compatible for two-region ops)
-- [x] arg_attrs and res_attrs support
-- [x] Comprehensive interface methods (type manipulation, body handling, attribute access)
-
-**Phase 3: Integration**
-- [x] Update gcd.mlir to new syntax
-- [x] Test complete workflow
-
-**Key Achievement:** Cmt2FunctionLike interface supports two-region operations (guard + body) while maintaining full FunctionOpInterface compatibility - something FunctionOpInterface itself cannot handle.
+✅ **COMPLETE** - Custom parse/print for ModuleOp/ExtModuleHwOp (hw.module-style) and function-like operations (handshake.func-style). Cmt2FunctionLike interface supports two-region operations with FunctionOpInterface-compatible features.
 
 ### Inline Transform
 
@@ -249,21 +228,9 @@ build/bin/circt-opt test/Dialect/Cmt2/inline.mlir -cmt2-inline-modules
 build/bin/circt-opt test/Dialect/Cmt2/inline.mlir -cmt2-inline-modules | build/bin/FileCheck test/Dialect/Cmt2/inline.mlir
 ```
 
-#### TODO List
+#### Progress
 
-- [x] Cmt2ModuleInliner pass implementation
-- [x] Hierarchical instance naming (`@leaf.storage` for subinstances)
-- [x] SSA value and operand remapping with IRMapping
-- [x] CallOp symbol reference remapping
-- [x] Test cases (inline.mlir)
-
-**Status: ✅ COMPLETE**
-
-**Key Features:**
-- Identifies modules to NOT inline: top-level, external, or `synthesis=true`
-- Iterative inlining: subinstances → call inlining → instance removal
-- Hierarchical naming preserves instantiation paths
-- Removes unused modules after inlining
+✅ **COMPLETE** - Module inlining pass that identifies non-inlinable modules (top-level, external, synthesis=true), inlines modules bottom-up with hierarchical instance naming (e.g., `@leaf.storage`), and properly remaps SSA values and CallOp references.
 
 
 ### ConflictMatrix Analysis
@@ -298,22 +265,9 @@ The starting point should be extmodules like `@reg` in `test/Dialect/Cmt2/gcd.ml
 build/bin/circt-opt test/Dialect/Cmt2/gcd.mlir -cmt2-print-conflict-matrix
 ```
 
-#### TODO List
+#### Progress
 
-- [x] ConflictMatrix data structures (Relationship enum, ModuleConflictMatrix, ConflictMatrixAnalysis)
-- [x] Parse conflict attributes from ExtModuleHwOp (conflict, conflictFree, sequenceBefore)
-- [x] Implement four inference rules (conflict propagation, SB propagation, merge, default CF)
-- [x] Topological order traversal (bottom-up analysis)
-- [x] PrintConflictMatrix pass
-- [x] Testing with gcd.mlir
-
-**Status: ✅ COMPLETE**
-
-**Key Features:**
-- Parses conflict matrices from external modules via attributes
-- Infers relationships for regular modules using 4 inference rules
-- Bottom-up analysis (topological order)
-- Three relationships: Conflict (<>), SequentialBefore (<), ConflictFree (/)
+✅ **COMPLETE** - ConflictMatrix analysis inferring relationships (Conflict, SequentialBefore, ConflictFree) between functions using four inference rules, parsing external module attributes, and bottom-up topological analysis.
 
 ### PrivateFunc Analysis and Transform
 
@@ -332,20 +286,9 @@ You should use the `gcd.mlir` (`test/Dialect/Cmt2/gcd.mlir`) to test the analysi
 build/bin/circt-opt test/Dialect/Cmt2/gcd.mlir -cmt2-inline-private-funcs
 ```
 
-#### TODO List
+#### Progress
 
-- [x] PrivateFuncAnalysis (identify functions only called via `@this`)
-- [x] InlinePrivateFuncs transform pass
-- [x] Function body inlining with IRMapping
-- [x] Testing with gcd.mlir (`@doing` inlined)
-
-**Status: ✅ COMPLETE**
-
-**Key Features:**
-- Identifies private functions (only called via `@this` in same module)
-- Inlines function bodies at call sites with proper SSA mapping
-- Removes private function definitions after inlining
-- Supports both MethodOp and ValueOp
+✅ **COMPLETE** - PrivateFunc analysis identifying functions only called via `@this`, and InlinePrivateFuncs transform pass that clones function bodies at call sites with proper SSA mapping.
 
 ### Interface Support
 
@@ -386,20 +329,9 @@ build/bin/circt-opt test/Dialect/Cmt2/interface-inline.mlir -cmt2-print-conflict
 build/bin/circt-opt test/Dialect/Cmt2/interface-inline.mlir -cmt2-inline-modules
 ``` 
 
-#### TODO List
+#### Progress
 
-- [x] Update CallInfo to resolve interface calls (InterfaceDefOp → instance.method)
-- [x] Update ModuleInliner to handle interface bindings (interface_binds remapping)
-- [x] Test with gcd.mlir and interface-inline.mlir
-- [x] ConflictMatrix and PrivateFuncInliner (no changes needed - work automatically)
-
-**Status: ✅ COMPLETE**
-
-**Key Features:**
-- **CallInfo**: Resolves interface calls to actual instance.method pairs during analysis
-- **ModuleInliner**: Remaps interface declarations to definitions during inlining using `interface_binds`
-- **Test**: interface-inline.mlir demonstrates `@child` inlining with `@reader` interface remapped to `@StorageReader`
-- Interface mechanism: InterfaceOp (signature) → InterfaceDefOp (mapping) → InterfaceDeclOp (parameter) → interface_binds (instantiation)
+✅ **COMPLETE** - Interface support (InterfaceOp/InterfaceDefOp/InterfaceDeclOp/interface_binds) with CallInfo resolving interface calls to actual instances, and ModuleInliner handling interface binding remapping during inlining.
 
 
 ### Attributes
@@ -414,20 +346,9 @@ The `Cmt2FunctionLike` should have optional attributes, including:
 
 Note that, these attributes don't need to be arguments of the operations. However, the `Cmt2FunctionLike` should provide methods to set or get them.
 
-#### TODO List
+#### Progress
 
-- [x] Remove unused `explicit` attributes from Cmt2Ops.td
-- [x] Add optional `readyName` and `enableName` to Cmt2FunctionLike
-- [x] Implement getter/setter methods in Cmt2OpInterfaces.td
-- [x] Build and test
-
-**Status: ✅ COMPLETE**
-
-**Key Features:**
-- Removed unused `explicit` attribute documentation
-- Added `readyName` and `enableName` optional attributes to Cmt2FunctionLike
-- Interface methods: get/set/remove for both attributes
-- Works with all Cmt2FunctionLike operations (RuleOp, MethodOp, ValueOp, BindMethodOp, BindValueOp)
+✅ **COMPLETE** - Removed unused `explicit` attributes; added optional `readyName` and `enableName` attributes to Cmt2FunctionLike with getter/setter methods.
 
 ### Scheduler Analysis
 
@@ -468,30 +389,46 @@ You should test on the `test/Dialect/Cmt2/gcd.mlir` test with the command:
 build/bin/circt-opt test/Dialect/Cmt2/gcd.mlir -cmt2-print-scheduler
 ```
 
-#### TODO List
+#### Progress
 
-- [x] Scheduler data structures (ScheduleGroup, ModuleScheduleResult)
-- [x] Union-find for grouping conflict-free functions
-- [x] Parse precedence attribute from ModuleOp
-- [x] Greedy topological sort (hard constraints: precedence, soft: SequentialBefore)
-- [x] Private function detection and warning
-- [x] Preventing Firing analysis (violation reporting)
-- [x] PrintScheduler pass and testing with gcd.mlir
+✅ **COMPLETE** - Scheduler analysis with private function detection/warning, union-find grouping for conflict-free functions, precedence parsing, greedy topological sort optimization (never violate hard precedence constraints, minimize SequentialBefore violations), and preventing-firing violation reports.
 
-**Status: ✅ COMPLETE**
-
-**Key Features:**
-- **Private function detection**: Warns and filters out functions only called via `@this`
-- **Grouping**: Union-find groups functions with Conflict/SequentialBefore relationships
-- **Optimization**: Greedy topological sort that never violates precedence (<<) and minimizes SequentialBefore (<) violations
-- **Preventing Firing**: Reports all violations where `c[i] > c[j]` but `f[i] < f[j]` or `f[i] <> f[j]`
-- **Input**: ConflictMatrix + precedence attribute → **Output**: Ordered function groups
-
-### Cmt2ToHw Conversion
+### Migrate to FIRRTL
 
 #### Spec
 
-For each `cmt2` module, we need to convert it into a `hw.module`.
+Currently, `cmt2` works with `hw`. However, lowering from `cmt2` to `hw` is hard, since `hw` is SSA, requiring elaborate positioning of instantiation and logic. Instead, `firrtl` is more easier to generate. So, we should use `cmt2` with `firrtl` and lower `cmt2` to `firrtl` modules.
+
+You should update `include/circt/Dialect/Cmt2/Cmt2Ops.td` to replace `hw` things with `firrtl` things.
+- For example, `ExtModuleHwOp` should be replaced by `ExtModuleFirrtlOp`
+
+You should update any existing analysis and transforms to be compatible with `firrtl`.
+
+You should update the tests under `test/Dialect/Cmt2` to use `firrtl` instead of `hw`
+
+#### Progress
+
+✅ **COMPLETE** - Migration from hw to firrtl dialect:
+- ✅ Renamed `ExtModuleHwOp` to `ExtModuleFirrtlOp` with operation mnemonic `"module.extern.firrtl"`
+- ✅ Replaced all `HWIntegerType` with `FIRRTLBaseType` in operation definitions (BindBareOp, InstanceOp, ReturnOp, CallOp)
+- ✅ Updated operation descriptions to reference `firrtl.module` instead of `hw.module`
+- ✅ Updated all C++ implementation files (Cmt2Ops.cpp, ModuleInliner.cpp, CallInfo.cpp, ConflictMatrix.cpp)
+- ✅ Updated test files under `test/Dialect/Cmt2` to use FIRRTL types (`!firrtl.uint<32>` instead of `i32`, `!firrtl.uint<1>` instead of `i1`)
+- ✅ Added FIRRTL type constraint definition in Cmt2Ops.td using C++ predicate
+- ✅ Added FIRRTL type header include to Cmt2Ops.h
+- ✅ Build succeeds with all 85 targets compiled successfully
+
+**Type mapping used**:
+- `i1` → `!firrtl.uint<1>`
+- `i32` → `!firrtl.uint<32>`
+- Clock signals remain as `!seq.clock` (not migrated to FIRRTL clock type)
+
+
+### Cmt2ToFIRRTL Conversion
+
+#### Spec
+
+For each `cmt2` module, we need to convert it into a `firrtl.module`.
 
 How to do?
 
@@ -499,6 +436,7 @@ For every module, run Scheduler analysis to get the schedule solution.
 
 For a group in a schedule, generate logic for its included functions in order. For current function `fi`:
 - Do a checking, fetch the called functions in `fi` as a sequence. If there are conflicts or "sequence before violations" (that is `fx < fy` but fy is called before fx). Raise an error messasge.
+- Any @this call is not allowed. Emit error to suggest run `-cmt2-inline-private-funcs` before conversion.
 - Construct the `guard` logic and the `body` logic. This should replace `cmt2.call` operations with signal assignments. Calling a method should assign `1` to `enable`. Argument signals and results should be connected, either.
 - Generate a `ready` signal (whose name is either specified in the function's attributes, or default to `<funcName>_ready`). The `ready` signal's value is define by `AND` the following:
   - the guard result
@@ -506,77 +444,126 @@ For a group in a schedule, generate logic for its included functions in order. F
   - `NOT` (any preceding functions with conflicts fired). This is determined by the ConflixMatrix. Two conflict cases: `Conflict` and `Sequence Before` violation.
 - If `fi` is a method, also generate an `enable` signal (with the similar naming convention).
 - Generate a `fire` signal. For value/rule, it's equal to the `ready` signal. For method, it's equal to the `ready AND enable`.
-- Insert the `guard` and `body` logic to the module. The `body` logic should be guarded by the `fire` signal.
-- The interface mechanism needs special processing.
+- Insert the `guard` and `body` logic to the module. The `body` logic should be guarded (`firrtl.when`) by the `fire` signal.
+- The interface mechanism needs special processing: add ports on modules and do signal assignments.
 
 You can look at:
 - `lib/Conversion/CalyxToHW/CalyxToHW.cpp`
-- `lib/Conversion/FIRRTLToHW/LowerToHW.cpp`
 - and other conversions
 
 to learn how to write a conversion.
 
+During the conversion, you'd better create meaningful names for variables.
+
 You should test on `test/Dialect/Cmt2/gcd.mlir` with the command:
 ```shell
 # Test basic conversion
-build/bin/circt-opt --lower-cmt2-to-hw test/Conversion/Cmt2ToHW/basic.mlir
+build/bin/circt-opt --lower-cmt2-to-firrtl test/Conversion/Cmt2ToFIRRTL/basic.mlir
 
 # Test method and value conversion
-build/bin/circt-opt -cmt2-inline-private-funcs --lower-cmt2-to-hw test/Conversion/Cmt2ToHW/method-value.mlir
+build/bin/circt-opt -cmt2-inline-private-funcs --lower-cmt2-to-firrtl test/Conversion/Cmt2ToFIRRTL/method-value.mlir
 
 # Test gcd without interface
-build/bin/circt-opt -cmt2-inline-private-funcs --lower-cmt2-to-hw test/Conversion/Cmt2ToHW/gcd-simple.mlir
+build/bin/circt-opt -cmt2-inline-private-funcs --lower-cmt2-to-firrtl test/Dialect/gcd.mlir
 ```
 
-#### TODO List
+We should also generate SystemVerilog from a `test/Dialect/gcd.mlir` design by the command:
+```shell
+# Generate SystemVerilog from Cmt2 design
+build/bin/circt-opt test/Dialect/gcd.mlir -cmt2-inline-private-funcs --lower-cmt2-to-firrtl | build/bin/firtool --format=mlir
 
-**Infrastructure:**
-- [x] Pass definition, header, build integration
-- [x] SignalTracker (ready/enable/fire signals, body results)
-- [x] ModuleConversionContext (per-module state with IRMapping)
-- [x] Integration with Scheduler, ConflictMatrix, CallInfo
-- [x] InstanceTracker with deferred instance creation
-- [x] PortConnectionTracker for muxing multiple calls
+# Or save to a file
+build/bin/circt-opt test/Dialect/gcd.mlir -cmt2-inline-private-funcs --lower-cmt2-to-firrtl | build/bin/firtool --format=mlir --disable-reg-randomization -o /tmp/gcd.sv
+```
 
-**Core Logic:**
-- [x] Guard/body region cloning with globalMapping
-- [x] cmt2.call conversion to signal references
-- [x] Signal generation: ready (guard AND called ready AND NOT conflicts), enable (methods), fire (ready or ready AND enable)
-- [x] Output ports: methods (enable in, ready out), values (ready out, data outs), rules (none)
-- [x] Call sequence validation (conflict matrix checking)
-- [x] Method call enable signal assignments
-- [x] Result wiring for `@this` calls (SignalTracker lookup)
+You should provide interface mechanism support. Look at `test/Dialect/Cmt2/hello.mlir` for an example. The module `@child` includes `cmt2.interface.decl @reader : @Reader`, which means the corresponding `firrtl.module` should have ports to call `@Reader`'s methods/values. When encountering a call to `@reader @getData`, the conversion should connect the ports (`enable` for method, arguments, results) properly. Also, the `@reader` also opens a `ready` signal, which should affect the `ready` and `fire` signal of the caller function. For the parent module `@hello`, it has
+```
+cmt2.interface.def @ReadX : @Read [
+    [@x, @read, @getData]
+]
+```
+Then, when 
+```
+cmt2.instance @c = @child(%clk, %rst) : !firrtl.clock, !firrtl.uint<1> with [
+    [@ReadX, @reader]
+]
+```
+bind @ReadX to @child @c's @reader, the conversion should connect the wires to the ports of `@child` properly. Note that we can pass a `cmt2.interface.decl` to deeper instances, and the ports should be connected properly.
 
-**Instance Handling (Deferred Creation Strategy):**
-- [x] ExtModuleHwOp binding resolution (bind.bare, bind.value, bind.method)
-- [x] hw.instance creation with proper port mappings
-- [x] Mux generation for multiple calls to same instance.method
-- [x] Deferred instance creation with topological sorting (ready queue)
-- [x] Dependency tracking and cycle detection
-- [x] SSA value invalidation fix (store Operation*/resultIndex pairs)
-- [x] Type constraint fixes (AnyType for !seq.clock support)
+The implementation should be robust and test on `test/Dialect/Cmt2/hello.mlir`:
+```shell
+# Test interface mechanism with hello.mlir
+build/bin/circt-opt test/Dialect/Cmt2/hello.mlir --lower-cmt2-to-firrtl
 
-**Status: ✅ COMPLETE**
+# Generate SystemVerilog from hello.mlir to verify end-to-end
+build/bin/circt-opt test/Dialect/Cmt2/hello.mlir --lower-cmt2-to-firrtl | build/bin/firtool --format=mlir --verilog
+```
 
-**Key Features:**
-- Converts cmt2.module → hw.module with proper port definitions
-- Processes schedule groups to generate function logic in dependency order
-- Control signal generation: ready/enable/fire per function
-- SSA value mapping with IRMapping (module arguments → guard/body cloning)
-- Tracks preceding conflicts to prevent simultaneous execution
-- **Deferred instance creation**: Uses ready queue and topological sorting to handle cross-instance dependencies
-- **Muxing logic**: Multiple calls to the same instance.method generate proper mux trees
-- **External module support**: Bindings (bind.bare, bind.value, bind.method) correctly map to hw.instance ports
-- Test cases: basic.mlir, method-value.mlir, result-wiring.mlir, gcd-simple.mlir ✅
+Note: `test/Dialect/Cmt2/hello.mlir` demonstrates both interface usage patterns:
+1. **Interface definitions for child modules** (`@child` has `cmt2.interface.decl @reader` for inward interface ports)
+2. **Interface declarations in top modules** (`@hello` has `cmt2.interface.decl @writer` for outward method call ports)
 
-**Design Decisions:**
-- Stateful operations guarded at method call level via enable signals
-- Data flows through call sites using SSA values, not module ports
-- Instances created only when all input values are ready (topological order)
-- Operation/result pairs stored instead of raw Values to survive IR updates
 
-**Key Implementation Details:**
-1. **Deferred Instance Creation**: Instances registered first, created later in topological order when dependencies resolved
-2. **MethodCall.argOps**: Stores `(Operation*, resultIndex)` pairs instead of Values to handle SSA invalidation after `replaceAllUsesWith`
-3. **PortConnectionTracker**: Tracks all calls to each instance.method, generates mux logic with fire conditions
-4. **Ready Queue**: Implements topological sort - instances with no unmet dependencies created first, updating queue as dependencies resolve
+#### Progress
+
+✅ **COMPLETE** - Cmt2ToFIRRTL conversion pass successfully converts Cmt2 to FIRRTL and generates valid SystemVerilog.
+
+**Features:**
+- Converts cmt2.circuit → firrtl.circuit with correct top module name
+- Converts cmt2.module → firrtl.module with proper ports (enable, ready, args, results)
+- Creates and initializes firrtl.instance for external modules with proper port connections
+- Clones guard regions to compute ready conditions
+- Generates ready signals based on guards, called functions, and conflict matrix
+- Generates fire signals (ready for rules/values, ready AND enable for methods)
+- Clones body regions inside firrtl.when blocks guarded by fire signals
+- Handles SSA value remapping during region cloning with IRMapping
+- Converts cmt2.call to FIRRTL signal accesses and connections
+- Integrates with Scheduler, ConflictMatrix, and CallInfo analyses
+- Properly connects module arguments (clock, reset) for both external and regular cmt2 modules
+- Initializes all instance input ports to satisfy FIRRTL full initialization requirements
+- Successfully generates valid, synthesizable SystemVerilog via firtool
+
+**Interface Mechanism Support:**
+- ✅ Creates interface ports on modules for InterfaceDeclOp operations (enable, ready, args, results)
+- ✅ Detects and handles interface calls in convertCallOp()
+- ✅ Connects interface calls to module ports in connectInterfaceCall()
+- ✅ Connects child interface ports to parent instance ports based on InterfaceDefOp bindings
+- ✅ Properly handles interface bindings during instance creation (interface_binds attribute)
+- ✅ Includes interface call ready signals in generateReadySignal()
+- ✅ Successfully tested with hello.mlir showing correct interface port generation and connections
+- ✅ **Top module interface declarations**: Top-level modules can declare interfaces for outward method calls (creates output ports: `enable`, `data`; input ports: `ready`)
+- ✅ Full pipeline working: Cmt2 with interfaces → FIRRTL → SystemVerilog
+
+**Validation Passes:**
+- ✅ Separated validation logic from conversion pass into dedicated passes:
+  - `-cmt2-verify-private-funcs-inlined`: Verifies all @this calls have been inlined
+  - `-cmt2-verify-call-sequence`: Validates call sequences respect conflict matrix constraints
+- ✅ Created `populateCmt2ToFIRRTLPipeline()` utility for programmatic pipeline construction
+- ✅ **Recommended pipeline for Cmt2 to FIRRTL conversion:**
+  ```shell
+  # Full pipeline with validation
+  build/bin/circt-opt INPUT.mlir \
+    -cmt2-inline-private-funcs \
+    -cmt2-verify-private-funcs-inlined \
+    -cmt2-verify-call-sequence \
+    --lower-cmt2-to-firrtl
+
+  # Example with gcd.mlir
+  build/bin/circt-opt test/Dialect/Cmt2/gcd.mlir \
+    -cmt2-inline-private-funcs \
+    -cmt2-verify-private-funcs-inlined \
+    -cmt2-verify-call-sequence \
+    --lower-cmt2-to-firrtl
+
+  # Generate SystemVerilog with full pipeline
+  build/bin/circt-opt test/Dialect/Cmt2/gcd.mlir \
+    -cmt2-inline-private-funcs \
+    -cmt2-verify-private-funcs-inlined \
+    -cmt2-verify-call-sequence \
+    --lower-cmt2-to-firrtl | \
+    build/bin/firtool --format=mlir --disable-reg-randomization
+  ```
+- ✅ For programmatic use, include `circt/Dialect/Cmt2/Cmt2Passes.h` and call `populateCmt2ToFIRRTLPipeline(pm)` to add all passes to a PassManager
+
+
+### Cycle Detection

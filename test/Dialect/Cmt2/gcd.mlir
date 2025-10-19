@@ -1,35 +1,33 @@
 // RUN: circt-opt %s | FileCheck %s
 
 builtin.module {
-    "hw.module"() ({
-        ^bb0(%write: i32, %writeEnable: i1, %clock: !seq.clock):
-        %init = seq.initial () {
-            %c0_i32 = "hw.constant"() {value = 0 : i32} : () -> i32
-            seq.yield %c0_i32 : i32
-        } : ()  -> !seq.immutable<i32>
-        %read = seq.compreg %next, %clock initial %init : i32
-        %next = "comb.mux"(%writeEnable, %write, %read) : (i1, i32, i32) -> i32
-        %writeReady = "hw.constant"() {value = 1 : i1} : () -> i1
-        %readReady = "hw.constant"() {value = 1 : i1} : () -> i1
-        "hw.output"(%writeReady, %readReady, %read) : (i1, i1, i32) -> ()
-        }) {
-        argNames = ["write", "writeEnable", "clock", "reset"],
-        comment = "",
-        parameters = [],
-        resultNames = ["writeReady", "readReady", "ready"],
-        sym_name = "Reg32",
-        module_type = !hw.modty<input write : i32, input writeEnable : i1, input clock : !seq.clock, output writeReady : i1, output readReady : i1, output ready : i32>
-    } : () -> ()
+    firrtl.circuit "Reg32" {
+        firrtl.module @Reg32(in %write: !firrtl.uint<32>, in %writeEnable: !firrtl.uint<1>,
+                             in %clock: !firrtl.clock, in %reset: !firrtl.uint<1>,
+                             out %writeReady: !firrtl.uint<1>, out %readReady: !firrtl.uint<1>,
+                             out %read: !firrtl.uint<32>) {
+            %c0_ui32 = firrtl.constant 0 : !firrtl.uint<32>
+            %r = firrtl.regreset %clock, %reset, %c0_ui32 : !firrtl.clock, !firrtl.uint<1>, !firrtl.uint<32>, !firrtl.uint<32>
+
+            %next = firrtl.mux(%writeEnable, %write, %r) : (!firrtl.uint<1>, !firrtl.uint<32>, !firrtl.uint<32>) -> !firrtl.uint<32>
+            firrtl.connect %r, %next : !firrtl.uint<32>, !firrtl.uint<32>
+
+            %c1_ui1 = firrtl.constant 1 : !firrtl.uint<1>
+            firrtl.connect %writeReady, %c1_ui1 : !firrtl.uint<1>, !firrtl.uint<1>
+            firrtl.connect %readReady, %c1_ui1 : !firrtl.uint<1>, !firrtl.uint<1>
+            firrtl.connect %read, %r : !firrtl.uint<32>, !firrtl.uint<32>
+        }
+    }
 
     cmt2.circuit {
-        cmt2.module.extern.hw @reg : @Reg32(%clk: i1, %rst: i1) {
+        cmt2.module.extern.firrtl @reg : @Reg32(%clk: !firrtl.clock, %rst: !firrtl.uint<1>) {
             // out-of-method gaa.bind bind the scheduling unrelated IOs.
-            cmt2.bind.bare %clk, @clock : i1
-            cmt2.bind.bare %rst, @reset : i1
+            cmt2.bind.bare %clk, @clock : !firrtl.clock
+            cmt2.bind.bare %rst, @reset : !firrtl.uint<1>
 
-            cmt2.bind.value @read : (i1) -> (i32) [ ready = @readReady, data = [@read]]
+            cmt2.bind.value @read : (!firrtl.uint<1>) -> (!firrtl.uint<32>) [ ready = @readReady, data = [@read]]
 
-            cmt2.bind.method @write : (i1, i32) -> (i1) [
+            cmt2.bind.method @write : (!firrtl.uint<1>, !firrtl.uint<32>) -> (!firrtl.uint<1>) [
                 enable = @writeEnable,
                 ready = @writeReady,
                 inputs = [@write],
@@ -40,84 +38,66 @@ builtin.module {
             conflictFree = [[@read, @read]],
             sequenceBefore = [[@read, @write]]
         }
-        
-        // interface Read
-        cmt2.interface @Read {
-            cmt2.method @read() -> (i32) {}{}
-        }
 
-        // a placeholder module to test interface
-        cmt2.module @placeholder {
-            cmt2.interface.decl @reader : @Read
-        }
+        cmt2.module @gcd(%clk: !firrtl.clock, %rst: !firrtl.uint<1>) {
+            cmt2.instance @x = @reg (%clk, %rst) : !firrtl.clock, !firrtl.uint<1>
+            cmt2.instance @y = @reg (%clk, %rst) : !firrtl.clock, !firrtl.uint<1>
 
-        cmt2.module @gcd(%clk: i1, %rst: i1) {
-            cmt2.interface.def @ReadX : @Read [
-                [@x, @read, @read]
-            ]
-
-            // instance to test interface
-            cmt2.instance @_ = @placeholder with [
-                [@ReadX, @reader]
-            ]
-
-            cmt2.instance @x = @reg (%clk, %rst) : i1, i1
-            cmt2.instance @y = @reg (%clk, %rst) : i1, i1
-
-            cmt2.value @doing() -> (i1) {} {
-              %y = cmt2.call @y @read () : () -> (i32)
-              %0 = hw.constant 0: i32
-              %1 = comb.icmp ne %y, %0 : i32
-              cmt2.return %1 : i1
+            cmt2.value @doing() -> (!firrtl.uint<1>) {} {
+              %y = cmt2.call @y @read () : () -> (!firrtl.uint<32>)
+              %0 = firrtl.constant 0 : !firrtl.uint<32>
+              %1 = firrtl.neq %y, %0 : (!firrtl.uint<32>, !firrtl.uint<32>) -> !firrtl.uint<1>
+              cmt2.return %1 : !firrtl.uint<1>
             }
 
-            cmt2.rule @swap() -> i1 {
-                %0 = cmt2.call @x @read () : () -> (i32)
-                %1 = cmt2.call @y @read () : () -> (i32)
-                %2 = "comb.icmp"(%0, %1) {predicate = 8 : i64} : (i32, i32) -> i1
-                %3 = cmt2.call @this @doing () : () -> (i1)
-                %4 = "comb.and"(%2, %3) : (i1, i1) -> i1
-                cmt2.return %4 : i1
+            cmt2.rule @swap() {
+                %0 = cmt2.call @x @read () : () -> (!firrtl.uint<32>)
+                %1 = cmt2.call @y @read () : () -> (!firrtl.uint<32>)
+                %2 = firrtl.gt %1, %0 : (!firrtl.uint<32>, !firrtl.uint<32>) -> !firrtl.uint<1>
+                %3 = cmt2.call @this @doing () : () -> (!firrtl.uint<1>)
+                %4 = firrtl.and %2, %3 : (!firrtl.uint<1>, !firrtl.uint<1>) -> !firrtl.uint<1>
+                cmt2.return %4 : !firrtl.uint<1>
             } {
-                %0 = cmt2.call @x @read () : () -> (i32)
-                %1 = cmt2.call @y @read () : () -> (i32)
+                %0 = cmt2.call @x @read () : () -> (!firrtl.uint<32>)
+                %1 = cmt2.call @y @read () : () -> (!firrtl.uint<32>)
 
-                cmt2.call @x @write (%1) : (i32) -> ()
-                cmt2.call @y @write (%0) : (i32) -> ()
+                cmt2.call @x @write (%1) : (!firrtl.uint<32>) -> ()
+                cmt2.call @y @write (%0) : (!firrtl.uint<32>) -> ()
             }
 
-            cmt2.rule @sub() -> i1 {
-                %0 = cmt2.call @x @read () : () -> (i32)
-                %1 = cmt2.call @y @read () : () -> (i32)
-                %2 = "comb.icmp"(%0, %1) {predicate = 2 : i64} : (i32, i32) -> i1
-                %3 = cmt2.call @this @doing () : () -> (i1)
-                %4 = "comb.and"(%2, %3) : (i1, i1) -> i1
-                cmt2.return %4 : i1
+            cmt2.rule @sub() {
+                %0 = cmt2.call @x @read () : () -> (!firrtl.uint<32>)
+                %1 = cmt2.call @y @read () : () -> (!firrtl.uint<32>)
+                %2 = firrtl.leq %1, %0 : (!firrtl.uint<32>, !firrtl.uint<32>) -> !firrtl.uint<1>
+                %3 = cmt2.call @this @doing () : () -> (!firrtl.uint<1>)
+                %4 = firrtl.and %2, %3 : (!firrtl.uint<1>, !firrtl.uint<1>) -> !firrtl.uint<1>
+                cmt2.return %4 : !firrtl.uint<1>
             } {
-                %0 = cmt2.call @x @read () : () -> (i32)
-                %1 = cmt2.call @y @read () : () -> (i32)
-                %2 = "comb.sub"(%0, %1) : (i32, i32) -> i32
+                %0 = cmt2.call @x @read () : () -> (!firrtl.uint<32>)
+                %1 = cmt2.call @y @read () : () -> (!firrtl.uint<32>)
+                %2 = firrtl.sub %0, %1 : (!firrtl.uint<32>, !firrtl.uint<32>) -> !firrtl.uint<33>
+                %3 = firrtl.bits %2 31 to 0 : (!firrtl.uint<33>) -> !firrtl.uint<32>
 
-                cmt2.call @y @write (%2) : (i32) -> ()
+                cmt2.call @y @write (%3) : (!firrtl.uint<32>) -> ()
             }
 
-            cmt2.method @start(%a: i32, %b: i32) -> () {
-                %0 = cmt2.call @this @doing () : () -> (i1)
-                %c1_i1 = hw.constant 1 : i1
-                %2 = comb.xor %0, %c1_i1 : i1
-                cmt2.return %2 : i1
+            cmt2.method @start(%a: !firrtl.uint<32>, %b: !firrtl.uint<32>) -> () {
+                %0 = cmt2.call @this @doing () : () -> (!firrtl.uint<1>)
+                %c1_i1 = firrtl.constant 1 : !firrtl.uint<1>
+                %2 = firrtl.xor %0, %c1_i1 : (!firrtl.uint<1>, !firrtl.uint<1>) -> !firrtl.uint<1>
+                cmt2.return %2 : !firrtl.uint<1>
             } {
-                cmt2.call @x @write (%a) : (i32) -> ()
-                cmt2.call @y @write (%b) : (i32) -> ()
+                cmt2.call @x @write (%a) : (!firrtl.uint<32>) -> ()
+                cmt2.call @y @write (%b) : (!firrtl.uint<32>) -> ()
             }
-            cmt2.value @result() -> (i32) {
-                %0 = cmt2.call @this @doing () : () -> (i1)
-                %c1_i1 = hw.constant 1 : i1
-                %2 = comb.xor %0, %c1_i1 : i1
-                cmt2.return %2 : i1
+            cmt2.value @result() -> (!firrtl.uint<32>) {
+                %0 = cmt2.call @this @doing () : () -> (!firrtl.uint<1>)
+                %c1_i1 = firrtl.constant 1 : !firrtl.uint<1>
+                %2 = firrtl.xor %0, %c1_i1 : (!firrtl.uint<1>, !firrtl.uint<1>) -> !firrtl.uint<1>
+                cmt2.return %2 : !firrtl.uint<1>
             } {
-                %x = cmt2.call @x @read () : () -> (i32)
-                cmt2.return %x : i32
+                %x = cmt2.call @x @read () : () -> (!firrtl.uint<32>)
+                cmt2.return %x : !firrtl.uint<32>
             }
         }
     }

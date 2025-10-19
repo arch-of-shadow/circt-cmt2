@@ -87,7 +87,7 @@ private:
   void runAnalysis();
 
   /// Parse conflict matrix from external module attributes
-  void parseExternalModuleMatrix(ExtModuleHwOp extModule);
+  void parseExternalModuleMatrix(ExtModuleFirrtlOp extModule);
 
   /// Infer conflict matrix for a regular module
   void inferModuleMatrix(ModuleOp module, const CallInfoView &callInfo,

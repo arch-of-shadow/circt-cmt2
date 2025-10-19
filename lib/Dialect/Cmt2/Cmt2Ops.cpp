@@ -10,6 +10,7 @@
 //
 //===----------------------------------------------------------------------===//
 #include "circt/Dialect/Cmt2/Cmt2Ops.h"
+#include "circt/Dialect/FIRRTL/FIRRTLTypes.h"
 #include "circt/Dialect/HW/HWOps.h"
 #include "circt/Dialect/HW/HWTypes.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -26,7 +27,7 @@ namespace circt {
 namespace cmt2 {
 
 //===----------------------------------------------------------------------===//
-// Module-like Operations (ModuleOp, ExtModuleHwOp)
+// Module-like Operations (ModuleOp, ExtModuleFirrtlOp)
 //===----------------------------------------------------------------------===//
 
 static ParseResult parseModuleLikeOp(OpAsmParser &parser,
@@ -137,14 +138,14 @@ void ModuleOp::getAsmBlockArgumentNames(Region &region,
 }
 
 //===----------------------------------------------------------------------===//
-// ExtModuleHwOp
+// ExtModuleFirrtlOp
 //===----------------------------------------------------------------------===//
 
-ParseResult ExtModuleHwOp::parse(OpAsmParser &parser, OperationState &result) {
+ParseResult ExtModuleFirrtlOp::parse(OpAsmParser &parser, OperationState &result) {
   return parseModuleLikeOp(parser, result, true);
 }
 
-void ExtModuleHwOp::print(OpAsmPrinter &p) {
+void ExtModuleFirrtlOp::print(OpAsmPrinter &p) {
   p << ' ';
   p.printSymbolName(getSymName());
   p << " : ";
@@ -154,7 +155,7 @@ void ExtModuleHwOp::print(OpAsmPrinter &p) {
   printModuleLikeOp(p, *this, getArgNames(), getBody(), elidedAttrs);
 }
 
-void ExtModuleHwOp::getAsmBlockArgumentNames(Region &region,
+void ExtModuleFirrtlOp::getAsmBlockArgumentNames(Region &region,
                                                OpAsmSetValueNameFn setNameFn) {
   getAsmBlockArgumentNamesImpl(getArgNames(), region, setNameFn);
 }
@@ -189,13 +190,10 @@ static ParseResult parseFunctionLikeOp(OpAsmParser &parser,
     argTypes.push_back(arg.type);
   }
 
-  // Parse `->` and result types (for body region)
+  // Parse optional `->` and result types (for body region)
   SmallVector<Type> bodyResTypes;
-  if (parser.parseArrow())
-    return failure();
-
-  if (hasBodyResults) {
-    // Parse result types in parentheses (may be empty)
+  if (succeeded(parser.parseOptionalArrow())) {
+    // Arrow present, parse result types in parentheses (always)
     if (parser.parseLParen())
       return failure();
     // Try to parse optional type list - if it fails, list is empty
@@ -204,11 +202,9 @@ static ParseResult parseFunctionLikeOp(OpAsmParser &parser,
       if (parser.parseTypeList(bodyResTypes) || parser.parseRParen())
         return failure();
     }
-  } else {
-    // Parse single result type
-    if (parser.parseType(bodyResTypes.emplace_back()))
-      return failure();
   }
+  // No arrow present means empty results (bodyResTypes stays empty)
+  // This is allowed for all function-like ops (rules, methods, values)
 
   // Store argument names and function type
   result.addAttribute("argNames", builder.getStrArrayAttr(argNames));
@@ -303,17 +299,12 @@ static void printFunctionLikeOp(OpAsmPrinter &p, Operation *op,
     p << "()";
   }
 
-  // Print result types
-  p << " -> ";
-  if (resTypes.size() == 1) {
-    p.printType(resTypes[0]);
-  } else {
-    p << '(';
-    llvm::interleaveComma(resTypes, p, [&](Type type) {
-      p.printType(type);
-    });
-    p << ')';
-  }
+  // Print result types (always in parentheses for consistency)
+  p << " -> (";
+  llvm::interleaveComma(resTypes, p, [&](Type type) {
+    p.printType(type);
+  });
+  p << ')';
 
   // Print attributes (excluding the ones we handle specially)
   SmallVector<StringRef> elidedAttrs = {"sym_name", "function_type", "argNames",
@@ -336,6 +327,7 @@ ParseResult RuleOp::parse(OpAsmParser &parser, OperationState &result) {
 }
 
 void RuleOp::print(OpAsmPrinter &p) {
+  p << ' ';
   p.printSymbolName(getSymName());
   printFunctionLikeOp(p, *this, getArgNames(), getFunctionType(),
                       getGuard(), getBody());
@@ -362,6 +354,7 @@ ParseResult MethodOp::parse(OpAsmParser &parser, OperationState &result) {
 }
 
 void MethodOp::print(OpAsmPrinter &p) {
+  p << ' ';
   p.printSymbolName(getSymName());
   printFunctionLikeOp(p, *this, getArgNames(), getFunctionType(),
                       getGuard(), getBody());
@@ -388,6 +381,7 @@ ParseResult ValueOp::parse(OpAsmParser &parser, OperationState &result) {
 }
 
 void ValueOp::print(OpAsmPrinter &p) {
+  p << ' ';
   p.printSymbolName(getSymName());
   printFunctionLikeOp(p, *this, getArgNames(), getFunctionType(),
                       getGuard(), getBody());
@@ -471,6 +465,148 @@ Cmt2ModuleLike InstanceOp::getReferencedModule() {
   return circuit.lookupSymbol<Cmt2ModuleLike>(getModuleNameAttr().getAttr());
 }
 
+//===----------------------------------------------------------------------===//
+// Interface-related Helper Functions
+//===----------------------------------------------------------------------===//
+
+/// Get all InterfaceDefOp operations in a module
+llvm::SmallVector<InterfaceDefOp, 4> getInterfaceDefs(ModuleOp module) {
+  llvm::SmallVector<InterfaceDefOp, 4> interfaceDefs;
+  for (auto &op : module.getOps()) {
+    if (auto defOp = llvm::dyn_cast<InterfaceDefOp>(op)) {
+      interfaceDefs.push_back(defOp);
+    }
+  }
+  return interfaceDefs;
+}
+
+/// Get all InterfaceDeclOp operations in a module
+llvm::SmallVector<InterfaceDeclOp, 4> getInterfaceDecls(ModuleOp module) {
+  llvm::SmallVector<InterfaceDeclOp, 4> interfaceDecls;
+  for (auto &op : module.getOps()) {
+    if (auto declOp = llvm::dyn_cast<InterfaceDeclOp>(op)) {
+      interfaceDecls.push_back(declOp);
+    }
+  }
+  return interfaceDecls;
+}
+
+/// Look up an InterfaceDefOp by symbol name in a module
+InterfaceDefOp lookupInterfaceDef(ModuleOp module, mlir::StringRef name) {
+  return mlir::SymbolTable::lookupNearestSymbolFrom<InterfaceDefOp>(
+      module, mlir::StringAttr::get(module.getContext(), name));
+}
+
+/// Look up an InterfaceDeclOp by symbol name in a module
+InterfaceDeclOp lookupInterfaceDecl(ModuleOp module, mlir::StringRef name) {
+  return mlir::SymbolTable::lookupNearestSymbolFrom<InterfaceDeclOp>(
+      module, mlir::StringAttr::get(module.getContext(), name));
+}
+
+/// Look up an InterfaceOp by symbol name in a circuit
+InterfaceOp lookupInterface(CircuitOp circuit, mlir::StringRef name) {
+  return mlir::SymbolTable::lookupNearestSymbolFrom<InterfaceOp>(
+      circuit, mlir::StringAttr::get(circuit.getContext(), name));
+}
+
+/// Get the InterfaceOp that a decl refers to
+InterfaceOp getInterfaceForDecl(InterfaceDeclOp decl) {
+  auto circuit = decl->getParentOfType<CircuitOp>();
+  if (!circuit)
+    return nullptr;
+  return lookupInterface(circuit, decl.getInterface().getLeafReference());
+}
+
+/// Get the InterfaceOp that a def refers to
+InterfaceOp getInterfaceForDef(InterfaceDefOp def) {
+  auto circuit = def->getParentOfType<CircuitOp>();
+  if (!circuit)
+    return nullptr;
+  return lookupInterface(circuit, def.getInterface().getLeafReference());
+}
+
+/// Resolve an interface call to the actual instance and method/value
+/// Returns a pair of (instance symbol, method/value symbol) or (nullptr, nullptr) if not found
+std::pair<mlir::SymbolRefAttr, mlir::SymbolRefAttr>
+resolveInterfaceCall(ModuleOp module, mlir::SymbolRefAttr interfaceDefName,
+                     mlir::SymbolRefAttr interfaceMethodName) {
+  auto interfaceDef = lookupInterfaceDef(module, interfaceDefName.getLeafReference());
+  if (!interfaceDef)
+    return {nullptr, nullptr};
+
+  // InterfaceDefOp has methods attribute: [[@inst, @instMethod, @ifaceMethod], ...]
+  auto methodsAttr = interfaceDef.getMethods();
+  for (auto methodEntry : methodsAttr) {
+    auto arrayAttr = llvm::cast<mlir::ArrayAttr>(methodEntry);
+    if (arrayAttr.size() >= 3) {
+      // Format: [@instance, @instanceMethod, @interfaceMethod]
+      auto ifaceMethodRef = llvm::cast<mlir::SymbolRefAttr>(arrayAttr[2]);
+      if (ifaceMethodRef.getLeafReference() == interfaceMethodName.getLeafReference()) {
+        // Found the mapping
+        auto instanceRef = llvm::cast<mlir::SymbolRefAttr>(arrayAttr[0]);
+        auto instanceMethodRef = llvm::cast<mlir::SymbolRefAttr>(arrayAttr[1]);
+        return {instanceRef, instanceMethodRef};
+      }
+    }
+  }
+
+  return {nullptr, nullptr};
+}
+
+/// Check if a CallOp is calling through an interface (i.e., callee is an InterfaceDefOp)
+bool isInterfaceCall(CallOp callOp) {
+  auto parentModule = callOp->getParentOfType<ModuleOp>();
+  if (!parentModule)
+    return false;
+
+  auto calleeAttr = callOp.getCalleeAttr();
+  return lookupInterfaceDef(parentModule, calleeAttr.getLeafReference()) != nullptr;
+}
+
+/// Get interface bindings for an instance
+/// Returns a map from interface decl name to interface def name
+llvm::DenseMap<mlir::StringAttr, mlir::StringAttr>
+getInterfaceBindings(InstanceOp instance) {
+  llvm::DenseMap<mlir::StringAttr, mlir::StringAttr> bindings;
+
+  if (auto interfaceBinds = instance.getInterfaceBinds()) {
+    for (auto bindAttr : *interfaceBinds) {
+      auto arrayAttr = llvm::cast<mlir::ArrayAttr>(bindAttr);
+      if (arrayAttr.size() >= 2) {
+        // Format: [@interfaceDefName, @interfaceDeclName]
+        auto defRef = llvm::cast<mlir::SymbolRefAttr>(arrayAttr[0]);
+        auto declRef = llvm::cast<mlir::SymbolRefAttr>(arrayAttr[1]);
+        bindings[declRef.getLeafReference()] = defRef.getLeafReference();
+      }
+    }
+  }
+
+  return bindings;
+}
+
+/// Get all function-like operations (RuleOp, MethodOp, ValueOp) in a module
+llvm::SmallVector<Cmt2FunctionLike, 4> getFunctions(ModuleOp module) {
+  llvm::SmallVector<Cmt2FunctionLike, 4> functions;
+  for (auto &op : module.getOps()) {
+    if (auto func = llvm::dyn_cast<Cmt2FunctionLike>(op)) {
+      functions.push_back(func);
+    }
+  }
+  return functions;
+}
+
+/// Get all instances in a module
+llvm::SmallVector<InstanceOp, 4> getInstances(ModuleOp module) {
+  llvm::SmallVector<InstanceOp, 4> instances;
+  for (auto &op : module.getOps()) {
+    if (auto instance = llvm::dyn_cast<InstanceOp>(op)) {
+      instances.push_back(instance);
+    }
+  }
+  return instances;
+}
+
+// Commented out legacy helper functions
 // Cmt2ModuleLike getReferenceModule(InstanceOp instance) {
 //   auto circuit =
 //       instance.getOperation()->getParentOfType<circt::cmt2::CircuitOp>();

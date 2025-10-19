@@ -15,6 +15,7 @@
 // #include "llvm/ADT/Any.h"
 #include "circt/Dialect/Cmt2/Cmt2Dialect.h"
 #include "circt/Dialect/Cmt2/Cmt2OpInterfaces.h"
+#include "circt/Dialect/FIRRTL/FIRRTLTypes.h"
 #include "circt/Dialect/HW/HWAttributes.h"
 #include "circt/Dialect/HW/HWOpInterfaces.h"
 #include "circt/Dialect/HW/HWTypes.h"
@@ -44,6 +45,50 @@ enum class FunctionKind {
   Value   // ValueOp or BindValueOp
 };
 
+//===----------------------------------------------------------------------===//
+// Interface-related Helper Functions
+//===----------------------------------------------------------------------===//
+
+/// Get all InterfaceDefOp operations in a module
+llvm::SmallVector<InterfaceDefOp, 4> getInterfaceDefs(ModuleOp module);
+
+/// Get all InterfaceDeclOp operations in a module
+llvm::SmallVector<InterfaceDeclOp, 4> getInterfaceDecls(ModuleOp module);
+
+/// Look up an InterfaceDefOp by symbol name in a module
+InterfaceDefOp lookupInterfaceDef(ModuleOp module, mlir::StringRef name);
+
+/// Look up an InterfaceDeclOp by symbol name in a module
+InterfaceDeclOp lookupInterfaceDecl(ModuleOp module, mlir::StringRef name);
+
+/// Look up an InterfaceOp by symbol name in a circuit
+InterfaceOp lookupInterface(CircuitOp circuit, mlir::StringRef name);
+
+/// Get the InterfaceOp that a decl refers to
+InterfaceOp getInterfaceForDecl(InterfaceDeclOp decl);
+
+/// Get the InterfaceOp that a def refers to
+InterfaceOp getInterfaceForDef(InterfaceDefOp def);
+
+/// Resolve an interface call to the actual instance and method/value
+/// Returns a pair of (instance symbol, method/value symbol) or (nullptr, nullptr) if not found
+std::pair<mlir::SymbolRefAttr, mlir::SymbolRefAttr>
+resolveInterfaceCall(ModuleOp module, mlir::SymbolRefAttr interfaceDefName,
+                     mlir::SymbolRefAttr interfaceMethodName);
+
+/// Check if a CallOp is calling through an interface (i.e., callee is an InterfaceDefOp)
+bool isInterfaceCall(CallOp callOp);
+
+/// Get interface bindings for an instance
+/// Returns a map from interface decl name to interface def name
+llvm::DenseMap<mlir::StringAttr, mlir::StringAttr>
+getInterfaceBindings(InstanceOp instance);
+
+/// Get all function-like operations (RuleOp, MethodOp, ValueOp) in a module
+llvm::SmallVector<Cmt2FunctionLike, 4> getFunctions(ModuleOp module);
+
+/// Get all instances in a module
+llvm::SmallVector<InstanceOp, 4> getInstances(ModuleOp module);
 
 } // namespace cmt2
 } // namespace circt
