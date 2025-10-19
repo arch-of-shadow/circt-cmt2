@@ -60,14 +60,15 @@ circt::cmt2::ecmt2::Interface *Circuit::addInterface(llvm::StringRef name) {
 }
 
 circt::cmt2::ecmt2::ExternalModule *
-Circuit::addExternalModule(llvm::StringRef name, llvm::StringRef firrtlModule) {
-  return lowLevelCircuit_->addExternalModule(name, firrtlModule);
+Circuit::addExternalModule(llvm::StringRef firrtlModule, llvm::StringRef name) {
+  return lowLevelCircuit_->addExternalModule(firrtlModule, name);
 }
 
 circt::cmt2::ecmt2::ExternalModule *
-Circuit::addExternalModule(llvm::StringRef name, llvm::StringRef firrtlModule,
-                           const llvm::StringMap<int64_t> &params) {
-  return lowLevelCircuit_->addExternalModule(name, firrtlModule, params);
+Circuit::addExternalModule(llvm::StringRef firrtlModule,
+                           const llvm::StringMap<int64_t> &params,
+                           llvm::StringRef name) {
+  return lowLevelCircuit_->addExternalModule(firrtlModule, params, name);
 }
 
 std::string Circuit::emitMLIRString() {

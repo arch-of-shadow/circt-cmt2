@@ -218,7 +218,7 @@ int main() {
   // External register module
   llvm::StringMap<int64_t> regParams;
   regParams["width"] = 32;
-  auto *regMod = circuit.addExternalModule("reg", "FIRRTLReg", regParams);
+  auto *regMod = circuit.addExternalModule("FIRRTLReg", regParams);
   regMod->bindClock("clk", "clock")
         .bindReset("rst", "reset")
         .bindValue("read", "read_ready", {"read_data"})
