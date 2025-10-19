@@ -189,7 +189,22 @@ void CustomMethod::init(Cmt2Module *parent, llvm::StringRef name) {
   auto *lowLevelMethod = parent->lowLevelModule()->addMethod(name, argTypes, resultTypes);
 
   // Set guard if defined
-  if (guardFn_) {
+  if (useSignalArgs_ && guardSignalFn_) {
+    lowLevelMethod->guard([this, parent](mlir::OpBuilder &builder,
+                                          llvm::ArrayRef<mlir::BlockArgument> args) {
+      BuildContext ctx(&builder, parent->loc());
+      Cmt2Module::setCurrentContext(&ctx);
+
+      // Convert BlockArguments to Signals
+      std::vector<Signal> signalArgs;
+      for (auto arg : args) {
+        signalArgs.emplace_back(arg, &builder, parent->loc());
+      }
+
+      guardSignalFn_(builder, signalArgs);
+      Cmt2Module::setCurrentContext(nullptr);
+    });
+  } else if (guardFn_) {
     lowLevelMethod->guard([this, parent](mlir::OpBuilder &builder,
                                           llvm::ArrayRef<mlir::BlockArgument> args) {
       BuildContext ctx(&builder, parent->loc());
@@ -200,7 +215,22 @@ void CustomMethod::init(Cmt2Module *parent, llvm::StringRef name) {
   }
 
   // Set body if defined
-  if (bodyFn_) {
+  if (useSignalArgs_ && bodySignalFn_) {
+    lowLevelMethod->body([this, parent](mlir::OpBuilder &builder,
+                                         llvm::ArrayRef<mlir::BlockArgument> args) {
+      BuildContext ctx(&builder, parent->loc());
+      Cmt2Module::setCurrentContext(&ctx);
+
+      // Convert BlockArguments to Signals
+      std::vector<Signal> signalArgs;
+      for (auto arg : args) {
+        signalArgs.emplace_back(arg, &builder, parent->loc());
+      }
+
+      bodySignalFn_(builder, signalArgs);
+      Cmt2Module::setCurrentContext(nullptr);
+    });
+  } else if (bodyFn_) {
     lowLevelMethod->body([this, parent](mlir::OpBuilder &builder,
                                          llvm::ArrayRef<mlir::BlockArgument> args) {
       BuildContext ctx(&builder, parent->loc());

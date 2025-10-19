@@ -783,3 +783,89 @@ ninja ecmt2-bundle-vector-highlevel-example
 
 ### Cycle Detection
 
+
+### If Support
+
+#### Spec
+
+Currently, `cmt2` dialect does not provide an `if`-`else` mechanism, which is bad.
+
+We need new `cmt2` operations: `cmt2.if`, which can have a `then` region and an optional `else` region.
+
+You need to update `include/circt/Dialect/Cmt2/Cmt2Ops.td` to define the operation with a good assembly format.
+
+For transforms, `cmt2.if` will influence `CallInfo`, the analysis need to find out all `cmt2.call`'s inside the regions.
+
+For conversion `Cmt2ToFIRRTL`, the `cmt2.if` should be converted into `firrtl.when`.
+
+Both the low-level and high-level `ecmt2` should support the new language feature.
+
+You should test with the command:
+```shell
+# Test if operations parse correctly
+build/bin/circt-opt test/Dialect/Cmt2/if-test.mlir
+
+# Test conversion to FIRRTL
+build/bin/circt-opt test/Dialect/Cmt2/if-test.mlir --lower-cmt2-to-firrtl
+```
+
+#### Progress
+
+✅ **COMPLETE** - Full if-else control flow support for the cmt2 dialect.
+
+**Core Operations:**
+- ✅ `cmt2.if` operation with optional else branch
+  - Arguments: condition (1-bit FIRRTL type)
+  - Optional results if both branches return values
+  - Required `thenRegion`, optional `elseRegion`
+  - Can appear in MethodOp, RuleOp, ValueOp, and nested IfOp
+  - Custom verifier ensures type safety
+- ✅ `cmt2.yield` operation for returning values from if regions
+  - Terminates if regions and yields values
+  - Must appear in IfOp regions
+
+**Analysis & Conversion:**
+- ✅ CallInfo analysis automatically handles if regions (recursive walk)
+- ✅ Cmt2ToFIRRTL converts `cmt2.if` to `firrtl.when` with proper wire handling
+  - Creates result wires when if operation has results
+  - Recursively clones then/else regions
+  - Connects region results to wires
+
+**ECMT2 Low-Level API Support:**
+- ✅ `IfBuilder` class with fluent API (in `SignalHelpers.h`):
+  ```cpp
+  auto result = IfBuilder(condition, builder, loc)
+                    .Then([](OpBuilder& b) { return thenValue; })
+                    .Else([](OpBuilder& b) { return elseValue; })
+                    .build();
+  ```
+- ✅ Helper functions:
+  - `If(condition, thenFn, elseFn, builder, loc)` - with result
+  - `If(condition, thenFn, builder, loc)` - without else, no result
+
+**ECMT2 High-Level API Support:**
+- ✅ Declarative usage in `Cmt2Module` classes
+- ✅ Integration with `INIT_METHOD`, `INIT_RULE`, and helper functions
+- ✅ Working examples in `two_counter_if_highlevel.cpp`
+
+**Testing:**
+- ✅ Comprehensive tests in `test/Dialect/Cmt2/if-test.mlir`:
+  - Simple if without else
+  - If-else without results
+  - If-else with results
+  - Nested if operations
+  - Parse and FIRRTL conversion tests
+- ✅ Working examples:
+  - `examples/ECMT2/two_counter_if_example.cpp` (low-level)
+  - `examples/ECMT2/two_counter_if_highlevel.cpp` (high-level, declarative)
+
+**Documentation:**
+- ✅ Implementation summary: `IF_IMPLEMENTATION_SUMMARY.md`
+- ✅ Example documentation: `examples/ECMT2/IF_EXAMPLES_README.md`
+
+**Files Modified:**
+- `include/circt/Dialect/Cmt2/Cmt2Ops.td` - IfOp and YieldOp definitions
+- `lib/Dialect/Cmt2/Cmt2Ops.cpp` - IfOp verifier
+- `lib/Conversion/Cmt2ToFIRRTL/Cmt2ToFIRRTL.cpp` - if-to-when conversion
+- `include/circt/Dialect/Cmt2/ECMT2/SignalHelpers.h` - IfBuilder and If helpers
+- `lib/Dialect/Cmt2/ECMT2/SignalHelpers.cpp` - IfBuilder implementation

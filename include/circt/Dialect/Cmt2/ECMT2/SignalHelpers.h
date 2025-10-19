@@ -138,6 +138,117 @@ inline SInt AsSInt(Signal signal, mlir::OpBuilder *builder,
   return SInt(signal.getValue(), builder, loc);
 }
 
+//===----------------------------------------------------------------------===//
+// Control Flow Helpers
+//===----------------------------------------------------------------------===//
+
+/// Helper class for building if-else control flow operations
+/// Provides a fluent API for creating cmt2.if operations with then/else branches
+///
+/// Example usage:
+///   auto result = IfBuilder(condition, builder, loc)
+///                     .Then([](OpBuilder& b) {
+///                       // then branch operations
+///                       return thenValue;
+///                     })
+///                     .Else([](OpBuilder& b) {
+///                       // else branch operations
+///                       return elseValue;
+///                     })
+///                     .build();
+class IfBuilder {
+public:
+  /// Create an IfBuilder with the given condition
+  /// \param condition A 1-bit signal representing the condition
+  /// \param builder OpBuilder to use for creating operations
+  /// \param loc Location for the created operations
+  IfBuilder(const Signal &condition, mlir::OpBuilder &builder,
+            mlir::Location loc)
+      : condition_(condition.getValue()), builder_(builder), loc_(loc) {}
+
+  /// Set the then branch using a lambda/function
+  /// \param fn Function that builds the then region, returns a Signal or void
+  template <typename Func>
+  IfBuilder &Then(Func &&fn) {
+    thenFn_ = [fn = std::forward<Func>(fn)](mlir::OpBuilder &b) -> mlir::Value {
+      if constexpr (std::is_void_v<std::invoke_result_t<Func, mlir::OpBuilder&>>) {
+        fn(b);
+        return mlir::Value();
+      } else {
+        auto result = fn(b);
+        if constexpr (std::is_same_v<decltype(result), Signal>) {
+          return result.getValue();
+        } else {
+          return result;
+        }
+      }
+    };
+    return *this;
+  }
+
+  /// Set the else branch using a lambda/function
+  /// \param fn Function that builds the else region, returns a Signal or void
+  template <typename Func>
+  IfBuilder &Else(Func &&fn) {
+    elseFn_ = [fn = std::forward<Func>(fn)](mlir::OpBuilder &b) -> mlir::Value {
+      if constexpr (std::is_void_v<std::invoke_result_t<Func, mlir::OpBuilder&>>) {
+        fn(b);
+        return mlir::Value();
+      } else {
+        auto result = fn(b);
+        if constexpr (std::is_same_v<decltype(result), Signal>) {
+          return result.getValue();
+        } else {
+          return result;
+        }
+      }
+    };
+    hasElse_ = true;
+    return *this;
+  }
+
+  /// Build and return the if operation result as a Signal (if it has a result)
+  /// \return Signal wrapping the if operation result, or empty Signal if no results
+  Signal build();
+
+private:
+  mlir::Value condition_;
+  mlir::OpBuilder &builder_;
+  mlir::Location loc_;
+  std::function<mlir::Value(mlir::OpBuilder&)> thenFn_;
+  std::function<mlir::Value(mlir::OpBuilder&)> elseFn_;
+  bool hasElse_ = false;
+};
+
+/// Simple if-else helper for creating conditional operations with result
+/// \param condition 1-bit condition signal
+/// \param thenFn Function to build the then branch, returns a Signal
+/// \param elseFn Function to build the else branch, returns a Signal
+/// \param builder OpBuilder to use
+/// \param loc Location for operations
+/// \return Signal wrapping the result of the if operation
+template <typename ThenFunc, typename ElseFunc>
+Signal If(const Signal &condition, ThenFunc &&thenFn, ElseFunc &&elseFn,
+          mlir::OpBuilder &builder, mlir::Location loc) {
+  return IfBuilder(condition, builder, loc)
+      .Then(std::forward<ThenFunc>(thenFn))
+      .Else(std::forward<ElseFunc>(elseFn))
+      .build();
+}
+
+/// Simple if helper without else branch and without result
+/// \param condition 1-bit condition signal
+/// \param thenFn Function to build the then branch
+/// \param builder OpBuilder to use
+/// \param loc Location for operations
+template <typename ThenFunc>
+void If(const Signal &condition, ThenFunc &&thenFn,
+        mlir::OpBuilder &builder, mlir::Location loc) {
+  IfBuilder(condition, builder, loc)
+      .Then(std::forward<ThenFunc>(thenFn))
+      .build();
+}
+
 } // namespace ecmt2
 } // namespace cmt2
 } // namespace circt

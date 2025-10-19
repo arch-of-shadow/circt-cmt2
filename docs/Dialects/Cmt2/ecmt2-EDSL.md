@@ -48,7 +48,77 @@ class FVector : public Signal {
 };
 ```
 
-### 1.1. Bundle and Vector Helpers
+### 1.1. Conditional Execution (If/Else)
+
+**Header:** `#include "circt/Dialect/Cmt2/ECMT2/SignalHelpers.h"`
+
+The `IfBuilder` class provides a fluent API for creating conditional execution logic:
+
+```cpp
+class IfBuilder {
+public:
+    IfBuilder(const Signal &condition, mlir::OpBuilder &builder, mlir::Location loc);
+
+    // Add then branch
+    template <typename Func>
+    IfBuilder &Then(Func &&fn);  // fn: mlir::OpBuilder& -> mlir::Value or Signal
+
+    // Add else branch (optional)
+    template <typename Func>
+    IfBuilder &Else(Func &&fn);  // fn: mlir::OpBuilder& -> mlir::Value or Signal
+
+    // Build the cmt2.if operation
+    Signal build();  // Returns result signal (if branches return values)
+};
+
+// Helper functions for concise syntax
+template <typename ThenFunc, typename ElseFunc>
+Signal If(const Signal &condition, ThenFunc &&thenFn, ElseFunc &&elseFn,
+          mlir::OpBuilder &builder, mlir::Location loc);
+
+template <typename ThenFunc>
+void If(const Signal &condition, ThenFunc &&thenFn,
+        mlir::OpBuilder &builder, mlir::Location loc);
+```
+
+**Example Usage:**
+
+```cpp
+// If-else with return values
+auto result = IfBuilder(condition, builder, loc)
+    .Then([](mlir::OpBuilder &b) -> mlir::Value {
+        auto val = b.create<firrtl::ConstantOp>(...);
+        return val;
+    })
+    .Else([](mlir::OpBuilder &b) -> mlir::Value {
+        auto val = b.create<firrtl::ConstantOp>(...);
+        return val;
+    })
+    .build();
+
+// Using If helper for concise syntax
+auto result = If(condition,
+    [](mlir::OpBuilder &b) { return thenValue; },
+    [](mlir::OpBuilder &b) { return elseValue; },
+    builder, loc);
+
+// If without else (no return value)
+If(condition,
+    [](mlir::OpBuilder &b) {
+        // Execute when condition is true
+        instance->callMethod("write", {someValue}, b);
+    },
+    builder, loc);
+```
+
+**Key Features:**
+- **Type-safe**: Ensures both branches return compatible types
+- **Fluent API**: Readable, chainable method calls
+- **Nested support**: If operations can be nested arbitrarily
+- **Optional else**: Else branch is optional when no result is needed
+- **FIRRTL conversion**: Automatically converts to `firrtl.when` during lowering
+
+### 1.2. Bundle and Vector Helpers
 
 **Header:** `#include "circt/Dialect/Cmt2/ECMT2/SignalHelpers.h"`
 
@@ -456,6 +526,119 @@ auto* childInst = parent->addInstance("c", child->lowLevelModule(),
 // Generate code
 llvm::outs() << circuit.emitMLIRString() << "\n";
 ```
+
+### Example 4: Conditional Execution with If
+
+```cpp
+Circuit circuit("conditionalCounter", context);
+
+// External register module
+llvm::StringMap<int64_t> regParams;
+regParams["width"] = 32;
+auto* regMod = circuit.addExternalModule("reg", "FIRRTLReg", regParams);
+regMod->bindClock("clk", "clock")
+      .bindReset("rst", "reset")
+      .bindValue("read", "read_ready", {"read_data"})
+      .bindMethod("write", "write_enable", "write_ready", {"write_data"}, {})
+      .addConflict("write", "write")
+      .addConflictFree("read", "read");
+
+// Counter module
+auto* counter = circuit.addModule("conditionalCounter");
+auto& builder = counter->getBuilder();
+auto loc = counter->getLoc();
+
+// Add clock and reset arguments
+auto clk = counter->getBodyBlock()->addArgument(firrtl::ClockType::get(&context), loc);
+auto rst = counter->getBodyBlock()->addArgument(firrtl::UIntType::get(&context, 1), loc);
+
+// Add two register instances
+auto* counter1 = counter->addInstance("counter1", regMod, {clk, rst});
+auto* counter2 = counter->addInstance("counter2", regMod, {clk, rst});
+
+// Method with if-else: increment selected counter
+auto uint1Type = firrtl::UIntType::get(&context, 1);
+auto uint32Type = firrtl::UIntType::get(&context, 32);
+auto* selectIncrement = counter->addMethod("selectIncrement",
+                                           {{"select", uint1Type}},
+                                           {uint32Type});
+selectIncrement->guard([](mlir::OpBuilder& b, llvm::ArrayRef<mlir::BlockArgument> args) {
+    b.create<cmt2::ReturnOp>(b.getUnknownLoc(), mlir::ValueRange{});
+});
+selectIncrement->body([&](mlir::OpBuilder& b, llvm::ArrayRef<mlir::BlockArgument> args) {
+    Signal selectSig(args[0], &b, loc);
+
+    // Read both counters
+    auto counter1Vals = counter1->callValue("read", b);
+    auto counter2Vals = counter2->callValue("read", b);
+
+    // Use If to select which counter to increment
+    auto result = If(selectSig,
+        // Then: increment counter1
+        [&](mlir::OpBuilder &builder) -> Signal {
+            auto one = UInt::constant(1, 32, builder, loc);
+            auto sum = (Signal(counter1Vals[0], &builder, loc) + one).getValue();
+            auto truncated = builder.create<firrtl::BitsPrimOp>(loc, sum, 31, 0);
+            counter1->callMethod("write", {truncated}, builder);
+            return Signal(truncated, &builder, loc);
+        },
+        // Else: increment counter2
+        [&](mlir::OpBuilder &builder) -> Signal {
+            auto one = UInt::constant(1, 32, builder, loc);
+            auto sum = (Signal(counter2Vals[0], &builder, loc) + one).getValue();
+            auto truncated = builder.create<firrtl::BitsPrimOp>(loc, sum, 31, 0);
+            counter2->callMethod("write", {truncated}, builder);
+            return Signal(truncated, &builder, loc);
+        },
+        b, loc);
+
+    b.create<cmt2::ReturnOp>(loc, mlir::ValueRange{result.getValue()});
+});
+selectIncrement->finalize();
+
+// Rule with if (no else): conditionally increment counter2
+auto* conditionalRule = counter->addRule("conditionalIncrement");
+conditionalRule->guard([](mlir::OpBuilder& b) {
+    b.create<cmt2::ReturnOp>(b.getUnknownLoc(), mlir::ValueRange{});
+});
+conditionalRule->body([&](mlir::OpBuilder& b) {
+    // Read counter1
+    auto counter1Vals = counter1->callValue("read", b);
+
+    // Check if counter1 is even (bit 0 == 0)
+    auto bit0 = b.create<firrtl::BitsPrimOp>(loc, counter1Vals[0], 0, 0);
+    auto zero = b.create<firrtl::ConstantOp>(loc, firrtl::UIntType::get(&context, 1), 0);
+    auto isEven = b.create<firrtl::EQPrimOp>(loc, bit0, zero);
+    Signal isEvenSig(isEven, &b, loc);
+
+    // If even, increment counter2 (no else branch)
+    If(isEvenSig,
+        [&](mlir::OpBuilder &builder) -> Signal {
+            auto counter2Vals = counter2->callValue("read", builder);
+            auto one = UInt::constant(1, 32, builder, loc);
+            auto sum = (Signal(counter2Vals[0], &builder, loc) + one).getValue();
+            auto truncated = builder.create<firrtl::BitsPrimOp>(loc, sum, 31, 0);
+            counter2->callMethod("write", {truncated}, builder);
+            return Signal(truncated, &builder, loc);
+        },
+        b, loc);
+
+    b.create<cmt2::ReturnOp>(loc, mlir::ValueRange{});
+});
+conditionalRule->finalize();
+
+// Generate code
+llvm::outs() << circuit.emitMLIRString() << "\n";
+if (circuit.runCmt2ToFIRRTLPipeline().succeeded()) {
+    llvm::outs() << circuit.emitFIRRTL() << "\n";
+}
+```
+
+**Key Points:**
+- `If()` with then and else branches returns a Signal containing the result
+- `If()` with only a then branch (no else) is used for side effects without returning a value
+- If operations are type-safe - both branches must return compatible types when results are expected
+- Converts cleanly to `firrtl.when` operations during FIRRTL lowering
 
 ## Module Library System
 

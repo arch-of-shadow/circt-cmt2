@@ -262,6 +262,12 @@ mlir::Value Not(mlir::Value val);
 mlir::Value Mux(mlir::Value sel, mlir::Value high, mlir::Value low);
 mlir::Value Bits(mlir::Value val, unsigned high, unsigned low);
 
+// Conditional execution (If/Else)
+Signal If(const Signal &condition, ThenFunc &&thenFn, ElseFunc &&elseFn,
+          mlir::OpBuilder &builder, mlir::Location loc);
+void If(const Signal &condition, ThenFunc &&thenFn,
+        mlir::OpBuilder &builder, mlir::Location loc);
+
 } // namespace highlevel
 ```
 
@@ -653,6 +659,169 @@ int main() {
 }
 ```
 
+### Example 4: Conditional Execution with If/Else
+
+```cpp
+// Type aliases for nested templates
+using UInt1 = highlevel::UInt<1>;
+using UInt32 = highlevel::UInt<32>;
+
+class ConditionalCounter : public Cmt2Module {
+public:
+    ClockInput clk;
+    ResetInput rst;
+    highlevel::Instance<ExternalModule> counter1;
+    highlevel::Instance<ExternalModule> counter2;
+
+    // ✨ Method using If for conditional counter selection
+    highlevel::Method<UInt32, UInt1> selectIncrement;
+
+    // ✨ Rule using If for conditional execution
+    highlevel::Rule conditionalIncrement;
+
+    ConditionalCounter(ExternalModule *regMod) : Cmt2Module("ConditionalCounter") {
+        CMT2_ARG_CLOCK(clk);
+        CMT2_ARG_RESET(rst);
+        CMT2_REGISTER_INSTANCE(counter1, regMod, clk.get().getValue(), rst.get().getValue());
+        CMT2_REGISTER_INSTANCE(counter2, regMod, clk.get().getValue(), rst.get().getValue());
+
+        // Method with If-Else: selectively increment counter based on argument
+        INIT_METHOD(selectIncrement)
+          .guard([](mlir::OpBuilder &b, llvm::ArrayRef<mlir::BlockArgument> args) {
+              Return();  // Always ready
+          })
+          .body([this](mlir::OpBuilder &b, llvm::ArrayRef<mlir::BlockArgument> args) {
+              Signal selectSig(args[0], &b, loc());
+
+              // Read both counters
+              auto counter1Vals = counter1.callValue("read", b);
+              auto counter2Vals = counter2.callValue("read", b);
+
+              // ✨ Use If helper for conditional logic
+              auto result = If(selectSig,
+                  // Then branch: increment counter1
+                  [&](mlir::OpBuilder &builder) -> Signal {
+                      auto one = UIntConst(1, 32);
+                      auto sum = Add(counter1Vals[0], one);
+                      auto newVal = Bits(sum, 31, 0);
+                      counter1.callMethod("write", builder, newVal);
+                      return Signal(newVal, &builder, loc());
+                  },
+                  // Else branch: increment counter2
+                  [&](mlir::OpBuilder &builder) -> Signal {
+                      auto one = UIntConst(1, 32);
+                      auto sum = Add(counter2Vals[0], one);
+                      auto newVal = Bits(sum, 31, 0);
+                      counter2.callMethod("write", builder, newVal);
+                      return Signal(newVal, &builder, loc());
+                  },
+                  b, loc());
+
+              Return(result.getValue());
+          });
+
+        // Rule with If (no else): conditionally increment counter2 when counter1 is even
+        INIT_RULE(conditionalIncrement)
+          .guard([](mlir::OpBuilder &b) {
+              Return();
+          })
+          .body([this](mlir::OpBuilder &b) {
+              // Read counter1
+              auto counter1Vals = counter1.callValue("read", b);
+
+              // Check if counter1 is even (bit 0 == 0)
+              auto bit0 = Bits(counter1Vals[0], 0, 0);
+              auto zero = UIntConst(0, 1);
+              auto isEven = Eq(bit0, zero);
+              Signal isEvenSig(isEven, &b, loc());
+
+              // ✨ If without else - executes only when condition is true
+              If(isEvenSig,
+                  [&](mlir::OpBuilder &builder) -> Signal {
+                      auto counter2Vals = counter2.callValue("read", builder);
+                      auto one = UIntConst(1, 32);
+                      auto sum = Add(counter2Vals[0], one);
+                      auto newVal = Bits(sum, 31, 0);
+                      counter2.callMethod("write", builder, newVal);
+                      return Signal(newVal, &builder, loc());
+                  },
+                  b, loc());
+
+              Return();
+          });
+    }
+
+    void build() override {
+        // ✨ Empty! Everything is declarative!
+    }
+};
+
+int main() {
+    mlir::MLIRContext context;
+    context.loadDialect<cmt2::Cmt2Dialect>();
+    context.loadDialect<firrtl::FIRRTLDialect>();
+
+    highlevel::Circuit circuit("ConditionalCounter", context);
+
+    // External register module
+    llvm::StringMap<int64_t> regParams;
+    regParams["width"] = 32;
+    auto *regMod = circuit.addExternalModule("FIRRTLReg", regParams);
+    regMod->bindClock("clk", "clock")
+          .bindReset("rst", "reset")
+          .bindValue("read", "read_ready", {"read_data"})
+          .bindMethod("write", "write_enable", "write_ready", {"write_data"}, {})
+          .addConflict("write", "write")
+          .addConflictFree("read", "read");
+
+    // Add module
+    circuit.addModule(std::make_unique<ConditionalCounter>(regMod));
+
+    // Generate MLIR
+    llvm::outs() << circuit.emitMLIRString() << "\n";
+
+    // Convert to FIRRTL and generate Verilog
+    if (circuit.runCmt2ToFIRRTLPipeline().succeeded()) {
+        llvm::outs() << circuit.emitFIRRTL() << "\n";
+    }
+
+    return 0;
+}
+```
+
+**Key Features of If Support:**
+- **If-Else with results**: Returns a Signal containing the selected value
+- **If without else**: Used for side effects, no return value needed
+- **Helper function integration**: Works seamlessly with `Add()`, `Bits()`, `Eq()`, etc.
+- **Type safety**: Ensures both branches return compatible types when results are expected
+- **Declarative style**: Fits naturally into the high-level API patterns
+- **Nested support**: If operations can be nested arbitrarily deep
+
+**Generated MLIR:**
+```mlir
+cmt2.method @selectIncrement (%arg0: !firrtl.uint<1>) -> (!firrtl.uint<32>) {
+    cmt2.return
+} {
+    %0 = cmt2.call @counter1 @read() : () -> !firrtl.uint<32>
+    %1 = cmt2.call @counter2 @read() : () -> !firrtl.uint<32>
+    %2 = cmt2.if %arg0 : !firrtl.uint<1> -> !firrtl.uint<32> {
+        %c1 = firrtl.constant 1 : !firrtl.uint<32>
+        %3 = firrtl.add %0, %c1 : (!firrtl.uint<32>, !firrtl.uint<32>) -> !firrtl.uint<33>
+        %4 = firrtl.bits %3 31 to 0 : (!firrtl.uint<33>) -> !firrtl.uint<32>
+        cmt2.call @counter1 @write(%4) : (!firrtl.uint<32>) -> ()
+        cmt2.yield %4 : !firrtl.uint<32>
+    } else {
+        %c1 = firrtl.constant 1 : !firrtl.uint<32>
+        %3 = firrtl.add %1, %c1 : (!firrtl.uint<32>, !firrtl.uint<32>) -> !firrtl.uint<33>
+        %4 = firrtl.bits %3 31 to 0 : (!firrtl.uint<33>) -> !firrtl.uint<32>
+        cmt2.call @counter2 @write(%4) : (!firrtl.uint<32>) -> ()
+        cmt2.yield %4 : !firrtl.uint<32>
+    }
+    cmt2.return %2 : !firrtl.uint<32>
+}
+```
+
+
 ## API Evolution Summary
 
 ### V1: Base Class-Based API
@@ -675,6 +844,7 @@ int main() {
 - **Empty `build()`**: Most logic in constructor
 - **Custom Type Support**: `CustomMethod`, `CustomValue` for bundle/vector signatures
 - **Bundle/Vector Helpers**: `MakeBundle()`, `MakeVector()`, `GetField()`, `GetElement()`
+- **Conditional Execution**: `If()` helper for conditional logic with type-safe branches
 
 ## Code Comparison
 

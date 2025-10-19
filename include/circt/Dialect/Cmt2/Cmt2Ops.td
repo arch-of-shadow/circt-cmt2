@@ -600,7 +600,7 @@ def MethodOp : Cmt2Op<
 
 def CallOp : Cmt2Op<
   "call", [
-    ParentOneOf<["MethodOp", "RuleOp", "ValueOp"]>,
+    ParentOneOf<["MethodOp", "RuleOp", "ValueOp", "IfOp"]>,
     DeclareOpInterfaceMethods<CallOpInterface>
   ]> {
   let summary = "Call Method/Value.";
@@ -743,13 +743,107 @@ def InterfaceDeclOp : Cmt2Op<
     cmt2.interface.decl @sym_name : @interface attr-dict
     ```
   }];
-  let arguments = (ins 
+  let arguments = (ins
     SymbolRefAttr:$interface,
     SymbolNameAttr:$sym_name
   );
   let assemblyFormat = [{
     $sym_name `:` $interface attr-dict
   }];
+}
+
+def IfOp : Cmt2Op<
+  "if", [
+    ParentOneOf<["MethodOp", "RuleOp", "ValueOp", "IfOp"]>,
+    NoRegionArguments
+  ]> {
+  let summary = "Conditional execution with if-else branches.";
+  let description = [{
+    The `cmt2.if` operation provides conditional execution within rules, methods,
+    and values. It has a required `then` region and an optional `else` region,
+    similar to standard if-else control flow.
+
+    Arguments:
+    - `condition`: A value of type !firrtl.uint<1> that determines which branch executes.
+
+    Results:
+    - Optional results if both branches return values of the same types.
+
+    Regions:
+    - `thenRegion`: The region executed when the condition is true.
+    - `elseRegion`: Optional region executed when the condition is false.
+
+    Assembly format:
+    ```mlir
+    cmt2.if %condition : !firrtl.uint<1> {
+      // then region
+    } else {
+      // else region (optional)
+    }
+    ```
+
+    For operations with results:
+    ```mlir
+    %result = cmt2.if %condition : !firrtl.uint<1> -> !firrtl.uint<32> {
+      %val = ...
+      cmt2.yield %val : !firrtl.uint<32>
+    } else {
+      %val = ...
+      cmt2.yield %val : !firrtl.uint<32>
+    }
+    ```
+  }];
+  let arguments = (ins
+    FIRRTLBaseType:$condition
+  );
+  let results = (outs Variadic<FIRRTLBaseType>:$results);
+  let regions = (region
+    SizedRegion<1>:$thenRegion,
+    AnyRegion:$elseRegion
+  );
+
+  let assemblyFormat = [{
+    $condition `:` qualified(type($condition))
+    (`->` type($results)^)?
+    $thenRegion
+    (`else` $elseRegion^)?
+    attr-dict
+  }];
+
+  let hasVerifier = 1;
+}
+
+def YieldOp : Cmt2Op<
+  "yield", [
+    Terminator,
+    ParentOneOf<["IfOp"]>,
+    ReturnLike
+  ]> {
+  let summary = "Yield values from an if region.";
+  let description = [{
+    The `cmt2.yield` operation is used to yield values from the regions of
+    a `cmt2.if` operation. It marks the end of a region and provides the
+    values to be returned.
+
+    Arguments:
+    - `results`: The values to yield from the region.
+
+    Assembly format:
+    ```mlir
+    cmt2.yield %result1, %result2, ... : <type>
+    ```
+  }];
+  let arguments = (ins
+    Variadic<FIRRTLBaseType>:$results
+  );
+
+  let assemblyFormat = [{
+    attr-dict ($results^ `:` qualified(type($results)))?
+  }];
+
+  let builders = [OpBuilder<(ins), [{
+    build($_builder, $_state, mlir::ValueRange());
+  }]>];
 }
 
 #endif // CIRCT_DIALECT_Cmt2_Cmt2OPS_TD

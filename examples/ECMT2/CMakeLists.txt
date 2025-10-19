@@ -162,3 +162,57 @@ target_include_directories(ecmt2-bundle-vector-highlevel-example
   PRIVATE
   ${CIRCT_MAIN_INCLUDE_DIR}
 )
+
+add_executable(ecmt2-two-counter-if-example
+  two_counter_if_example.cpp
+)
+
+target_link_libraries(ecmt2-two-counter-if-example
+  PRIVATE
+  CIRCTECMT2
+  CIRCTCmt2
+  CIRCTFIRRTL
+  MLIRIR
+  MLIRSupport
+)
+
+target_include_directories(ecmt2-two-counter-if-example
+  PRIVATE
+  ${CIRCT_MAIN_INCLUDE_DIR}
+)
+
+add_executable(ecmt2-two-counter-if-highlevel-example
+  two_counter_if_highlevel.cpp
+)
+
+target_link_libraries(ecmt2-two-counter-if-highlevel-example
+  PRIVATE
+  CIRCTECMT2
+  CIRCTCmt2
+  CIRCTFIRRTL
+  MLIRIR
+  MLIRSupport
+)
+
+target_include_directories(ecmt2-two-counter-if-highlevel-example
+  PRIVATE
+  ${CIRCT_MAIN_INCLUDE_DIR}
+)
+
+add_executable(ecmt2-signal-args-example
+  signal_args_example.cpp
+)
+
+target_link_libraries(ecmt2-signal-args-example
+  PRIVATE
+  CIRCTECMT2
+  CIRCTCmt2
+  CIRCTFIRRTL
+  MLIRIR
+  MLIRSupport
+)
+
+target_include_directories(ecmt2-signal-args-example
+  PRIVATE
+  ${CIRCT_MAIN_INCLUDE_DIR}
+)

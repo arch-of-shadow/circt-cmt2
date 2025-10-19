@@ -667,6 +667,69 @@ llvm::SmallVector<InstanceOp, 4> getInstances(ModuleOp module) {
 //   return instances;
 // }
 
+//===----------------------------------------------------------------------===//
+// IfOp
+//===----------------------------------------------------------------------===//
+
+LogicalResult IfOp::verify() {
+  // Check if the condition type is a 1-bit FIRRTL type
+  auto conditionType = getCondition().getType();
+  if (auto uintType = llvm::dyn_cast<circt::firrtl::UIntType>(conditionType)) {
+    if (!uintType.getWidth() || uintType.getWidth().value() != 1) {
+      return emitOpError("condition must be a 1-bit unsigned integer type");
+    }
+  } else if (auto sintType = llvm::dyn_cast<circt::firrtl::SIntType>(conditionType)) {
+    if (!sintType.getWidth() || sintType.getWidth().value() != 1) {
+      return emitOpError("condition must be a 1-bit type");
+    }
+  } else {
+    return emitOpError("condition must be a FIRRTL integer type");
+  }
+
+  // If the operation has results, both regions must be present and yield matching types
+  if (!getResults().empty()) {
+    if (getElseRegion().empty()) {
+      return emitOpError("must have an else region if it has results");
+    }
+
+    // Check that both regions end with a yield operation
+    auto checkYield = [&](Region &region, StringRef regionName) -> LogicalResult {
+      if (region.empty() || region.front().empty()) {
+        return emitOpError(regionName + " region must not be empty");
+      }
+
+      auto *terminator = region.front().getTerminator();
+      auto yieldOp = llvm::dyn_cast_or_null<YieldOp>(terminator);
+      if (!yieldOp) {
+        return emitOpError(regionName + " region must end with cmt2.yield");
+      }
+
+      // Check yield types match if results
+      if (yieldOp.getResults().size() != getResults().size()) {
+        return emitOpError(regionName + " region yields " +
+                          std::to_string(yieldOp.getResults().size()) +
+                          " values but " + std::to_string(getResults().size()) +
+                          " expected");
+      }
+
+      for (auto [yieldType, resultType] : llvm::zip(
+              yieldOp.getResults().getTypes(), getResults().getTypes())) {
+        if (yieldType != resultType) {
+          return emitOpError(regionName + " region yield type mismatch");
+        }
+      }
+      return success();
+    };
+
+    if (failed(checkYield(getThenRegion(), "then")))
+      return failure();
+    if (failed(checkYield(getElseRegion(), "else")))
+      return failure();
+  }
+
+  return success();
+}
+
 } // namespace cmt2
 } // namespace circt
 

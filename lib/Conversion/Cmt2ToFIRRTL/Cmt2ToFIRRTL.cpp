@@ -1138,7 +1138,7 @@ LogicalResult LowerCmt2ToFIRRTLPass::cloneRegionOps(
 
   Block &sourceBlock = sourceRegion.front();
 
-  // Clone each operation, handling cmt2.return and cmt2.call specially
+  // Clone each operation, handling cmt2.return, cmt2.call, and cmt2.if specially
   for (Operation &op : sourceBlock) {
     if (auto returnOp = dyn_cast<ReturnOp>(op)) {
       // Collect return values as results
@@ -1152,6 +1152,75 @@ LogicalResult LowerCmt2ToFIRRTLPass::cloneRegionOps(
       // Convert calls to FIRRTL signal connections
       if (failed(convertCallOp(callOp, ctx, builder))) {
         return failure();
+      }
+      continue;
+    }
+
+    if (auto ifOp = dyn_cast<IfOp>(op)) {
+      // Convert cmt2.if to firrtl.when
+      Value condition = ctx.getIRMapping().lookupOrDefault(ifOp.getCondition());
+      bool hasElse = !ifOp.getElseRegion().empty();
+
+      // Create result wires if the if operation has results
+      SmallVector<Value> resultWires;
+      for (auto resultType : ifOp.getResults().getTypes()) {
+        auto wire = builder.create<WireOp>(
+            ifOp.getLoc(),
+            resultType,
+            builder.getStringAttr("if_result"));
+        resultWires.push_back(wire.getResult());
+      }
+
+      auto whenOp = builder.create<WhenOp>(ifOp.getLoc(), condition, hasElse);
+
+      // Clone then region
+      {
+        OpBuilder::InsertionGuard guard(builder);
+        builder.setInsertionPointToStart(&whenOp.getThenBlock());
+
+        SmallVector<Value> thenResults;
+        if (failed(cloneRegionOps(ifOp.getThenRegion(), ctx, builder, thenResults))) {
+          return failure();
+        }
+
+        // Connect then results to wires
+        for (auto [wire, result] : llvm::zip(resultWires, thenResults)) {
+          if (result) {
+            builder.create<ConnectOp>(ifOp.getLoc(), wire, result);
+          }
+        }
+      }
+
+      // Clone else region if present
+      if (hasElse) {
+        OpBuilder::InsertionGuard guard(builder);
+        builder.setInsertionPointToStart(&whenOp.getElseBlock());
+
+        SmallVector<Value> elseResults;
+        if (failed(cloneRegionOps(ifOp.getElseRegion(), ctx, builder, elseResults))) {
+          return failure();
+        }
+
+        // Connect else results to wires
+        for (auto [wire, result] : llvm::zip(resultWires, elseResults)) {
+          if (result) {
+            builder.create<ConnectOp>(ifOp.getLoc(), wire, result);
+          }
+        }
+      }
+
+      // Map the if results to the wires
+      for (auto [oldResult, newResult] : llvm::zip(ifOp.getResults(), resultWires)) {
+        ctx.getIRMapping().map(oldResult, newResult);
+      }
+
+      continue;
+    }
+
+    if (auto yieldOp = dyn_cast<YieldOp>(op)) {
+      // Collect yield values as results (similar to return)
+      for (Value result : yieldOp.getOperands()) {
+        results.push_back(ctx.getIRMapping().lookupOrDefault(result));
       }
       continue;
     }

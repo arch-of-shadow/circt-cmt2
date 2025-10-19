@@ -178,17 +178,35 @@ class Method {
 public:
   Method() = default;
 
-  /// Define guard condition
+  /// Define guard condition (with raw BlockArgument)
   template <typename Func>
   Method &guard(Func &&f) {
     guardFn_ = std::forward<Func>(f);
+    useSignalArgs_ = false;
     return *this;
   }
 
-  /// Define body computation
+  /// Define body computation (with raw BlockArgument)
   template <typename Func>
   Method &body(Func &&f) {
     bodyFn_ = std::forward<Func>(f);
+    useSignalArgs_ = false;
+    return *this;
+  }
+
+  /// Define guard condition (with Signal arguments)
+  template <typename Func>
+  Method &guardSignal(Func &&f) {
+    guardSignalFn_ = std::forward<Func>(f);
+    useSignalArgs_ = true;
+    return *this;
+  }
+
+  /// Define body computation (with Signal arguments)
+  template <typename Func>
+  Method &bodySignal(Func &&f) {
+    bodySignalFn_ = std::forward<Func>(f);
+    useSignalArgs_ = true;
     return *this;
   }
 
@@ -200,10 +218,19 @@ public:
 
 private:
   std::string name_;
+  bool useSignalArgs_ = false;
+
+  // Raw BlockArgument versions
   std::function<void(mlir::OpBuilder &, llvm::ArrayRef<mlir::BlockArgument>)>
       guardFn_;
   std::function<void(mlir::OpBuilder &, llvm::ArrayRef<mlir::BlockArgument>)>
       bodyFn_;
+
+  // Signal versions
+  std::function<void(mlir::OpBuilder &, const std::vector<Signal> &)>
+      guardSignalFn_;
+  std::function<void(mlir::OpBuilder &, const std::vector<Signal> &)>
+      bodySignalFn_;
 };
 
 /// Rule: autonomous behavior
@@ -331,17 +358,35 @@ public:
     return *this;
   }
 
-  /// Define guard condition
+  /// Define guard condition (with raw BlockArgument)
   template <typename Func>
   CustomMethod &guard(Func &&f) {
     guardFn_ = std::forward<Func>(f);
+    useSignalArgs_ = false;
     return *this;
   }
 
-  /// Define body computation
+  /// Define body computation (with raw BlockArgument)
   template <typename Func>
   CustomMethod &body(Func &&f) {
     bodyFn_ = std::forward<Func>(f);
+    useSignalArgs_ = false;
+    return *this;
+  }
+
+  /// Define guard condition (with Signal arguments)
+  template <typename Func>
+  CustomMethod &guardSignal(Func &&f) {
+    guardSignalFn_ = std::forward<Func>(f);
+    useSignalArgs_ = true;
+    return *this;
+  }
+
+  /// Define body computation (with Signal arguments)
+  template <typename Func>
+  CustomMethod &bodySignal(Func &&f) {
+    bodySignalFn_ = std::forward<Func>(f);
+    useSignalArgs_ = true;
     return *this;
   }
 
@@ -355,6 +400,7 @@ private:
   enum class TypeKind { Bundle, Vector };
 
   std::string name_;
+  bool useSignalArgs_ = false;
   llvm::SmallVector<std::string, 4> argNames_;
   llvm::SmallVector<BundleTypeDescriptor, 4> argTypeDescs_;
   llvm::SmallVector<VectorTypeDescriptor, 4> vectorArgTypeDescs_;
@@ -362,10 +408,18 @@ private:
   llvm::SmallVector<BundleTypeDescriptor, 1> returnTypeDescs_;
   llvm::SmallVector<VectorTypeDescriptor, 1> vectorReturnTypeDescs_;
   TypeKind returnTypeKind_ = TypeKind::Bundle;
+
+  // Raw BlockArgument versions
   std::function<void(mlir::OpBuilder &, llvm::ArrayRef<mlir::BlockArgument>)>
       guardFn_;
   std::function<void(mlir::OpBuilder &, llvm::ArrayRef<mlir::BlockArgument>)>
       bodyFn_;
+
+  // Signal versions
+  std::function<void(mlir::OpBuilder &, const std::vector<Signal> &)>
+      guardSignalFn_;
+  std::function<void(mlir::OpBuilder &, const std::vector<Signal> &)>
+      bodySignalFn_;
 };
 
 } // namespace highlevel
@@ -444,7 +498,21 @@ void Method<RetType, Args...>::init(Cmt2Module *parent, llvm::StringRef name) {
   auto *lowLevelMethod = parent->lowLevelModule()->addMethod(name, argTypes, resultTypes);
 
   // Set guard if defined
-  if (guardFn_) {
+  if (useSignalArgs_ && guardSignalFn_) {
+    lowLevelMethod->guard([this, parent](mlir::OpBuilder &builder, llvm::ArrayRef<mlir::BlockArgument> args) {
+      BuildContext ctx(&builder, parent->loc());
+      Cmt2Module::setCurrentContext(&ctx);
+
+      // Convert BlockArguments to Signals
+      std::vector<Signal> signalArgs;
+      for (auto arg : args) {
+        signalArgs.emplace_back(arg, &builder, parent->loc());
+      }
+
+      guardSignalFn_(builder, signalArgs);
+      Cmt2Module::setCurrentContext(nullptr);
+    });
+  } else if (guardFn_) {
     lowLevelMethod->guard([this, parent](mlir::OpBuilder &builder, llvm::ArrayRef<mlir::BlockArgument> args) {
       BuildContext ctx(&builder, parent->loc());
       Cmt2Module::setCurrentContext(&ctx);
@@ -454,7 +522,21 @@ void Method<RetType, Args...>::init(Cmt2Module *parent, llvm::StringRef name) {
   }
 
   // Set body if defined
-  if (bodyFn_) {
+  if (useSignalArgs_ && bodySignalFn_) {
+    lowLevelMethod->body([this, parent](mlir::OpBuilder &builder, llvm::ArrayRef<mlir::BlockArgument> args) {
+      BuildContext ctx(&builder, parent->loc());
+      Cmt2Module::setCurrentContext(&ctx);
+
+      // Convert BlockArguments to Signals
+      std::vector<Signal> signalArgs;
+      for (auto arg : args) {
+        signalArgs.emplace_back(arg, &builder, parent->loc());
+      }
+
+      bodySignalFn_(builder, signalArgs);
+      Cmt2Module::setCurrentContext(nullptr);
+    });
+  } else if (bodyFn_) {
     lowLevelMethod->body([this, parent](mlir::OpBuilder &builder, llvm::ArrayRef<mlir::BlockArgument> args) {
       BuildContext ctx(&builder, parent->loc());
       Cmt2Module::setCurrentContext(&ctx);

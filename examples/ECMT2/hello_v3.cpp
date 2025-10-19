@@ -111,7 +111,8 @@ public:
   // ✨ Declarative child instance (will have interface bindings)
   highlevel::Instance<Module> c;
 
-  // ✨ Declarative method and rule
+  // ✨ Declarative method, value, and rule
+  highlevel::Value<highlevel::UInt<32>> read;
   highlevel::Method<highlevel::UInt<32>, highlevel::UInt<32>> writeMethod;
   highlevel::Rule incr;
 
@@ -130,6 +131,19 @@ public:
     // ✨ Declarative child instance with interface binding!
     c.addInterfaceBinding("readX", "reader");
     CMT2_REGISTER_INSTANCE(c, childMod, clk.get().getValue(), rst.get().getValue());
+
+
+    INIT_VALUE(read)
+       .guard([](mlir::OpBuilder &b) {
+        Return();
+      })
+      .body([this](mlir::OpBuilder &b) {
+        // Read old value
+        auto oldVals = x.callValue("read", b);
+        // Return old value
+        Return(oldVals[0]);
+      });
+
 
     // ✨ TRULY DECLARATIVE METHOD
     INIT_METHOD(writeMethod)
