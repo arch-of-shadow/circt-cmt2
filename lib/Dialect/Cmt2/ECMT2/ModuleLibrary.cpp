@@ -409,6 +409,47 @@ ModuleLibrary::loadModule(llvm::StringRef name,
   return result;
 }
 
+mlir::LogicalResult ModuleLibrary::getActualModuleName(
+    llvm::StringRef name, const llvm::StringMap<int64_t> &params,
+    std::string &actualModuleName) const {
+
+  auto it = modules_.find(name);
+  if (it == modules_.end())
+    return mlir::failure();
+
+  const ModuleInfo &info = it->second;
+
+  // For static modules, use the module name directly
+  if (info.type == ModuleInfo::Static) {
+    actualModuleName = name.str();
+    return mlir::success();
+  }
+
+  // For Chisel modules, extract the module name from the output pattern
+  if (!info.buildInfo || info.buildInfo->outputPattern.empty())
+    return mlir::failure();
+
+  // Create complete parameter map with defaults
+  llvm::StringMap<int64_t> completeParams = params;
+  for (const auto &paramInfo : info.parameters) {
+    if (completeParams.find(paramInfo.name) == completeParams.end() &&
+        paramInfo.defaultValue) {
+      completeParams[paramInfo.name] = *paramInfo.defaultValue;
+    }
+  }
+
+  // Substitute parameters in the output pattern to get the filename
+  std::string outputFile = substituteParams(info.buildInfo->outputPattern, completeParams);
+
+  // Extract module name from filename (remove path and .mlir extension)
+  llvm::StringRef filename = llvm::sys::path::filename(outputFile);
+  if (filename.ends_with(".mlir"))
+    filename = filename.drop_back(5);
+
+  actualModuleName = filename.str();
+  return mlir::success();
+}
+
 mlir::LogicalResult ModuleLibrary::insertModuleIntoCircuit(
     llvm::StringRef name, const llvm::StringMap<int64_t> &params,
     mlir::OpBuilder &builder, mlir::Location loc,

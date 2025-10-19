@@ -162,3 +162,75 @@ target_include_directories(ecmt2-bundle-vector-highlevel-example
   PRIVATE
   ${CIRCT_MAIN_INCLUDE_DIR}
 )
+
+# add_executable(ecmt2-fifo2-module
+#   fifo2_module.cpp
+# )
+
+# target_link_libraries(ecmt2-fifo2-module
+#   PRIVATE
+#   CIRCTECMT2
+#   CIRCTCmt2
+#   CIRCTFIRRTL
+#   MLIRIR
+#   MLIRSupport
+# )
+
+# target_include_directories(ecmt2-fifo2-module
+#   PRIVATE
+#   ${CIRCT_MAIN_INCLUDE_DIR}
+# )
+
+add_executable(ecmt2-fifo1-push-module
+  fifo1_push_module.cpp
+)
+
+target_link_libraries(ecmt2-fifo1-push-module
+  PRIVATE
+  CIRCTECMT2
+  CIRCTCmt2
+  CIRCTFIRRTL
+  MLIRIR
+  MLIRSupport
+)
+
+target_include_directories(ecmt2-fifo1-push-module
+  PRIVATE
+  ${CIRCT_MAIN_INCLUDE_DIR}
+)
+
+add_executable(ecmt2-fifo-library
+  fifo_library.cpp
+)
+
+target_link_libraries(ecmt2-fifo-library
+  PRIVATE
+  CIRCTECMT2
+  CIRCTCmt2
+  CIRCTFIRRTL
+  MLIRIR
+  MLIRSupport
+)
+
+target_include_directories(ecmt2-fifo-library
+  PRIVATE
+  ${CIRCT_MAIN_INCLUDE_DIR}
+)
+
+add_executable(ecmt2-mem1r1w-example
+  mem1r1w_example.cpp
+)
+
+target_link_libraries(ecmt2-mem1r1w-example
+  PRIVATE
+  CIRCTECMT2
+  CIRCTCmt2
+  CIRCTFIRRTL
+  MLIRIR
+  MLIRSupport
+)
+
+target_include_directories(ecmt2-mem1r1w-example
+  PRIVATE
+  ${CIRCT_MAIN_INCLUDE_DIR}
+)
