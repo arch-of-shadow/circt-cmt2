@@ -113,7 +113,7 @@ public:
 
   // ✨ Declarative method, value, and rule
   highlevel::Value<highlevel::UInt<32>> read;
-  highlevel::Method<highlevel::UInt<32>, highlevel::UInt<32>> writeMethod;
+  highlevel::Method<void, highlevel::UInt<32>> writeMethod;
   highlevel::Rule incr;
 
   HelloTrulyDeclarative(ExternalModule *regMod, Module *childMod)
@@ -151,8 +151,6 @@ public:
         Return();
       })
       .body([this](mlir::OpBuilder &b, llvm::ArrayRef<mlir::BlockArgument> args) {
-        // Read old value
-        auto oldVals = x.callValue("read", b);
 
         // Get method argument
         auto methodArg = args[0];
@@ -164,7 +162,7 @@ public:
         x.callMethod("write", b, methodArg);
 
         // Return old value
-        Return(oldVals[0]);
+        Return();
       });
 
     // ✨ TRULY DECLARATIVE RULE
@@ -203,6 +201,34 @@ private:
   Module *childMod_;
 };
 
+//===----------------------------------------------------------------------===//
+// Declarative Circuit-Level Interfaces
+//===----------------------------------------------------------------------===//
+
+/// Reader interface - provides a getValue method that returns UInt<32>
+class ReaderInterface : public highlevel::Cmt2Interface {
+public:
+  highlevel::InterfaceValue<highlevel::UInt<32>> getData;
+
+  ReaderInterface() : Cmt2Interface("Reader") {}
+
+  void build() override {
+    INIT_INTERFACE_VALUE(getData);
+  }
+};
+
+/// Writer interface - provides a store method that takes UInt<32> and returns void
+class WriterInterface : public highlevel::Cmt2Interface {
+public:
+  highlevel::InterfaceMethod<void, highlevel::UInt<32>> store;
+
+  WriterInterface() : Cmt2Interface("Writer") {}
+
+  void build() override {
+    INIT_INTERFACE_METHOD(store);
+  }
+};
+
 int main() {
   mlir::MLIRContext context;
   context.loadDialect<cmt2::Cmt2Dialect>();
@@ -210,15 +236,9 @@ int main() {
 
   highlevel::Circuit circuit("hello_truly_decl", context);
 
-  // Circuit-level interfaces
-  auto *readerInterface = circuit.addInterface("Reader");
-  readerInterface->addValue("getData", {},
-    {mlir::TypeAttr::get(firrtl::UIntType::get(&context, 32))});
-
-  auto *writerInterface = circuit.addInterface("Writer");
-  writerInterface->addMethod("store",
-    {{"data", firrtl::UIntType::get(&context, 32)}},
-    {});
+  // ✨ Circuit-level interfaces using declarative API
+  circuit.addInterface(std::make_unique<ReaderInterface>());
+  circuit.addInterface(std::make_unique<WriterInterface>());
 
   // External register module
   llvm::StringMap<int64_t> regParams;
@@ -243,6 +263,7 @@ int main() {
   llvm::outs() << "- ✨ INIT_METHOD with interface access\n";
   llvm::outs() << "- ✨ INIT_RULE with interface calls\n";
   llvm::outs() << "- ✨ Declarative InterfaceDecl and InterfaceDef\n";
+  llvm::outs() << "- ✨ Declarative Cmt2Interface with InterfaceMethod/InterfaceValue\n";
   llvm::outs() << "- ✨ Declarative instance with interface bindings\n";
   llvm::outs() << "- ✨ Declarative precedence with addPrecedence()\n";
   llvm::outs() << "- ✨ Helper functions throughout\n";

@@ -15,6 +15,7 @@
 
 #include "circt/Dialect/Cmt2/ECMT2/Circuit.h"
 #include "circt/Dialect/Cmt2/ECMT2/HighLevel/Module.h"
+#include "circt/Dialect/Cmt2/ECMT2/HighLevel/InterfaceAPI.h"
 #include "llvm/ADT/StringRef.h"
 #include "mlir/IR/MLIRContext.h"
 #include "mlir/IR/OwningOpRef.h"
@@ -27,6 +28,9 @@ namespace circt {
 namespace cmt2 {
 namespace ecmt2 {
 namespace highlevel {
+
+// Forward declarations
+class Cmt2Interface;
 
 /// High-level circuit class
 /// Wraps low-level ecmt2::Circuit
@@ -109,6 +113,23 @@ public:
   /// Add an interface definition to the circuit
   ecmt2::Interface *addInterface(llvm::StringRef name);
 
+  /// Add a declarative interface to the circuit
+  template <typename T>
+  T *addInterface(std::unique_ptr<T> interface) {
+    static_assert(std::is_base_of<Cmt2Interface, T>::value,
+                  "T must inherit from Cmt2Interface");
+
+    T *ptr = interface.get();
+
+    // Initialize the interface with the low-level circuit
+    interface->init(lowLevelCircuit_.get());
+
+    // Store the high-level interface
+    highLevelInterfaces_.push_back(std::move(interface));
+
+    return ptr;
+  }
+
   /// Add an external module to the circuit
   /// @param firrtlModule - Module name from library manifest (e.g., "FIRRTLReg")
   /// @param name - Optional CMT2 module name. If empty, uses actual FIRRTL module name
@@ -147,6 +168,9 @@ private:
 
   /// High-level modules
   std::vector<std::unique_ptr<Cmt2Module>> highLevelModules_;
+
+  /// High-level interfaces
+  std::vector<std::unique_ptr<Cmt2Interface>> highLevelInterfaces_;
 };
 
 } // namespace highlevel

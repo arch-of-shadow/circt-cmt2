@@ -25,6 +25,7 @@
 #include "circt/Dialect/Cmt2/ECMT2/HighLevel/Instance.h"
 #include "circt/Dialect/Cmt2/ECMT2/HighLevel/Input.h"
 #include "circt/Dialect/Cmt2/ECMT2/HighLevel/InterfaceWrapper.h"
+#include "circt/Dialect/Cmt2/ECMT2/HighLevel/InterfaceAPI.h"
 #include "circt/Dialect/Cmt2/ECMT2/HighLevel/Registry.h"
 
 // Helper functions
