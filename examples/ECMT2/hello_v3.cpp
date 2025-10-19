@@ -18,16 +18,7 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "circt/Dialect/Cmt2/ECMT2/HighLevel/Circuit.h"
-#include "circt/Dialect/Cmt2/ECMT2/HighLevel/Module.h"
-#include "circt/Dialect/Cmt2/ECMT2/HighLevel/Instance.h"
-#include "circt/Dialect/Cmt2/ECMT2/HighLevel/FunctionLike.h"
-#include "circt/Dialect/Cmt2/ECMT2/HighLevel/Input.h"
-#include "circt/Dialect/Cmt2/ECMT2/HighLevel/Helpers.h"
-#include "circt/Dialect/Cmt2/ECMT2/HighLevel/InterfaceWrapper.h"
-#include "circt/Dialect/Cmt2/Cmt2Dialect.h"
-#include "circt/Dialect/FIRRTL/FIRRTLDialect.h"
-#include "mlir/IR/MLIRContext.h"
+#include "circt/Dialect/Cmt2/ECMT2/ECMT2.h"
 #include "llvm/Support/raw_ostream.h"
 
 using namespace circt;

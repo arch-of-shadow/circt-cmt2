@@ -4,6 +4,14 @@
 
 The ecmt2 class-based API provides a **declarative C++ interface** for defining Cmt2 hardware modules using inheritance and member variables, similar to Halide's Generator pattern.
 
+**Quick Start:**
+```cpp
+#include "circt/Dialect/Cmt2/ECMT2/ECMT2.h"  // All-in-one header
+#include "llvm/Support/raw_ostream.h"
+
+using namespace circt::cmt2::ecmt2::highlevel;
+```
+
 **Two-Layer Architecture:**
 
 1. **Low-Level API** ([ecmt2-EDSL.md](ecmt2-EDSL.md)): Direct `Module`, `Instance`, `Signal` classes that wrap MLIR OpBuilder
@@ -313,12 +321,7 @@ public:
 ### Example 1: Simple Counter
 
 ```cpp
-#include "circt/Dialect/Cmt2/ECMT2/HighLevel/Circuit.h"
-#include "circt/Dialect/Cmt2/ECMT2/HighLevel/Module.h"
-#include "circt/Dialect/Cmt2/ECMT2/HighLevel/FunctionLike.h"
-#include "circt/Dialect/Cmt2/ECMT2/HighLevel/Input.h"
-#include "circt/Dialect/Cmt2/ECMT2/HighLevel/Instance.h"
-#include "circt/Dialect/Cmt2/ECMT2/HighLevel/Helpers.h"
+#include "circt/Dialect/Cmt2/ECMT2/ECMT2.h"
 
 using namespace circt::cmt2::ecmt2::highlevel;
 
