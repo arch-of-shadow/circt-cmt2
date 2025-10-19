@@ -62,14 +62,61 @@ public:
     // 5. Call user's build() method for additional customization
     highLevelModule->build();
 
-    // 6. Store the high-level module
+    // 6. Apply precedence constraints
+    if (!ptr->getPrecedenceConstraints().empty()) {
+      lowLevelModule->setPrecedence(ptr->getPrecedenceConstraints());
+    }
+
+    // 7. Store the high-level module
     highLevelModules_.push_back(std::move(highLevelModule));
+
+    return ptr;
+  }
+
+  /// Add a pre-constructed module (for modules with constructor arguments)
+  /// Takes ownership of the module
+  template <typename T>
+  T *addModule(std::unique_ptr<T> module) {
+    static_assert(std::is_base_of<Cmt2Module, T>::value,
+                  "T must inherit from Cmt2Module");
+
+    T *ptr = module.get();
+
+    // Create corresponding low-level module
+    ecmt2::Module *lowLevelModule =
+        lowLevelCircuit_->addModule(module->name());
+
+    // Connect high-level to low-level
+    module->setLowLevelModule(lowLevelModule);
+
+    // Initialize all registered members
+    module->getRegistry().initializeAll(module.get());
+
+    // Call user's build() method
+    module->build();
+
+    // Apply precedence constraints
+    if (!ptr->getPrecedenceConstraints().empty()) {
+      lowLevelModule->setPrecedence(ptr->getPrecedenceConstraints());
+    }
+
+    // Store the high-level module
+    highLevelModules_.push_back(std::move(module));
 
     return ptr;
   }
 
   /// Add an interface definition to the circuit
   ecmt2::Interface *addInterface(llvm::StringRef name);
+
+  /// Add an external module to the circuit
+  ecmt2::ExternalModule *addExternalModule(llvm::StringRef name,
+                                           llvm::StringRef firrtlModule);
+
+  /// Add an external module with parameters to the circuit
+  ecmt2::ExternalModule *addExternalModule(llvm::StringRef name,
+                                           llvm::StringRef firrtlModule,
+                                           const llvm::StringMap<int64_t> &params);
 
   /// Generate MLIR output
   std::string emitMLIRString();

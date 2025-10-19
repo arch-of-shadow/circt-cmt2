@@ -36,11 +36,11 @@ target_include_directories(ecmt2-hello-example
   ${CIRCT_MAIN_INCLUDE_DIR}
 )
 
-add_executable(ecmt2-highlevel-counter-example
-  highlevel_counter.cpp
+add_executable(ecmt2-counter-highlevel-example
+  counter_highlevel.cpp
 )
 
-target_link_libraries(ecmt2-highlevel-counter-example
+target_link_libraries(ecmt2-counter-highlevel-example
   PRIVATE
   CIRCTECMT2
   CIRCTCmt2
@@ -49,25 +49,7 @@ target_link_libraries(ecmt2-highlevel-counter-example
   MLIRSupport
 )
 
-target_include_directories(ecmt2-highlevel-counter-example
-  PRIVATE
-  ${CIRCT_MAIN_INCLUDE_DIR}
-)
-
-add_executable(ecmt2-simple-highlevel-example
-  simple_highlevel.cpp
-)
-
-target_link_libraries(ecmt2-simple-highlevel-example
-  PRIVATE
-  CIRCTECMT2
-  CIRCTCmt2
-  CIRCTFIRRTL
-  MLIRIR
-  MLIRSupport
-)
-
-target_include_directories(ecmt2-simple-highlevel-example
+target_include_directories(ecmt2-counter-highlevel-example
   PRIVATE
   ${CIRCT_MAIN_INCLUDE_DIR}
 )
@@ -90,11 +72,11 @@ target_include_directories(ecmt2-declarative-example
   ${CIRCT_MAIN_INCLUDE_DIR}
 )
 
-add_executable(ecmt2-improved-counter-example
-  improved_counter.cpp
+add_executable(ecmt2-hello-highlevel-example
+  hello_highlevel.cpp
 )
 
-target_link_libraries(ecmt2-improved-counter-example
+target_link_libraries(ecmt2-hello-highlevel-example
   PRIVATE
   CIRCTECMT2
   CIRCTCmt2
@@ -103,7 +85,44 @@ target_link_libraries(ecmt2-improved-counter-example
   MLIRSupport
 )
 
-target_include_directories(ecmt2-improved-counter-example
+target_include_directories(ecmt2-hello-highlevel-example
+  PRIVATE
+  ${CIRCT_MAIN_INCLUDE_DIR}
+)
+
+add_executable(ecmt2-declarative-instance-example
+  declarative_instance_example.cpp
+)
+
+target_link_libraries(ecmt2-declarative-instance-example
+  PRIVATE
+  CIRCTECMT2
+  CIRCTCmt2
+  CIRCTFIRRTL
+  MLIRIR
+  MLIRSupport
+)
+
+target_include_directories(ecmt2-declarative-instance-example
+  PRIVATE
+  ${CIRCT_MAIN_INCLUDE_DIR}
+)
+
+
+add_executable(ecmt2-hello-v3-example
+  hello_v3.cpp
+)
+
+target_link_libraries(ecmt2-hello-v3-example
+  PRIVATE
+  CIRCTECMT2
+  CIRCTCmt2
+  CIRCTFIRRTL
+  MLIRIR
+  MLIRSupport
+)
+
+target_include_directories(ecmt2-hello-v3-example
   PRIVATE
   ${CIRCT_MAIN_INCLUDE_DIR}
 )

@@ -78,10 +78,24 @@ protected:
   /// Set current build context (used internally by function builders)
   static void setCurrentContext(BuildContext *ctx) { currentContext_ = ctx; }
 
+  /// Add a precedence constraint (before, after)
+  /// Usage in constructor: addPrecedence("methodA", "methodB"); // methodA < methodB
+  void addPrecedence(llvm::StringRef before, llvm::StringRef after) {
+    precedenceConstraints_.push_back({before.str(), after.str()});
+  }
+
+  /// Get accumulated precedence constraints
+  const std::vector<std::pair<std::string, std::string>> &getPrecedenceConstraints() const {
+    return precedenceConstraints_;
+  }
+
 private:
   std::string name_;
   ecmt2::Module *lowLevelModule_ = nullptr;
   MemberRegistry registry_;
+
+  /// Precedence constraints accumulated via addPrecedence()
+  std::vector<std::pair<std::string, std::string>> precedenceConstraints_;
 
   /// Thread-local current context for implicit builder access
   static thread_local BuildContext *currentContext_;
