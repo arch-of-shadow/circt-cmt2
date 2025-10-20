@@ -869,3 +869,9 @@ build/bin/circt-opt test/Dialect/Cmt2/if-test.mlir --lower-cmt2-to-firrtl
 - `lib/Conversion/Cmt2ToFIRRTL/Cmt2ToFIRRTL.cpp` - if-to-when conversion
 - `include/circt/Dialect/Cmt2/ECMT2/SignalHelpers.h` - IfBuilder and If helpers
 - `lib/Dialect/Cmt2/ECMT2/SignalHelpers.cpp` - IfBuilder implementation
+
+
+### Fix Cmt2ToFIRRTL Conversion
+
+- [ ] refactor: extracting functions to get FunctionLike in Module/ExtModule and manipulate.
+- [x] argument/result connection for Value is imcomplete

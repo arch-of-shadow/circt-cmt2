@@ -559,6 +559,16 @@ void LowerCmt2ToFIRRTLPass::createFunctionPorts(cmt2::ModuleOp module,
                                 UIntType::get(builder.getContext(), 1),
                                 Direction::Out, {}, func.getLoc()));
 
+      // Add argument ports with meaningful names
+      for (auto [idx, argType] : llvm::enumerate(funcType.getInputs())) {
+        StringRef argName = idx < argNames.size()
+                                ? cast<StringAttr>(argNames[idx]).getValue()
+                                : ("arg" + std::to_string(idx));
+        ports.push_back(PortInfo(
+            builder.getStringAttr(funcName.str() + "_" + argName.str()),
+            cast<FIRRTLBaseType>(argType), Direction::In, {}, func.getLoc()));
+      }
+
       // Add result ports with meaningful names
       for (auto [idx, resType] : llvm::enumerate(funcType.getResults())) {
         StringRef resName = bodyResNames && idx < bodyResNames.size()
@@ -849,9 +859,11 @@ LogicalResult LowerCmt2ToFIRRTLPass::connectOutputPorts(cmt2::ModuleOp module,
       if (Value readySignal = ctx.getSignalTracker().getReady(func.functionNameAttr())) {
         builder.create<ConnectOp>(func.getLoc(), readyPort, readySignal);
       }
-
-      // Connect result outputs
+      
+      // Skip arg input ports
       auto funcType = cast<FunctionType>(func.getFunctionType());
+      portIndex += funcType.getInputs().size();
+      // Connect result outputs
       ArrayRef<Value> bodyResults = ctx.getSignalTracker().getBodyResults(func.functionNameAttr());
       for (auto [idx, _] : llvm::enumerate(funcType.getResults())) {
         Value resultPort = firrtlModule.getBodyBlock()->getArgument(portIndex++);
@@ -1449,7 +1461,26 @@ LogicalResult LowerCmt2ToFIRRTLPass::convertCallOp(
     } 
     
     else if (targetFunc.getFunctionKind() == FunctionKind::Value) {
-      // Read data results directly (values have no enable signal) using proper names
+
+      // Connect input arguments using proper names
+      for (auto [idx, operand] : llvm::enumerate(callOp.getOperands())) {
+        StringRef argName = idx < targetArgNames.size()
+                                ? cast<StringAttr>(targetArgNames[idx]).getValue()
+                                : ("arg" + std::to_string(idx));
+        StringAttr argPortName = builder.getStringAttr(
+            methodName.str() + "_" + argName.str());
+        if (auto portIdx = getPortIndex(firrtlInst, argPortName)) {
+          Value mappedOperand = ctx.getIRMapping().lookupOrNull(operand);
+          if (!mappedOperand) {
+            return callOp.emitError("Call operand was not properly mapped to FIRRTL context");
+          }
+          builder.create<ConnectOp>(callOp.getLoc(), firrtlInst.getResult(*portIdx), mappedOperand);
+        } else {
+          return callOp.emitError("Argument port not found: ") << argPortName;
+        }
+      }
+
+       // Read output results using proper names
       for (size_t idx = 0; idx < callOp.getNumResults(); ++idx) {
         StringRef resName = targetBodyResNames && idx < targetBodyResNames.size()
                                 ? cast<StringAttr>(targetBodyResNames[idx]).getValue()
