@@ -191,14 +191,14 @@ private:
 
   // Signal generation
   Value generateReadySignal(Cmt2FunctionLike func, Value guardResult,
-                              const SmallVector<CallInfo> &calls,
+                              // const SmallVector<CallInfo> &calls,
                               const ScheduleGroup &group,
                               ModuleConversionContext &ctx,
                               ImplicitLocOpBuilder &builder);
   Value generateFireSignal(Cmt2FunctionLike func, Value readySignal,
                             ModuleConversionContext &ctx,
                             ImplicitLocOpBuilder &builder);
-
+  
   // Region cloning and call conversion
   LogicalResult cloneRegionOps(Region &sourceRegion, ModuleConversionContext &ctx,
                                 ImplicitLocOpBuilder &builder,
@@ -872,15 +872,6 @@ LogicalResult LowerCmt2ToFIRRTLPass::connectOutputPorts(cmt2::ModuleOp module,
 LogicalResult LowerCmt2ToFIRRTLPass::processFunction(Cmt2FunctionLike func,
                                                    ModuleConversionContext &ctx,
                                                    ImplicitLocOpBuilder &builder) {
-  // Get calls for this function from CallInfo analysis
-  const ModuleCallInfo *callInfo = ctx.getCallInfo();
-  SmallVector<CallInfo> calls;
-  if (callInfo) {
-    auto it = callInfo->find(SymbolRefAttr::get(func.functionNameAttr()));
-    if (it != callInfo->end()) {
-      calls.assign(it->second.begin(), it->second.end());
-    }
-  }
 
   // Map function parameters to FIRRTL module ports
   if (!func.isExternal()) {
@@ -915,7 +906,7 @@ LogicalResult LowerCmt2ToFIRRTLPass::processFunction(Cmt2FunctionLike func,
   }
 
   // Generate control signals
-  Value readySignal = generateReadySignal(func, guardResult, calls, *containingGroup, ctx, builder);
+  Value readySignal = generateReadySignal(func, guardResult, *containingGroup, ctx, builder);
   ctx.getSignalTracker().setReady(func.functionNameAttr(), readySignal);
 
   Value fireSignal = generateFireSignal(func, readySignal, ctx, builder);
@@ -1015,7 +1006,7 @@ void LowerCmt2ToFIRRTLPass::mapFunctionArgumentsToports(Cmt2FunctionLike func,
 
 Value LowerCmt2ToFIRRTLPass::generateReadySignal(
     Cmt2FunctionLike func, Value guardResult,
-    const SmallVector<CallInfo> &calls,
+    // const SmallVector<CallInfo> &calls,
     const ScheduleGroup &group,
     ModuleConversionContext &ctx,
     ImplicitLocOpBuilder &builder) {
@@ -1026,43 +1017,116 @@ Value LowerCmt2ToFIRRTLPass::generateReadySignal(
   FModuleOp firrtlModule = ctx.getFIRRTLModule();
 
   // AND with ready signals of called functions
-  for (const auto &call : calls) {
-    // Check if this is an interface call
-    InterfaceDeclOp interfaceDecl;
-    for (auto &op : ctx.getCmt2Module().getBodyRegion().front()) {
-      if (auto decl = dyn_cast<InterfaceDeclOp>(op)) {
-        if (decl.getSymNameAttr() == call.calleeInstance.getLeafReference()) {
-          interfaceDecl = decl;
-          break;
-        }
-      }
-    }
-
-    if (interfaceDecl) {
-      // Interface call - get ready from interface port
-      StringRef declName = interfaceDecl.getSymName();
-      StringRef methodName = call.calleeEntity.getLeafReference().getValue();
-      StringAttr readyPortName = builder.getStringAttr(
-          declName.str() + "_" + methodName.str() + "_ready");
-
-      Value readyPort = nullptr;
-      for (size_t portIdx = 0; portIdx < firrtlModule.getNumPorts(); ++portIdx) {
-        if (firrtlModule.getPortName(portIdx) == readyPortName) {
-          readyPort = firrtlModule.getArgument(portIdx);
-          break;
+  // for (const auto &call : calls) {
+  func->walk([&](cmt2::CallOp call) {
+    // if (auto call = dyn_cast<cmt2::CallOp>(op)) {
+      // Check if this is an interface call
+      InterfaceDeclOp interfaceDecl;
+      for (auto &op : ctx.getCmt2Module().getBodyRegion().front()) {
+        if (auto decl = dyn_cast<InterfaceDeclOp>(op)) {
+          if (decl.getSymNameAttr() == call.getCallee().getLeafReference()) {
+            interfaceDecl = decl;
+            break;
+          }
         }
       }
 
-      if (readyPort) {
-        ready = builder.create<AndPrimOp>(func.getLoc(), ready, readyPort);
+      if (interfaceDecl) {
+        // Interface call - get ready from interface port
+        StringRef declName = interfaceDecl.getSymName();
+        StringRef methodName = call.getMethodOrValue().getLeafReference().getValue();
+        StringAttr readyPortName = builder.getStringAttr(
+            declName.str() + "_" + methodName.str() + "_ready");
+
+        Value readyPort = nullptr;
+        for (size_t portIdx = 0; portIdx < firrtlModule.getNumPorts(); ++portIdx) {
+          if (firrtlModule.getPortName(portIdx) == readyPortName) {
+            readyPort = firrtlModule.getArgument(portIdx);
+            break;
+          }
+        }
+
+        if (readyPort) {
+          ready = builder.create<AndPrimOp>(func.getLoc(), ready, readyPort);
+        } 
+      } else {
+        // Regular instance call - external or cmt2.module
+
+        auto instanceName = call.getCallee().getRootReference();
+        auto methodName = call.getMethodOrValue().getLeafReference();
+        firrtl::InstanceOp firrtlInst = ctx.getInstance(instanceName);
+
+        cmt2::InstanceOp cmt2Inst;
+        
+        for (auto &op : ctx.getCmt2Module().getBodyRegion().front()) {
+          if (auto inst = dyn_cast<cmt2::InstanceOp>(op)) {
+            if (inst.getSymNameAttr() == instanceName) {
+              cmt2Inst = inst;
+              break;
+            }
+          }
+        }
+
+        auto referencedModule = cmt2Inst.getReferencedModule();
+
+        if (auto extModOp = dyn_cast<ExtModuleFirrtlOp>(referencedModule.getOperation())) {
+          // External FIRRTL module - use bind operations
+          Cmt2FunctionLike bindFunc;
+          for (auto &bodyOp : extModOp.getBodyRegion().front()) {
+            if (auto bindMethod = dyn_cast<BindMethodOp>(bodyOp)) {
+              if (bindMethod.getSymNameAttr() == methodName) {
+                bindFunc = bindMethod;
+                break;
+              }
+            } else if (auto bindValue = dyn_cast<BindValueOp>(bodyOp)) {
+              if (bindValue.getSymNameAttr() == methodName) {
+                bindFunc = bindValue;
+                break;
+              }
+            }
+          }
+
+          std::optional<llvm::StringRef> readyName;
+          if (auto bindMethod = dyn_cast<BindMethodOp>(bindFunc.getOperation())) {
+            readyName = bindMethod.getReady();
+          } else if (auto bindValue = dyn_cast<BindValueOp>(bindFunc.getOperation())) {
+            readyName = bindValue.getReady();
+          }
+
+          if (readyName) {
+            auto readyPortName = builder.getStringAttr(readyName.value());
+            if (auto readyPortIdx = getPortIndex(firrtlInst, readyPortName)) {
+              LLVM_DEBUG(llvm::dbgs() << "ready port found from external: " << readyPortName << "\n");
+              ready = builder.create<AndPrimOp>(call.getLoc(), ready, firrtlInst.getResult(*readyPortIdx));
+            }
+          }
+        } else if (auto cmt2Mod = dyn_cast<cmt2::ModuleOp>(referencedModule.getOperation())) {
+          Cmt2FunctionLike targetFunc;
+          for (auto &op : cmt2Mod.getBodyRegion().front()) {
+            if (auto func = dyn_cast<Cmt2FunctionLike>(op)) {
+              if (func.functionNameAttr() == methodName) {
+                targetFunc = func;
+                break;
+              }
+            }
+          }
+
+          StringAttr readyPortName = builder.getStringAttr(methodName.str() + "_ready");
+          if (auto readyPortIdx = getPortIndex(firrtlInst, readyPortName)) {
+            LLVM_DEBUG(llvm::dbgs() << "ready port found for " << referencedModule.moduleName() << " : " << readyPortName << "\n");
+            ready = builder.create<AndPrimOp>(call.getLoc(), ready, firrtlInst.getResult(*readyPortIdx));
+          }
+        }
+        // // std::string readyPortName = call.calleeEntity.getLeafReference().str() + "_ready";
+        // firrtl::InstanceOp firrtlInst = ctx.getInstance(call.calleeInstance.getLeafReference());
+
+        // if (Value calleeReady = getInstancePort(readyPortName, ctx.getInstance(call.calleeInstance.getLeafReference()), ctx, builder)) {
+        //   ready = builder.create<AndPrimOp>(func.getLoc(), ready, calleeReady);
+        // }
       }
-    } else {
-      // Regular instance call - get ready from signal tracker
-      if (Value calleeReady = ctx.getSignalTracker().getReady(call.calleeEntity.getLeafReference())) {
-        ready = builder.create<AndPrimOp>(func.getLoc(), ready, calleeReady);
-      }
-    }
-  }
+    // }
+
+  });
 
   // AND with NOT(preceding conflicting functions fired)
   // Only ConflictMatrix relationships prevent concurrent firing
@@ -1382,7 +1446,9 @@ LogicalResult LowerCmt2ToFIRRTLPass::convertCallOp(
           return callOp.emitError("Result port not found: ") << resultPortName;
         }
       }
-    } else if (targetFunc.getFunctionKind() == FunctionKind::Value) {
+    } 
+    
+    else if (targetFunc.getFunctionKind() == FunctionKind::Value) {
       // Read data results directly (values have no enable signal) using proper names
       for (size_t idx = 0; idx < callOp.getNumResults(); ++idx) {
         StringRef resName = targetBodyResNames && idx < targetBodyResNames.size()
