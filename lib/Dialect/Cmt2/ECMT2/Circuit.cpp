@@ -50,9 +50,21 @@ Module *Circuit::addModule(llvm::StringRef name) {
   // Set insertion point to circuit body for module creation
   builder_.setInsertionPointToEnd(&circuitOp_.getBody().front());
 
+
+  if (modulesMap_.lookup(name)) {
+    // same name exists
+    size_t suffix = 0;
+    while (modulesMap_.lookup(name.str() + std::to_string(suffix))) {
+      suffix += 1;
+    }
+    name = llvm::StringRef(name.str() + std::to_string(suffix));
+  }
+
   auto module = std::make_unique<Module>(name, builder_, loc_);
   auto *ptr = module.get();
+  size_t len = modules_.size();
   modules_.push_back(std::move(module));
+  modulesMap_.insert_or_assign(name, len);
 
   // Note: insertion point is now inside the new module's body
   // (set by Module constructor)
@@ -84,10 +96,10 @@ ExternalModule *Circuit::addExternalModule(
     }
 
     // Check if we already have an external module with this FIRRTL module name
-    auto it = externalModuleMap_.find(actualModuleName);
-    if (it != externalModuleMap_.end()) {
+    auto it = externalModulesMap_.find(actualModuleName);
+    if (it != externalModulesMap_.end()) {
       // Module already exists, return the existing one
-      return it->second;
+      return externalModules_[it->second].get();
     }
 
     // Save current insertion point
@@ -138,8 +150,9 @@ ExternalModule *Circuit::addExternalModule(
     }
 
     auto *ptr = extModule.get();
-    externalModuleMap_[actualModuleName] = ptr;  // Track this external module
+    size_t len = externalModules_.size();
     externalModules_.push_back(std::move(extModule));
+    externalModulesMap_.insert_or_assign(actualModuleName, len);
 
     // Restore original insertion point
     builder_.restoreInsertionPoint(savedIP);
@@ -147,36 +160,51 @@ ExternalModule *Circuit::addExternalModule(
     return ptr;
   }
 
-  // Module not in library - create basic external reference
-  std::string firrtlModuleStr = firrtlModule.str();
+  // Module not in library -  Throw an error
 
-  // Check if already exists
-  auto it = externalModuleMap_.find(firrtlModuleStr);
-  if (it != externalModuleMap_.end()) {
-    return it->second;
-  }
+  circuitOp_.emitError("Module library doesn't include " + firrtlModule);
+  return nullptr;
 
-  // Save current insertion point
-  auto savedIP = builder_.saveInsertionPoint();
+  // create basic external reference
+  
+  // std::string firrtlModuleStr = firrtlModule.str();
 
-  // Set insertion point to circuit body for creating the external module declaration
-  builder_.setInsertionPointToEnd(&circuitOp_.getBody().front());
+  // // Check if already exists
+  // auto it = externalModuleMap_.find(firrtlModuleStr);
+  // if (it != externalModuleMap_.end()) {
+  //   return it->second;
+  // }
 
-  auto extModule =
-      std::make_unique<ExternalModule>(name, firrtlModule, builder_, loc_);
-  auto *ptr = extModule.get();
-  externalModuleMap_[firrtlModuleStr] = ptr;  // Track this external module
-  externalModules_.push_back(std::move(extModule));
+  // // Save current insertion point
+  // auto savedIP = builder_.saveInsertionPoint();
 
-  // Restore insertion point
-  builder_.restoreInsertionPoint(savedIP);
+  // // Set insertion point to circuit body for creating the external module declaration
+  // builder_.setInsertionPointToEnd(&circuitOp_.getBody().front());
 
-  return ptr;
+  // auto extModule =
+  //     std::make_unique<ExternalModule>(name, firrtlModule, builder_, loc_);
+  // auto *ptr = extModule.get();
+  // externalModuleMap_[firrtlModuleStr] = ptr;  // Track this external module
+  // externalModules_.push_back(std::move(extModule));
+
+  // // Restore insertion point
+  // builder_.restoreInsertionPoint(savedIP);
+
+  // return ptr;
 }
 
 Interface *Circuit::addInterface(llvm::StringRef name) {
   // Save insertion point
   auto savedIP = builder_.saveInsertionPoint();
+
+  if (interfacesMap_.lookup(name)) {
+    // same name exists
+    size_t suffix = 0;
+    while (interfacesMap_.lookup(name.str() + std::to_string(suffix))) {
+      suffix += 1;
+    }
+    name = llvm::StringRef(name.str() + std::to_string(suffix));
+  }
 
   // Set insertion point inside circuit for interface creation
   builder_.setInsertionPointToEnd(&circuitOp_.getBody().front());
@@ -184,7 +212,9 @@ Interface *Circuit::addInterface(llvm::StringRef name) {
   // Create the Interface
   auto interface = std::make_unique<Interface>(name, this);
   auto *ptr = interface.get();
+  size_t len = interfaces_.size();
   interfaces_.push_back(std::move(interface));
+  interfacesMap_.insert_or_assign(name, len);
 
   // Restore insertion point
   builder_.restoreInsertionPoint(savedIP);

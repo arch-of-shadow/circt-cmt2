@@ -17,6 +17,7 @@
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "llvm/ADT/StringMap.h"
+#include "llvm/ADT/StringSet.h"
 #include "llvm/Support/LogicalResult.h"
 #include <map>
 #include <optional>
@@ -117,6 +118,9 @@ private:
 
   // Module catalog
   llvm::StringMap<ModuleInfo> modules_;
+
+  // Firrtl module inserted
+  llvm::StringMap<bool> firrtlModules_;
 
   // Library base path
   std::string libraryBasePath_;

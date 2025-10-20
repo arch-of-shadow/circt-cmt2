@@ -523,6 +523,11 @@ mlir::LogicalResult ModuleLibrary::insertModuleIntoCircuit(
   for (auto &op : loadedCircuit.getBodyBlock()->getOperations()) {
     if (auto firrtlMod = mlir::dyn_cast<circt::firrtl::FModuleOp>(op)) {
       // Clone the module and insert it into the firrtl.circuit
+      if (firrtlModules_.contains(firrtlMod.getName())) {
+        continue;
+      } else {
+        firrtlModules_.insert_or_assign(firrtlMod.getName(), true);
+      }
       builder.clone(op);
     }
   }
