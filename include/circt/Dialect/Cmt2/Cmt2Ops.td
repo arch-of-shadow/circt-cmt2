@@ -544,6 +544,7 @@ def ValueOp : Cmt2Op<
 def MethodOp : Cmt2Op<
   "method", [
     ParentOneOf<["ModuleOp", "InterfaceOp"]>,
+    IsolatedFromAbove,
     DeclareOpInterfaceMethods<Cmt2FunctionLike, ["getCallableRegion", "getArgumentTypes", "getResultTypes", "isExternal", "getFunctionBody"]>,
     Symbol,
     SingleBlockImplicitTerminator<"ReturnOp">,
