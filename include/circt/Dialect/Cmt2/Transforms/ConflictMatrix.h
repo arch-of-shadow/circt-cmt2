@@ -26,11 +26,14 @@
 namespace circt {
 namespace cmt2 {
 
+
+
 /// Relationship types between two functions (rules/methods/values)
 enum class Relationship {
   ConflictFree,    // CF: fx / fy - can execute in same cycle, any order
   Conflict,        // C:  fx <> fy - cannot execute in same cycle
-  SequentialBefore // SB: fx < fy - can execute in same cycle, fx before fy
+  SequentialBefore, // SB: fx < fy - can execute in same cycle, fx before fy
+  SequentialAfter  // SA: fx > fy - can execute in same cycle, fx after fy
 };
 
 /// Key type for function pairs in the conflict matrix
@@ -42,6 +45,8 @@ class ModuleConflictMatrix {
 public:
   ModuleConflictMatrix() = default;
 
+  
+  Relationship rev(Relationship rel);
   /// Set the relationship between two functions
   void setRelationship(StringAttr fx, StringAttr fy, Relationship rel);
 
@@ -88,8 +93,8 @@ private:
   /// Run the analysis
   void runAnalysis();
 
-  /// Parse conflict matrix from external module attributes
-  void parseExternalModuleMatrix(ExtModuleFirrtlOp extModule);
+  /// Parse conflict matrix from module attributes
+  void parseModuleLikeMatrix(Cmt2ModuleLike module);
 
   /// Infer conflict matrix for a regular module
   void inferModuleMatrix(ModuleOp module, const CallInfoView &callInfo,
@@ -99,7 +104,8 @@ private:
   Relationship inferRelationship(StringAttr fxName, StringAttr fyName,
                                  bool isAction, bool hasArguments,
                                  const ModuleCallInfo &callInfo,
-                                 const DenseMap<StringAttr, InstanceOp> &instanceMap);
+                                 const DenseMap<StringAttr, InstanceOp> &instanceMap,
+                                 const ModuleConflictMatrix& matrix);
 
   CircuitOp circuit;
   DenseMap<StringAttr, ModuleConflictMatrix> matrices;

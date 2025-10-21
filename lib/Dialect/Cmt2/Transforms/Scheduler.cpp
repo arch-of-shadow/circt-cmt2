@@ -167,6 +167,9 @@ SchedulerAnalysis::computeModuleSchedule(ModuleOp module) {
     groupMap[groupIds[i]].push_back(functions[i]);
   }
 
+  
+  matrix->print(llvm::dbgs(), "ToSchedule");
+  
   // Step 6: Solve scheduling for each group and analyze preventing firing
   for (const auto &[groupId, groupFuncs] : groupMap) {
     auto scheduled = solveGroupSchedule(groupFuncs, matrix, precedence);
@@ -384,7 +387,6 @@ void SchedulerAnalysis::analyzePreventingFiring(
 
   size_t n = scheduledFunctions.size();
 
-  // matrix->print(llvm::dbgs(), "ToSchedule");
 
   // For each pair (i, j) where i is scheduled after j (c[i] > c[j])
   for (size_t i = 0; i < n; ++i) {
@@ -394,20 +396,17 @@ void SchedulerAnalysis::analyzePreventingFiring(
       StringAttr fj = scheduledFunctions[j];
 
       auto rel = matrix->getRelationship(fi, fj);
-      auto rev_rel = matrix -> getRelationship(fj, fi);
       // llvm::dbgs() << fi << " " << (rel==Relationship::SequentialBefore ? "SB" : 
       //                              rel==Relationship::Conflict ? "C" :
       //                              "CF")
       //   << " " << fj << "\n";
-      
+
       // Check if fi < fj (SequentialBefore) or fj <> fi (Conflict)
       if (rel == Relationship::SequentialBefore || rel == Relationship::Conflict)  {
         // This is a preventing firing: fj scheduled before fi, but fi < fj or fj <> fi
         // Meaning: fi cannot fire because fj needs to fire first or they conflict
         result.addPreventingFiring(fj, fi, rel);
-      } else if (rev_rel == Relationship::Conflict) {
-        result.addPreventingFiring(fj, fi, rev_rel);
-      }
+      } 
     }
   }
 }

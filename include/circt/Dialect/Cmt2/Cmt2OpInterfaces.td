@@ -329,8 +329,14 @@ def Cmt2ModuleLike : OpInterface<"Cmt2ModuleLike"> {
     (ins "::mlir::StringAttr":$name),
     /*methodBody=*/[{
       return llvm::dyn_cast_or_null<Cmt2FunctionLike>(::mlir::SymbolTable::lookupSymbolIn($_op, name));
-    }]>
+    }]>,
 
+    //===------------------------------------------------------------------===//
+    // Body
+    //===------------------------------------------------------------------===//
+    InterfaceMethod<"Body region",
+    "::mlir::Region&", "body", (ins),
+    [{ return $_op.getBodyRegion(); }]>
 
     //===------------------------------------------------------------------===//
     // Instance
