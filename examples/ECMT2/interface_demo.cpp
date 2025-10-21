@@ -90,7 +90,7 @@ int main() {
     // This binds the register's ports to Cmt2 clock/reset/method interfaces
     regMod->bindClock("clk", "clock")              // Bind clock port
           .bindReset("rst", "reset")               // Bind reset port
-          .bindValue("read", "read_ready", {"read_data"})     // Read value interface
+          .bindValue("read", "read_ready", {}, {"read_data"})     // Read value interface
           .bindMethod("write", "write_enable", "write_ready", // Write value interface
                      {"write_data"}, {})
           .addConflict("write", "write")            // Writing conflicts with writing
