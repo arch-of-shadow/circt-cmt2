@@ -15,6 +15,7 @@ add_circt_dialect_library(CIRCTECMT2
   HighLevel/FunctionLike.cpp
   HighLevel/InterfaceWrapper.cpp
   HighLevel/InterfaceAPI.cpp
+  STLLibrary.cpp
 
   ADDITIONAL_HEADER_DIRS
   ${CIRCT_MAIN_INCLUDE_DIR}/circt/Dialect/Cmt2/ECMT2

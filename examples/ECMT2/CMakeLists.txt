@@ -288,3 +288,21 @@ target_include_directories(ecmt2-mem1r1w-example
   PRIVATE
   ${CIRCT_MAIN_INCLUDE_DIR}
 )
+
+add_executable(ecmt2-interface-demo
+  interface_demo.cpp
+)
+
+target_link_libraries(ecmt2-interface-demo
+  PRIVATE
+  CIRCTECMT2
+  CIRCTCmt2
+  CIRCTFIRRTL
+  MLIRIR
+  MLIRSupport
+)
+
+target_include_directories(ecmt2-interface-demo
+  PRIVATE
+  ${CIRCT_MAIN_INCLUDE_DIR}
+)

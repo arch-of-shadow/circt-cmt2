@@ -1,0 +1,77 @@
+//===- STLLibrary.h - ECMT2 Standard Template Library -----------*- C++ -*-===//
+//
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+//
+//===----------------------------------------------------------------------===//
+//
+// This file provides the ECMT2 Standard Template Library (STL) for common
+// hardware building blocks. The STL provides factory methods that create
+// Module instances for common components like wires, registers, FIFOs, etc.
+//
+// Usage:
+//   #include "circt/Dialect/Cmt2/ECMT2/STLLibrary.h"
+//   using namespace circt::cmt2::ecmt2::stl;
+//
+//   // Create modules using factory methods
+//   auto* regModule = STLLibrary::createRegModule("my_reg", 32, circuit);
+//   auto* fifoModule = STLLibrary::createFIFOModule("my_fifo", 32, 16, circuit);
+//
+//===----------------------------------------------------------------------===//
+
+#ifndef CIRCT_DIALECT_CMT2_ECMT2_STLLIBRARY_H
+#define CIRCT_DIALECT_CMT2_ECMT2_STLLIBRARY_H
+
+#include "circt/Dialect/Cmt2/ECMT2/Circuit.h"
+#include "circt/Dialect/Cmt2/ECMT2/Module.h"
+#include "mlir/IR/MLIRContext.h"
+#include "llvm/ADT/StringRef.h"
+#include <string>
+
+namespace circt::cmt2::ecmt2::stl {
+
+//===----------------------------------------------------------------------===//
+// STLLibrary - Factory for creating standard hardware modules
+//===----------------------------------------------------------------------===//
+
+class STLLibrary {
+public:  
+  //===--------------------------------------------------------------------===//
+  // Wire modules
+  //===--------------------------------------------------------------------===//
+
+  /// Create a wire module with specified width
+  static ExternalModule* createWireModule(unsigned width, Circuit& circuit);
+
+  /// Create a wire module with specified width and default init value
+  static Module* createWireDefaultModule(unsigned width, unsigned init, Circuit& circuit);
+
+  //===--------------------------------------------------------------------===//
+  // Register modules
+  //===--------------------------------------------------------------------===//
+
+  /// Create a register module with specified width and init value
+  static ExternalModule* createRegModule(unsigned width, unsigned init, Circuit& circuit);
+
+  //===--------------------------------------------------------------------===//
+  // FIFO modules
+  //===--------------------------------------------------------------------===//
+
+  /// Create a depth-1 FIFO module (actively push)
+  static Module* createFIFO1PushModule(unsigned dataWidth, Circuit& circuit);
+
+  /// Create a depth-1 FIFO module (actively pull)
+  static Module* createFIFO1PullModule(unsigned dataWidth, Circuit& circuit);
+
+  //===--------------------------------------------------------------------===//
+  // Memory modules
+  //===--------------------------------------------------------------------===//
+
+  /// Create a 1-read 1-write memory module
+  static ExternalModule* createMem1r1wModule(unsigned dataWidth, unsigned addrWidth, unsigned depth, Circuit& circuit);
+};
+
+} // namespace circt::cmt2::ecmt2::stl
+
+#endif // CIRCT_DIALECT_CMT2_ECMT2_STLLIBRARY_H

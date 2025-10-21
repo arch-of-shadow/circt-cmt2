@@ -20,11 +20,11 @@ modules:
     methods:
       - name: "read"
         ready: true
-        enable: false
+        enable: true
         outputs: ["data: !firrtl.uint<${width}>"]
       - name: "write"
         ready: true
-        enable: true
+        enable: false
         inputs: ["data: !firrtl.uint<${width}>"]
     conflict_matrix:
       - [read, write, "SequentialBefore"]

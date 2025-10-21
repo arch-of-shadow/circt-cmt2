@@ -28,6 +28,7 @@
 #include "circt/Dialect/Cmt2/ECMT2/Signal.h"
 #include "circt/Dialect/Cmt2/ECMT2/SignalHelpers.h"
 #include "circt/Dialect/Cmt2/ECMT2/ModuleLibrary.h"
+#include "circt/Dialect/Cmt2/ECMT2/STLLibrary.h"
 
 // High-level API
 #include "circt/Dialect/Cmt2/ECMT2/HighLevel/ECMT2.h"

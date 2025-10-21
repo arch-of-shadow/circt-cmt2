@@ -18,6 +18,7 @@
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/OwningOpRef.h"
+#include "mlir/Support/LLVM.h"
 #include "llvm/ADT/StringRef.h"
 #include <memory>
 #include <string>
@@ -39,6 +40,7 @@ public:
 
   /// Module management
   Module *addModule(llvm::StringRef name);
+  mlir::FailureOr<Module *> getModule(llvm::StringRef name);
 
   /// Add external FIRRTL module
   /// @param firrtlModule - Module name from library manifest (e.g., "FIRRTLReg")
@@ -49,6 +51,8 @@ public:
   ExternalModule *addExternalModule(llvm::StringRef firrtlModule,
                                    const llvm::StringMap<int64_t> &params,
                                    llvm::StringRef name = "");
+  ExternalModule *hasExternalModule(llvm::StringRef firrtlModule,
+                                   const llvm::StringMap<int64_t> &params);
 
   /// Interface management
   Interface *addInterface(llvm::StringRef name);

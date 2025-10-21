@@ -16,17 +16,64 @@ The `ecmt2` embedded DSL provides a low-level C++ API for programmatically const
 
 ### 1. Signal Types
 
-Base signal class with operator overloading for hardware operations:
+**Why Signal is Better than Manual Op Manipulation:**
+
+The `Signal` class provides a high-level abstraction that eliminates the need for manual `builder.create<OpType>()` calls:
+
+```cpp
+// ❌ Manual Op manipulation (verbose and error-prone):
+auto sum = builder.create<firrtl::AddPrimOp>(loc, operandA, operandB);
+auto truncated = builder.create<firrtl::BitsPrimOp>(loc, sum, 31, 0);
+
+// ✅ Signal abstraction (clean and intuitive):
+Signal sum = Signal(operandA, &builder, loc) + Signal(operandB, &builder, loc);
+Signal result = sum.bits(31, 0);
+```
+
+**Key Benefits:**
+- **Operator overloading** makes hardware operations look like regular C++ arithmetic
+- **Automatic type inference** eliminates manual type specifications
+- **Error prevention** - compile-time checks prevent invalid operations
+- **Readability** - `a + b` is much clearer than `builder.create<firrtl::AddPrimOp>(...)`
+- **Chaining** - complex expressions can be written naturally
 
 ```cpp
 class Signal {
+    // Arithmetic operations (clean C++ syntax)
     Signal operator+(const Signal& other) const;  // firrtl.add
     Signal operator-(const Signal& other) const;  // firrtl.sub
+    Signal operator*(const Signal& other) const;  // firrtl.mul
+    Signal operator/(const Signal& other) const;  // firrtl.div
+    Signal operator%(const Signal& other) const;  // firrtl.rem
+
+    // Bitwise operations
     Signal operator&(const Signal& other) const;  // firrtl.and
     Signal operator|(const Signal& other) const;  // firrtl.or
+    Signal operator^(const Signal& other) const;  // firrtl.xor
+    Signal operator~() const;                     // firrtl.not
+
+    // Comparison operations
     Signal operator==(const Signal& other) const; // firrtl.eq
+    Signal operator!=(const Signal& other) const; // firrtl.neq
+    Signal operator<(const Signal& other) const;  // firrtl.lt
+    Signal operator<=(const Signal& other) const; // firrtl.leq
+    Signal operator>(const Signal& other) const;  // firrtl.gt
+    Signal operator>=(const Signal& other) const; // firrtl.geq
+
+    // Bit manipulation
     Signal bits(unsigned high, unsigned low) const; // firrtl.bits
+    Signal head(unsigned bits) const;               // firrtl.head
+    Signal tail(unsigned bits) const;               // firrtl.tail
+    Signal pad(unsigned bits) const;                // firrtl.pad
+    Signal shl(unsigned amount) const;              // firrtl.shl
+    Signal shr(unsigned amount) const;              // firrtl.shr
+
+    // Multiplexing and concatenation
     Signal mux(const Signal& t, const Signal& f) const; // firrtl.mux
+    Signal cat(const Signal& other) const;              // firrtl.cat
+
+    // Get underlying MLIR value when needed
+    mlir::Value getValue() const;
 };
 
 class UInt : public Signal {
@@ -177,6 +224,120 @@ Signal tag0 = tagsVec[0];
 - **Type-safe** field access with operator[]
 - **Nested types** supported (vectors in bundles, bundles in vectors)
 
+### 1.3. Advanced Bundle and Vector Patterns
+
+**Header:** `#include "circt/Dialect/Cmt2/ECMT2/SignalHelpers.h"`
+
+The bundle/vector system supports complex data structures and access patterns for hardware design:
+
+#### Bundle Creation and Access
+```cpp
+// Simple bundle with primitive fields
+auto packet = BundleBuilder(&context)
+                  .addUInt("addr", 32)
+                  .addUInt("data", 64)
+                  .addUInt("valid", 1)
+                  .build(builder, loc);
+
+// Access bundle fields directly
+Signal addr = packet["addr"];
+Signal data = packet["data"];
+Signal valid = packet["valid"];
+```
+
+#### Vector Operations
+```cpp
+// Create vector of 4 x 32-bit unsigned integers
+auto elemType = firrtl::UIntType::get(&context, 32);
+FVector registers(elemType, 4, builder, loc);
+
+// Access individual elements
+Signal reg0 = registers[0];
+Signal reg1 = registers[1];
+
+// Vector operations and arithmetic
+Signal sum = reg0 + reg1;
+```
+
+#### Nested Structures
+```cpp
+// Bundle containing a vector field
+auto packetWithVector = BundleBuilder(&context)
+                           .addVector("data", firrtl::UIntType::get(&context, 8), 4)
+                           .addUInt("valid", 1)
+                           .build(builder, loc);
+
+// Access nested vector
+Signal dataVec = packetWithVector["data"];
+FVector dataVector = AsVector(dataVec, &builder, loc);
+Signal firstByte = dataVector[0];
+```
+
+#### Vector of Bundles
+```cpp
+// Create bundle type for vector elements
+auto bundleType = BundleType::get(
+    &context, BundleBuilder(&context)
+                  .addUInt("x", 16)
+                  .addUInt("y", 16)
+                  .getElements());
+
+// Create vector of 8 coordinate bundles
+FVector registerFile(bundleType, 8, builder, loc);
+
+// Access bundle in vector, then fields
+Signal reg0 = registerFile[0];
+Bundle coord = AsBundle(reg0, &builder, loc);
+Signal x = coord["x"];
+Signal y = coord["y"];
+Signal sum = x + y;
+```
+
+#### Method Arguments and Returns
+```cpp
+// Method with bundle argument
+auto coordBundleType = BundleType::get(
+    &context, BundleBuilder(&context)
+                  .addUInt("x", 16)
+                  .addUInt("y", 16)
+                  .getElements());
+
+auto *transformMethod = module->addMethod("transformCoord",
+    {{"coord", coordBundleType}}, {coordBundleType});
+
+transformMethod->body([&](mlir::OpBuilder &b, auto args) {
+    // Access input bundle argument
+    Bundle inputBundle(args[0], &b, loc);
+    Signal x = inputBundle["x"];
+    Signal y = inputBundle["y"];
+
+    // Transform and return new bundle
+    auto outputBundle = BundleBuilder(&context)
+                            .addUInt("x", 16)
+                            .addUInt("y", 16)
+                            .build(b, loc);
+    b.create<cmt2::ReturnOp>(loc, outputBundle.getValue());
+});
+```
+
+#### Value Returning Vector
+```cpp
+// Value that returns a vector
+auto vecType = FVectorType::get(firrtl::UIntType::get(&context, 8), 4);
+auto *getColorVec = module->addValue("getColorVector", {vecType});
+
+getColorVec->body([&](mlir::OpBuilder &b) {
+    FVector colorVec(firrtl::UIntType::get(&context, 8), 4, b, loc);
+    b.create<cmt2::ReturnOp>(loc, colorVec.getValue());
+});
+```
+
+**Advanced Pattern Benefits:**
+- **Complex data modeling**: Supports packets, register files, coordinate systems
+- **Type-safe access**: Compile-time verification of field names and types
+- **Zero-overhead abstraction**: Compiles to efficient FIRRTL bundle/vector operations
+- **Nested composition**: Build arbitrarily complex data structures
+
 ### 2. Module Classes
 
 ```cpp
@@ -196,6 +357,10 @@ class Module {
     // Interface support
     InterfaceDecl* defineInterface(llvm::StringRef name, llvm::StringRef type);
     InterfaceDef* defineInterfaceDef(llvm::StringRef name, llvm::StringRef type);
+
+    // Clock and reset support
+    Clock addClockArgument(llvm::StringRef name);
+    Reset addResetArgument(llvm::StringRef name);
 };
 
 class ExternalModule {
@@ -258,7 +423,40 @@ class Instance {
 };
 ```
 
-### 5. Circuit and Code Generation
+### 5. Interface Support
+
+```cpp
+class Interface {
+    // Add methods to interface
+    void addMethod(llvm::StringRef name,
+                   llvm::ArrayRef<std::pair<std::string, mlir::Type>> args,
+                   llvm::ArrayRef<mlir::Type> results);
+
+    void addValue(llvm::StringRef name,
+                  llvm::ArrayRef<mlir::Type> args,
+                  llvm::ArrayRef<mlir::Type> results);
+};
+
+class InterfaceDecl {
+    // Call methods through interface declaration
+    llvm::SmallVector<mlir::Value> callMethod(llvm::StringRef method,
+                                              llvm::ArrayRef<mlir::Value> args,
+                                              mlir::OpBuilder& builder);
+
+    llvm::SmallVector<mlir::Value> callValue(llvm::StringRef value,
+                                             mlir::OpBuilder& builder);
+};
+
+class InterfaceDef {
+    // Bind interface methods to instance methods
+    void bind(llvm::StringRef instanceName,
+              llvm::StringRef instanceMethod,
+              llvm::StringRef interfaceMethod);
+
+    void finalize();
+};
+
+### 6. Circuit and Code Generation
 
 ```cpp
 class Circuit {
@@ -527,7 +725,159 @@ auto* childInst = parent->addInstance("c", child->lowLevelModule(),
 llvm::outs() << circuit.emitMLIRString() << "\n";
 ```
 
-### Example 4: Conditional Execution with If
+### Example 4: Complete Interface-Based Design Pattern
+
+```cpp
+// Initialize MLIR context and load dialects
+mlir::MLIRContext context;
+context.loadDialect<cmt2::Cmt2Dialect>();
+context.loadDialect<firrtl::FIRRTLDialect>();
+
+// Create circuit
+Circuit circuit("InterfaceDemo", context);
+
+// Define interface with methods and values
+auto* calculatorInterface = circuit.addInterface("Calculator");
+calculatorInterface->addMethod("add",
+    {{"a", firrtl::UIntType::get(&context, 32)},
+     {"b", firrtl::UIntType::get(&context, 32)}},
+    {firrtl::UIntType::get(&context, 32)});
+
+calculatorInterface->addValue("getValue", {},
+    {mlir::TypeAttr::get(firrtl::UIntType::get(&context, 32))});
+
+// Provider module (implements the interface)
+auto* provider = circuit.addModule("ProviderModule");
+auto providerLoc = provider->getLoc();
+
+// Add clock and reset using helper methods
+Clock providerClk = provider->addClockArgument("clk");
+Reset providerRst = provider->addResetArgument("rst");
+
+// Add register instance for storage
+llvm::StringMap<int64_t> regParams;
+regParams["width"] = 32;
+auto* regMod = circuit.addExternalModule("FIRRTLReg", regParams);
+regMod->bindClock("clk", "clock")
+      .bindReset("rst", "reset")
+      .bindValue("read", "read_ready", {"read_data"})
+      .bindMethod("write", "write_enable", "write_ready", {"write_data"}, {});
+
+auto* storage = provider->addInstance("storage", regMod,
+    {providerClk.getValue(), providerRst.getValue()});
+
+// Implement interface method
+auto* addMethod = provider->addMethod("add",
+    {{"a", firrtl::UIntType::get(&context, 32)},
+     {"b", firrtl::UIntType::get(&context, 32)}},
+    {firrtl::UIntType::get(&context, 32)});
+
+addMethod->guard([&](mlir::OpBuilder &b, auto args) {
+    auto trueVal = UInt::constant(1, 1, b, providerLoc);
+    b.create<cmt2::ReturnOp>(providerLoc, trueVal.getValue());
+});
+
+addMethod->body([&](mlir::OpBuilder &b, auto args) {
+    // Use Signal arithmetic instead of manual Op creation
+    Signal operandA(args[0], &b, providerLoc);
+    Signal operandB(args[1], &b, providerLoc);
+    Signal sum = operandA + operandB;
+    Signal result = sum.bits(31, 0);  // Truncate to 32 bits
+
+    // Store result
+    storage->callMethod("write", {result.getValue()}, b);
+
+    b.create<cmt2::ReturnOp>(providerLoc, result.getValue());
+});
+addMethod->finalize();
+
+// Implement interface value
+auto uint32Type = firrtl::UIntType::get(&context, 32);
+auto* getValue = provider->addValue("getValue", {uint32Type});
+getValue->guard([&](mlir::OpBuilder &b) {
+    auto trueVal = UInt::constant(1, 1, b, providerLoc);
+    b.create<cmt2::ReturnOp>(providerLoc, trueVal.getValue());
+});
+getValue->body([&](mlir::OpBuilder &b) {
+    auto storedValues = storage->callValue("read", b);
+    b.create<cmt2::ReturnOp>(providerLoc, storedValues[0]);
+});
+getValue->finalize();
+
+// Consumer module (uses the interface)
+auto* consumer = circuit.addModule("ConsumerModule");
+auto consumerLoc = consumer->getLoc();
+
+Clock consumerClk = consumer->addClockArgument("clk");
+Reset consumerRst = consumer->addResetArgument("rst");
+
+// Declare interface dependency
+auto* calculatorDecl = consumer->defineInterface("calc", "Calculator");
+
+// Method that uses interface
+auto* processData = consumer->addMethod("processData",
+    {{"inputA", uint32Type}, {"inputB", uint32Type}}, {uint32Type});
+
+processData->guard([&](mlir::OpBuilder &b, auto args) {
+    auto trueVal = UInt::constant(1, 1, b, consumerLoc);
+    b.create<cmt2::ReturnOp>(consumerLoc, trueVal.getValue());
+});
+
+processData->body([&](mlir::OpBuilder &b, auto args) {
+    // Call interface method
+    llvm::SmallVector<mlir::Value> addArgs = {args[0], args[1]};
+    auto results = calculatorDecl->callMethod("add", addArgs, b);
+
+    b.create<cmt2::ReturnOp>(consumerLoc, results[0]);
+});
+processData->finalize();
+
+// Top-level module that binds everything together
+auto* top = circuit.addModule("TopModule");
+auto topLoc = top->getLoc();
+
+Clock topClk = top->addClockArgument("clk");
+Reset topRst = top->addResetArgument("rst");
+
+// Define interface binding
+auto* calcBinding = top->defineInterfaceDef("ProviderCalc", "Calculator");
+calcBinding->bind("provider", "add", "add");          // Calculator.add -> ProviderModule.add
+calcBinding->bind("provider", "getValue", "getValue"); // Calculator.getValue -> ProviderModule.getValue
+calcBinding->finalize();
+
+// Instantiate modules with interface binding
+auto* providerInst = top->addInstance("provider", provider,
+    {topClk.getValue(), topRst.getValue()});
+
+auto* consumerInst = top->addInstance("consumer", consumer,
+    {topClk.getValue(), topRst.getValue()},
+    {{"ProviderCalc", "calc"}});  // Bind ProviderCalc to consumer's calc interface
+
+// Expose interface methods at top level
+auto* topAddMethod = top->addMethod("add",
+    {{"a", uint32Type}, {"b", uint32Type}}, {uint32Type});
+
+topAddMethod->guard([&](mlir::OpBuilder &b, auto args) {
+    auto trueVal = UInt::constant(1, 1, b, topLoc);
+    b.create<cmt2::ReturnOp>(topLoc, trueVal.getValue());
+});
+
+topAddMethod->body([&](mlir::OpBuilder &b, auto args) {
+    // Forward to consumer module
+    llvm::SmallVector<mlir::Value> processArgs = {args[0], args[1]};
+    auto results = consumerInst->callMethod("processData", processArgs, b);
+    b.create<cmt2::ReturnOp>(topLoc, results[0]);
+});
+topAddMethod->finalize();
+
+// Generate and convert
+llvm::outs() << circuit.emitMLIRString() << "\n";
+if (circuit.runCmt2ToFIRRTLPipeline().succeeded()) {
+    llvm::outs() << circuit.emitFIRRTL() << "\n";
+}
+```
+
+### Example 5: Conditional Execution with If
 
 ```cpp
 Circuit circuit("conditionalCounter", context);

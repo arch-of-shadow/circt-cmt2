@@ -15,6 +15,7 @@
 #include "mlir/IR/Builders.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Pass/PassManager.h"
+#include "mlir/Support/LLVM.h"
 #include "llvm/Support/raw_ostream.h"
 #include <fstream>
 
@@ -69,6 +70,41 @@ Module *Circuit::addModule(llvm::StringRef name) {
   // Note: insertion point is now inside the new module's body
   // (set by Module constructor)
   return ptr;
+}
+
+mlir::FailureOr<Module *> Circuit::getModule(llvm::StringRef name) {
+  for (const auto &mod : modules_) {
+    if (mod->getName() == name) {
+      return mod.get();
+    }
+  }
+  return mlir::failure();
+}
+
+ExternalModule *Circuit::hasExternalModule(llvm::StringRef firrtlModule, 
+  const llvm::StringMap<int64_t> &params) {
+
+  // Check library for the FIRRTL module
+  auto &library = ModuleLibrary::getInstance();
+  if (library.hasModule(firrtlModule)) {
+    // Get module info for conflict matrix, etc.
+    auto moduleInfo = library.getModuleInfo(firrtlModule);
+
+    // First, compute the actual module name that will be generated
+    std::string actualModuleName;
+    if (mlir::failed(library.getActualModuleName(firrtlModule, params, actualModuleName))) {
+      llvm::errs() << "Warning: Failed to get actual module name for: "
+                   << firrtlModule << "\n";
+    }
+
+    // Check if we already have an external module with this FIRRTL module name, if so, return it
+    auto it = externalModulesMap_.find(actualModuleName);
+    if (it != externalModulesMap_.end()) {
+      // Module already exists, return the existing one
+      return externalModules_[it->second].get();
+    }
+  }
+  return nullptr;
 }
 
 ExternalModule *Circuit::addExternalModule(llvm::StringRef firrtlModule,
