@@ -59,6 +59,8 @@ public:
 
   /// Print the conflict matrix
   void print(llvm::raw_ostream &os, StringAttr moduleName) const;
+  /// Print the conflict matrix
+  void print(llvm::raw_ostream &os, llvm::StringRef moduleName) const;
 
 private:
   /// Normalize function pair (always store in sorted order)

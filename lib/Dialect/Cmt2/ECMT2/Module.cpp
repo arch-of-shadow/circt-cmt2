@@ -176,7 +176,7 @@ ExternalModule::bindValue(llvm::StringRef name, llvm::StringRef readyPort,
       emptyArrayAttr,
       emptyArrayAttr);
     
-  llvm::dbgs() << "bind_value's bodyResNames: " << bind_value.getBodyResNames() << "\n";
+  // llvm::dbgs() << "bind_value's bodyResNames: " << bind_value.getBodyResNames() << "\n";
 
   builder_.restoreInsertionPoint(savedIP);
 

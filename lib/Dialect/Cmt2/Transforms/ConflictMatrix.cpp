@@ -26,10 +26,7 @@ using namespace mlir;
 
 FunctionPair ModuleConflictMatrix::normalizePair(StringAttr fx,
                                                    StringAttr fy) const {
-  // Always store in sorted order to ensure consistent lookup
-  if (fx.getValue() < fy.getValue())
-    return {fx, fy};
-  return {fy, fx};
+  return {fx, fy};
 }
 
 void ModuleConflictMatrix::setRelationship(StringAttr fx, StringAttr fy,
@@ -80,9 +77,16 @@ bool ModuleConflictMatrix::hasRelationship(StringAttr fx, StringAttr fy) const {
   return relationships.count(pair) > 0;
 }
 
+
+
 void ModuleConflictMatrix::print(llvm::raw_ostream &os,
                                   StringAttr moduleName) const {
-  os << "Conflict Matrix for @" << moduleName.getValue() << ":\n";
+  print(os, moduleName.getValue());
+}
+
+                                  
+void ModuleConflictMatrix::print(llvm::raw_ostream &os, llvm::StringRef moduleName) const {
+  os << "Conflict Matrix for @" << moduleName << ":\n";
 
   // Group by relationship type
   SmallVector<FunctionPair> conflicts, conflictFrees, sequentials;
@@ -374,11 +378,6 @@ Relationship ConflictMatrixAnalysis::inferRelationship(
       if (!refMatrix)
         continue;
 
-        
-      // llvm::dbgs() << "Module " << refModuleName << " 's conflict matrix\n";
-
-      refMatrix->print(llvm::dbgs(), refModuleName);
-
       // Get method names (leaf references)
       StringAttr cxMethod = cx.calleeEntity.getLeafReference();
       StringAttr cyMethod = cy.calleeEntity.getLeafReference();
@@ -390,16 +389,20 @@ Relationship ConflictMatrixAnalysis::inferRelationship(
       // Rule 1: If i.m0 <> i.m1, then fx <> fy
       if (instRel == Relationship::Conflict) {
         hasConflict = true;
+        // llvm::dbgs() << "call " << cxInstance << " 's " << cxMethod << " and " << cyMethod << " make (" << fxName << ", " << fyName << ") conflict\n";
       }
       // Rule 2: If i.m0 < i.m1, then fx < fy
       else if (instRel == Relationship::SequentialBefore) {
         hasSB_fx_fy = true;
+        // llvm::dbgs() << "call " << cxInstance << " 's " << cxMethod << " and " << cyMethod << " make (" << fxName << ", " << fyName << ") sb\n";
+        // refMatrix->print(llvm::dbgs(), refModuleName);
       }
 
       // Check reverse direction for Rule 3
       Relationship reverseRel = refMatrix->getRelationship(cyMethod, cxMethod);
       if (reverseRel == Relationship::SequentialBefore) {
         hasSB_fy_fx = true;
+        // llvm::dbgs() << "call " << cxInstance << " 's " << cxMethod << " and " << cyMethod << " make (" << fxName << ", " << fyName << ") sa\n";
       }
     }
   }

@@ -44,6 +44,8 @@ ExternalModule* STLLibrary::createWireModule(unsigned width, Circuit& circuit) {
 
   wireMod->bindMethod("write", "write_enable", "write_ready", {"write_data"}, {});
   wireMod->bindValue("read", "read_ready", {}, {"read_data"});
+  wireMod->addConflict("write", "write");
+  wireMod->addSequenceBefore("write", "read");
 
   return wireMod;
 }
@@ -121,7 +123,8 @@ ExternalModule* STLLibrary::createRegModule(unsigned width, unsigned init, Circu
         .bindReset("rst", "reset")
         .bindValue("read", "read_ready", {}, {"read_data"})
         .bindMethod("write", "write_enable", "write_ready", {"write_data"}, {})
-        .addSequenceBefore("read", "write");
+        ;
+        // .addSequenceBefore("read", "write");
 
   return regMod;
 }
@@ -168,18 +171,18 @@ Module* STLLibrary::createFIFO1PushModule(unsigned dataWidth, Circuit& circuit) 
 
   // Value: deq() -> data
   // Guard: full_reg.read()
-  auto *deqVal = fifoMod->addValue("deq", {dataType});
-  deqVal->guard([&](mlir::OpBuilder &b) {
+  auto *deqMethod = fifoMod->addMethod("deq", {}, {{dataType}});
+  deqMethod->guard([&](mlir::OpBuilder &b, llvm::ArrayRef<mlir::BlockArgument> args) {
     auto fullVals = fullReg->callValue("read", b);
     b.create<circt::cmt2::ReturnOp>(fifoMod->getLoc(), mlir::ValueRange{fullVals[0]});
   });
-  deqVal->body([&](mlir::OpBuilder &b) {
+  deqMethod->body([&](mlir::OpBuilder &b, llvm::ArrayRef<mlir::BlockArgument> args) {
     auto c1 = UInt::constant(1, 1, b, fifoMod->getLoc());
     deqed->callMethod("write", {c1.getValue()}, b);
     auto dataVals = reg->callValue("read", b);
     b.create<circt::cmt2::ReturnOp>(fifoMod->getLoc(), mlir::ValueRange{dataVals[0]});
   });
-  deqVal->finalize();
+  deqMethod->finalize();
 
   // Method: enq(data)
   // Guard: !full_reg.read() | deqed.read()

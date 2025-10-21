@@ -384,6 +384,8 @@ void SchedulerAnalysis::analyzePreventingFiring(
 
   size_t n = scheduledFunctions.size();
 
+  // matrix->print(llvm::dbgs(), "ToSchedule");
+
   // For each pair (i, j) where i is scheduled after j (c[i] > c[j])
   for (size_t i = 0; i < n; ++i) {
     for (size_t j = 0; j < i; ++j) {
@@ -391,13 +393,20 @@ void SchedulerAnalysis::analyzePreventingFiring(
       StringAttr fi = scheduledFunctions[i];
       StringAttr fj = scheduledFunctions[j];
 
-      auto rel = matrix->getRelationship(fj, fi);
-
-      // Check if fj < fi (SequentialBefore) or fj <> fi (Conflict)
-      if (rel == Relationship::SequentialBefore || rel == Relationship::Conflict) {
-        // This is a preventing firing: fj scheduled before fi, but fj < fi or fj <> fi
+      auto rel = matrix->getRelationship(fi, fj);
+      auto rev_rel = matrix -> getRelationship(fj, fi);
+      // llvm::dbgs() << fi << " " << (rel==Relationship::SequentialBefore ? "SB" : 
+      //                              rel==Relationship::Conflict ? "C" :
+      //                              "CF")
+      //   << " " << fj << "\n";
+      
+      // Check if fi < fj (SequentialBefore) or fj <> fi (Conflict)
+      if (rel == Relationship::SequentialBefore || rel == Relationship::Conflict)  {
+        // This is a preventing firing: fj scheduled before fi, but fi < fj or fj <> fi
         // Meaning: fi cannot fire because fj needs to fire first or they conflict
-        result.addPreventingFiring(fi, fj, rel);
+        result.addPreventingFiring(fj, fi, rel);
+      } else if (rev_rel == Relationship::Conflict) {
+        result.addPreventingFiring(fj, fi, rev_rel);
       }
     }
   }
