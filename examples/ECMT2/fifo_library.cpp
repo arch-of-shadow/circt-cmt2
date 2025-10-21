@@ -36,7 +36,7 @@ static Instance *createRegister(Module *mod, Circuit &circuit, const std::string
   auto *regMod = circuit.addExternalModule("FIRRTLReg", params);
   regMod->bindClock("clk", "clock")
         .bindReset("rst", "reset")
-        .bindValue("read", "read_ready", {"read_data"})
+        .bindValue("read", "read_ready", {}, {"read_data"})
         .bindMethod("write", "write_enable", "write_ready", {"write_data"}, {})
         .addSequenceBefore("read", "write");
 

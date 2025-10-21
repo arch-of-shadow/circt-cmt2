@@ -93,57 +93,25 @@ ExternalModule &ExternalModule::bindReset(llvm::StringRef argName,
 ExternalModule &
 ExternalModule::bindMethod(llvm::StringRef name, llvm::StringRef enablePort,
                            llvm::StringRef readyPort,
-                           llvm::ArrayRef<std::string> inputPorts,
-                           llvm::ArrayRef<std::string> outputPorts) {
-  // Store method binding as nested attribute (for library compatibility)
-  llvm::SmallVector<mlir::Attribute> inputAttrs;
-  for (auto &input : inputPorts)
-    inputAttrs.push_back(builder_.getStringAttr(input));
-
-  llvm::SmallVector<mlir::Attribute> outputAttrs;
-  for (auto &output : outputPorts)
-    outputAttrs.push_back(builder_.getStringAttr(output));
-
-  llvm::SmallVector<mlir::NamedAttribute> attrs;
-  attrs.push_back(mlir::NamedAttribute(
-      mlir::StringAttr::get(builder_.getContext(), "name"), builder_.getStringAttr(name)));
-  attrs.push_back(mlir::NamedAttribute(
-      mlir::StringAttr::get(builder_.getContext(), "enable"), builder_.getStringAttr(enablePort)));
-  attrs.push_back(mlir::NamedAttribute(
-      mlir::StringAttr::get(builder_.getContext(), "ready"), builder_.getStringAttr(readyPort)));
-  attrs.push_back(mlir::NamedAttribute(
-      mlir::StringAttr::get(builder_.getContext(), "inputs"), builder_.getArrayAttr(inputAttrs)));
-  attrs.push_back(mlir::NamedAttribute(
-      mlir::StringAttr::get(builder_.getContext(), "outputs"), builder_.getArrayAttr(outputAttrs)));
-  auto bindingDict = builder_.getDictionaryAttr(attrs);
-
-  // Add to methods array
-  auto methodsAttr = op_->getAttr("methods");
-  llvm::SmallVector<mlir::Attribute> methods;
-  if (methodsAttr) {
-    auto arr = mlir::cast<mlir::ArrayAttr>(methodsAttr);
-    methods.append(arr.begin(), arr.end());
-  }
-  methods.push_back(bindingDict);
-  op_->setAttr("methods", builder_.getArrayAttr(methods));
-
-  // Create actual BindMethodOp in the body
+                           llvm::ArrayRef<std::string> argPorts,
+                           llvm::ArrayRef<std::string> resPorts) {
+    // Create actual BindMethodOp in the body
   auto savedIP = builder_.saveInsertionPoint();
   builder_.setInsertionPointToEnd(&op_.getBody().front());
 
-  // Create FlatSymbolRefAttr for each port
-  auto enableAttr = enablePort.empty() ? mlir::FlatSymbolRefAttr() :
-                    mlir::FlatSymbolRefAttr::get(builder_.getContext(), enablePort);
-  auto readyAttr = readyPort.empty() ? mlir::FlatSymbolRefAttr() :
-                   mlir::FlatSymbolRefAttr::get(builder_.getContext(), readyPort);
+  // Create StringAttr for each port
+  auto enableAttr = enablePort.empty() ? mlir::StringAttr() :
+                    mlir::StringAttr::get(builder_.getContext(), enablePort);
+  auto readyAttr = readyPort.empty() ? mlir::StringAttr() :
+                   mlir::StringAttr::get(builder_.getContext(), readyPort);
 
-  llvm::SmallVector<mlir::Attribute> inputSymRefs;
-  for (auto &input : inputPorts)
-    inputSymRefs.push_back(mlir::FlatSymbolRefAttr::get(builder_.getContext(), input));
+  llvm::SmallVector<mlir::Attribute> argNames;
+  for (auto &arg : argPorts)
+    argNames.push_back(builder_.getStringAttr(arg));
 
-  llvm::SmallVector<mlir::Attribute> outputSymRefs;
-  for (auto &output : outputPorts)
-    outputSymRefs.push_back(mlir::FlatSymbolRefAttr::get(builder_.getContext(), output));
+  llvm::SmallVector<mlir::Attribute> bodyResNames;
+  for (auto &res : resPorts)
+    bodyResNames.push_back(builder_.getStringAttr(res));
 
   // Create function type (inputs -> outputs)
   // For methods, there are no actual type arguments - bindings are by name
@@ -158,8 +126,8 @@ ExternalModule::bindMethod(llvm::StringRef name, llvm::StringRef enablePort,
       mlir::TypeAttr::get(functionType),
       enableAttr,
       readyAttr,
-      builder_.getArrayAttr(inputSymRefs),
-      builder_.getArrayAttr(outputSymRefs),
+      builder_.getArrayAttr(argNames),
+      builder_.getArrayAttr(bodyResNames),
       emptyArrayAttr,
       emptyArrayAttr);
 
@@ -170,42 +138,27 @@ ExternalModule::bindMethod(llvm::StringRef name, llvm::StringRef enablePort,
 
 ExternalModule &
 ExternalModule::bindValue(llvm::StringRef name, llvm::StringRef readyPort,
-                          llvm::ArrayRef<std::string> dataPorts) {
-  // Store value binding as nested attribute (for library compatibility)
-  llvm::SmallVector<mlir::Attribute> dataAttrs;
-  for (auto &data : dataPorts)
-    dataAttrs.push_back(builder_.getStringAttr(data));
-
-  llvm::SmallVector<mlir::NamedAttribute> valueAttrs;
-  valueAttrs.push_back(mlir::NamedAttribute(
-      mlir::StringAttr::get(builder_.getContext(), "name"), builder_.getStringAttr(name)));
-  valueAttrs.push_back(mlir::NamedAttribute(
-      mlir::StringAttr::get(builder_.getContext(), "ready"), builder_.getStringAttr(readyPort)));
-  valueAttrs.push_back(mlir::NamedAttribute(
-      mlir::StringAttr::get(builder_.getContext(), "data"), builder_.getArrayAttr(dataAttrs)));
-  auto bindingDict = builder_.getDictionaryAttr(valueAttrs);
-
-  // Add to values array
-  auto valuesAttr = op_->getAttr("values");
-  llvm::SmallVector<mlir::Attribute> values;
-  if (valuesAttr) {
-    auto arr = mlir::cast<mlir::ArrayAttr>(valuesAttr);
-    values.append(arr.begin(), arr.end());
-  }
-  values.push_back(bindingDict);
-  op_->setAttr("values", builder_.getArrayAttr(values));
+                          llvm::ArrayRef<std::string> argPorts, llvm::ArrayRef<std::string> resPorts) {
 
   // Create actual BindValueOp in the body
   auto savedIP = builder_.saveInsertionPoint();
   builder_.setInsertionPointToEnd(&op_.getBody().front());
 
   // Create FlatSymbolRefAttr for each port
-  auto readyAttr = readyPort.empty() ? mlir::FlatSymbolRefAttr() :
-                   mlir::FlatSymbolRefAttr::get(builder_.getContext(), readyPort);
+  auto readyAttr = readyPort.empty() ? mlir::StringAttr() :
+                   mlir::StringAttr::get(builder_.getContext(), readyPort);
 
-  llvm::SmallVector<mlir::Attribute> dataSymRefs;
-  for (auto &data : dataPorts)
-    dataSymRefs.push_back(mlir::FlatSymbolRefAttr::get(builder_.getContext(), data));
+    
+  // Update argNames attribute
+  llvm::SmallVector<mlir::Attribute> argNames;
+  for (auto &arg : argPorts)
+    argNames.push_back(builder_.getStringAttr(arg));
+
+  llvm::SmallVector<mlir::Attribute> bodyResNames;
+  for (auto &res : resPorts)
+    bodyResNames.push_back(builder_.getStringAttr(res));
+
+
 
   // Create function type (no inputs -> outputs)
   auto functionType = builder_.getFunctionType({}, {});
@@ -213,14 +166,17 @@ ExternalModule::bindValue(llvm::StringRef name, llvm::StringRef readyPort,
   // Create empty arg_attrs and res_attrs
   auto emptyArrayAttr = builder_.getArrayAttr({});
 
-  builder_.create<cmt2::BindValueOp>(
+  auto bind_value = builder_.create<cmt2::BindValueOp>(
       loc_,
       builder_.getStringAttr(name),
       mlir::TypeAttr::get(functionType),
       readyAttr,
-      builder_.getArrayAttr(dataSymRefs),
+      builder_.getArrayAttr(argNames),
+      builder_.getArrayAttr(bodyResNames),
       emptyArrayAttr,
       emptyArrayAttr);
+    
+  llvm::dbgs() << "bind_value's bodyResNames: " << bind_value.getBodyResNames() << "\n";
 
   builder_.restoreInsertionPoint(savedIP);
 

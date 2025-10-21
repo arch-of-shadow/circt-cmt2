@@ -37,12 +37,16 @@ Rule::Rule(llvm::StringRef name, Module *parent)
   auto funcType = builder.getFunctionType({}, {});
   auto funcTypeAttr = mlir::TypeAttr::get(funcType);
 
-  // Build empty arg names array
+  // Build argument names
   llvm::SmallVector<mlir::Attribute> argNames;
   auto argNamesAttr = builder.getArrayAttr(argNames);
 
+  // Build result names (empty for now)
+  llvm::SmallVector<mlir::Attribute> resNames;
+  auto resNamesAttr = builder.getArrayAttr(resNames);
+
   op_ = builder.create<RuleOp>(loc, builder.getStringAttr(name), funcTypeAttr,
-                                argNamesAttr, mlir::StringAttr(),
+                                argNamesAttr, resNamesAttr,
                                 builder.getArrayAttr({}), builder.getArrayAttr({}));
 
   // Access guard and body regions
@@ -92,7 +96,7 @@ Method::Method(llvm::StringRef name,
   auto resNamesAttr = builder.getArrayAttr(resNames);
 
   op_ = builder.create<MethodOp>(loc, builder.getStringAttr(name), funcTypeAttr,
-                                  argNamesAttr, mlir::StringAttr(), resNamesAttr,
+                                  argNamesAttr, resNamesAttr,
                                   builder.getArrayAttr({}), builder.getArrayAttr({}));
 
   // Access guard and body regions
@@ -156,7 +160,7 @@ ecmt2::Value::Value(llvm::StringRef name, llvm::ArrayRef<mlir::Type> results,
   auto resNamesAttr = builder.getArrayAttr(resNames);
 
   op_ = builder.create<ValueOp>(loc, builder.getStringAttr(name), funcTypeAttr,
-                                 argNamesAttr, mlir::StringAttr(), resNamesAttr,
+                                 argNamesAttr, resNamesAttr,
                                  builder.getArrayAttr({}), builder.getArrayAttr({}));
 
   // Access guard and body regions

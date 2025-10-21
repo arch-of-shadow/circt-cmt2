@@ -135,13 +135,30 @@ def Cmt2FunctionLike : OpInterface<"Cmt2FunctionLike"> {
       Returns the number of function arguments.
     }],
     "unsigned", "getNumArguments", (ins),
-    /*methodBody=*/[{ return $_op.getArgumentTypes().size(); }]>,
+    /*methodBody=*/[{ return $_op.getArgNames().size(); }]>,
 
     InterfaceMethod<[{
       Returns the number of function results.
     }],
     "unsigned", "getNumResults", (ins),
-    /*methodBody=*/[{ return $_op.getResultTypes().size(); }]>,
+    /*methodBody=*/[{ return $_op.getBodyResNames().size(); }]>,
+
+    //===------------------------------------------------------------------===//
+    // Argument and result names
+    //===------------------------------------------------------------------===//
+
+    InterfaceMethod<[{
+      Returns the name of the i-th function argument
+    }],
+    "std::string", "getArgumentName", (ins "unsigned":$index),
+    /*methodBody=*/[{ return llvm::cast<mlir::StringAttr>($_op.getArgNames()[index]).getValue().str(); }]>,
+
+    InterfaceMethod<[{
+      Returns the name of the i-th function results
+    }],
+    "std::string", "getResultName", (ins "unsigned":$index),
+    /*methodBody=*/[{ return llvm::cast<mlir::StringAttr>($_op.getBodyResNames()[index]).getValue().str(); }]>,
+
 
     //===------------------------------------------------------------------===//
     // Argument attributes

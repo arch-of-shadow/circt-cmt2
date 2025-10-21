@@ -188,7 +188,6 @@ Interface &Interface::addMethod(
   auto methodOp = builder_.create<cmt2::MethodOp>(
       loc_, nameAttr, mlir::TypeAttr::get(funcType),
       builder_.getArrayAttr(argNames),
-      mlir::StringAttr(),  // guardResName (optional)
       builder_.getArrayAttr(resultNames),  // bodyResNames
       builder_.getArrayAttr({}),  // arg_attrs
       builder_.getArrayAttr({})); // res_attrs
@@ -243,7 +242,6 @@ Interface &Interface::addValue(
   auto valueOp = builder_.create<cmt2::ValueOp>(
       loc_, nameAttr, mlir::TypeAttr::get(funcType),
       builder_.getArrayAttr(argNames),
-      mlir::StringAttr(),  // guardResName (optional)
       builder_.getArrayAttr(resultNames),  // bodyResNames
       builder_.getArrayAttr({}),  // arg_attrs
       builder_.getArrayAttr({})); // res_attrs

@@ -84,13 +84,13 @@ namespace {
 class SignalTracker {
 public:
   void setReady(StringAttr funcName, Value ready) { readySignals[funcName] = ready; }
-  Value getReady(StringAttr funcName) const {
+  Value getReadyName(StringAttr funcName) const {
     auto it = readySignals.find(funcName);
     return it != readySignals.end() ? it->second : Value();
   }
 
   void setEnable(StringAttr funcName, Value enable) { enableSignals[funcName] = enable; }
-  Value getEnable(StringAttr funcName) const {
+  Value getEnableName(StringAttr funcName) const {
     auto it = enableSignals.find(funcName);
     return it != enableSignals.end() ? it->second : Value();
   }
@@ -836,7 +836,7 @@ LogicalResult LowerCmt2ToFIRRTLPass::connectOutputPorts(cmt2::ModuleOp module,
 
       // Connect ready output
       Value readyPort = firrtlModule.getBodyBlock()->getArgument(portIndex++);
-      if (Value readySignal = ctx.getSignalTracker().getReady(func.functionNameAttr())) {
+      if (Value readySignal = ctx.getSignalTracker().getReadyName(func.functionNameAttr())) {
         builder.create<ConnectOp>(func.getLoc(), readyPort, readySignal);
       }
 
@@ -856,7 +856,7 @@ LogicalResult LowerCmt2ToFIRRTLPass::connectOutputPorts(cmt2::ModuleOp module,
     } else if (func.getFunctionKind() == FunctionKind::Value) {
       // Connect ready output
       Value readyPort = firrtlModule.getBodyBlock()->getArgument(portIndex++);
-      if (Value readySignal = ctx.getSignalTracker().getReady(func.functionNameAttr())) {
+      if (Value readySignal = ctx.getSignalTracker().getReadyName(func.functionNameAttr())) {
         builder.create<ConnectOp>(func.getLoc(), readyPort, readySignal);
       }
       
@@ -1100,9 +1100,9 @@ Value LowerCmt2ToFIRRTLPass::generateReadySignal(
 
           std::optional<llvm::StringRef> readyName;
           if (auto bindMethod = dyn_cast<BindMethodOp>(bindFunc.getOperation())) {
-            readyName = bindMethod.getReady();
+            readyName = bindMethod.getReadyName();
           } else if (auto bindValue = dyn_cast<BindValueOp>(bindFunc.getOperation())) {
-            readyName = bindValue.getReady();
+            readyName = bindValue.getReadyName();
           }
 
           if (readyName) {
@@ -1171,7 +1171,7 @@ Value LowerCmt2ToFIRRTLPass::generateFireSignal(
   // For methods: fire = ready ∧ enable
   // For rules/values: fire = ready
   if (func.getFunctionKind() == FunctionKind::Method) {
-    Value enableSignal = ctx.getSignalTracker().getEnable(func.functionNameAttr());
+    Value enableSignal = ctx.getSignalTracker().getEnableName(func.functionNameAttr());
 
     if (!enableSignal) {
       // Find enable port in FIRRTL module
@@ -1515,7 +1515,7 @@ LogicalResult LowerCmt2ToFIRRTLPass::connectMethodCall(
     ImplicitLocOpBuilder &builder) {
 
   // Drive enable signal to 1
-  if (auto enableAttr = bindMethod.getEnable()) {
+  if (auto enableAttr = bindMethod.getEnableName()) {
     StringAttr enablePortName = builder.getStringAttr(enableAttr.value());
     if (auto enablePortIdx = getPortIndex(firrtlInst, enablePortName)) {
       Value one = builder.create<ConstantOp>(
@@ -1527,15 +1527,15 @@ LogicalResult LowerCmt2ToFIRRTLPass::connectMethodCall(
   }
 
   // Connect input arguments
-  auto inputsAttr = bindMethod.getInputs();
+  auto inputsAttr = bindMethod.getArgNames();
   if (inputsAttr.size() != callOp.getNumOperands()) {
     return callOp.emitError("Operand count mismatch: expected ")
            << inputsAttr.size() << " but got " << callOp.getNumOperands();
   }
 
   for (auto [operand, inputAttr] : llvm::zip(callOp.getOperands(), inputsAttr)) {
-    auto portAttr = cast<FlatSymbolRefAttr>(inputAttr);
-    auto portIdx = getPortIndex(firrtlInst, portAttr.getAttr());
+    auto portAttr = cast<StringAttr>(inputAttr);
+    auto portIdx = getPortIndex(firrtlInst, portAttr);
     if (!portIdx) {
       return callOp.emitError("Input port not found: ") << portAttr;
     }
@@ -1549,7 +1549,7 @@ LogicalResult LowerCmt2ToFIRRTLPass::connectMethodCall(
   }
 
   // Read output results
-  auto outputsAttr = bindMethod.getOutputs();
+  auto outputsAttr = bindMethod.getBodyResNames();
   if (outputsAttr.size() != callOp.getNumResults()) {
     return callOp.emitError("Result count mismatch: expected ")
            << outputsAttr.size() << " but got " << callOp.getNumResults();
@@ -1557,8 +1557,8 @@ LogicalResult LowerCmt2ToFIRRTLPass::connectMethodCall(
 
   SmallVector<Value> mappedResults;
   for (auto outputAttr : outputsAttr) {
-    auto portAttr = cast<FlatSymbolRefAttr>(outputAttr);
-    auto portIdx = getPortIndex(firrtlInst, portAttr.getAttr());
+    auto portAttr = cast<StringAttr>(outputAttr);
+    auto portIdx = getPortIndex(firrtlInst, portAttr);
     if (!portIdx) {
       return callOp.emitError("Output port not found: ") << portAttr;
     }
@@ -1580,7 +1580,7 @@ LogicalResult LowerCmt2ToFIRRTLPass::connectValueCall(
     ImplicitLocOpBuilder &builder) {
 
   // Read data results directly (values have no enable signal)
-  auto dataAttr = bindValue.getData();
+  auto dataAttr = bindValue.getBodyResNames();
   if (dataAttr.size() != callOp.getNumResults()) {
     return callOp.emitError("Result count mismatch: expected ")
            << dataAttr.size() << " but got " << callOp.getNumResults();
@@ -1588,8 +1588,8 @@ LogicalResult LowerCmt2ToFIRRTLPass::connectValueCall(
 
   SmallVector<Value> mappedResults;
   for (auto dataPortAttr : dataAttr) {
-    auto portAttr = cast<FlatSymbolRefAttr>(dataPortAttr);
-    auto portIdx = getPortIndex(firrtlInst, portAttr.getAttr());
+    auto portAttr = cast<StringAttr>(dataPortAttr);
+    auto portIdx = getPortIndex(firrtlInst, portAttr);
     if (!portIdx) {
       return callOp.emitError("Data port not found: ") << portAttr;
     }
@@ -1720,8 +1720,8 @@ LogicalResult LowerCmt2ToFIRRTLPass::connectInterfaceBinding(
   // Connect enable port (methods only, child out -> parent in)
   if (isMethod) {
     if (auto childIdx = getPortIndex(childInst, builder.getStringAttr(buildInterfacePortName(childDeclName, childMethodName, "enable")))) {
-      StringAttr parentName = isExternalFirrtl && parentBindMethod && parentBindMethod.getEnable()
-          ? builder.getStringAttr(parentBindMethod.getEnable()->str())
+      StringAttr parentName = isExternalFirrtl && parentBindMethod && parentBindMethod.getEnableName()
+          ? builder.getStringAttr(parentBindMethod.getEnableName()->str())
           : builder.getStringAttr(buildPortName(parentMethodName, "enable"));
       if (auto parentIdx = getPortIndex(parentInst, parentName)) {
         builder.create<ConnectOp>(loc, parentInst.getResult(*parentIdx), childInst.getResult(*childIdx));
@@ -1734,10 +1734,10 @@ LogicalResult LowerCmt2ToFIRRTLPass::connectInterfaceBinding(
   if (auto childIdx = getPortIndex(childInst, builder.getStringAttr(buildInterfacePortName(childDeclName, childMethodName, "ready")))) {
     StringAttr parentName;
     if (isExternalFirrtl) {
-      if (parentBindMethod && parentBindMethod.getReady())
-        parentName = builder.getStringAttr(parentBindMethod.getReady()->str());
-      else if (parentBindValue && parentBindValue.getReady())
-        parentName = builder.getStringAttr(parentBindValue.getReady()->str());
+      if (parentBindMethod && parentBindMethod.getReadyName())
+        parentName = builder.getStringAttr(parentBindMethod.getReadyName()->str());
+      else if (parentBindValue && parentBindValue.getReadyName())
+        parentName = builder.getStringAttr(parentBindValue.getReadyName()->str());
     }
     if (!parentName)
       parentName = builder.getStringAttr(buildPortName(parentMethodName, "ready"));
@@ -1751,7 +1751,7 @@ LogicalResult LowerCmt2ToFIRRTLPass::connectInterfaceBinding(
   // Connect argument ports (methods only, child out -> parent in)
   if (isMethod) {
     auto ifaceArgNames = getArgNames(ifaceFunc);
-    auto inputsAttr = isExternalFirrtl && parentBindMethod ? parentBindMethod.getInputs() : ArrayAttr();
+    auto inputsAttr = isExternalFirrtl && parentBindMethod ? parentBindMethod.getArgNames() : ArrayAttr();
 
     for (auto [idx, argType] : llvm::enumerate(funcType.getInputs())) {
       StringRef argName = idx < ifaceArgNames.size()
@@ -1761,7 +1761,7 @@ LogicalResult LowerCmt2ToFIRRTLPass::connectInterfaceBinding(
       if (auto childIdx = getPortIndex(childInst, builder.getStringAttr(buildInterfacePortName(childDeclName, childMethodName, argName)))) {
         StringAttr parentName;
         if (isExternalFirrtl && inputsAttr && idx < inputsAttr.size()) {
-          auto portAttr = cast<FlatSymbolRefAttr>(inputsAttr[idx]);
+          auto portAttr = cast<StringAttr>(inputsAttr[idx]);
           parentName = builder.getStringAttr(portAttr.getValue().str());
         } else {
           parentName = builder.getStringAttr(buildPortName(parentMethodName, argName));
@@ -1780,9 +1780,9 @@ LogicalResult LowerCmt2ToFIRRTLPass::connectInterfaceBinding(
   ArrayAttr outputsAttr;
   if (isExternalFirrtl) {
     if (parentBindMethod)
-      outputsAttr = parentBindMethod.getOutputs();
+      outputsAttr = parentBindMethod.getBodyResNames();
     else if (parentBindValue)
-      outputsAttr = parentBindValue.getData();
+      outputsAttr = parentBindValue.getBodyResNames();
   }
 
   for (auto [idx, resType] : llvm::enumerate(funcType.getResults())) {
@@ -1793,7 +1793,7 @@ LogicalResult LowerCmt2ToFIRRTLPass::connectInterfaceBinding(
     if (auto childIdx = getPortIndex(childInst, builder.getStringAttr(buildInterfacePortName(childDeclName, childMethodName, resName)))) {
       StringAttr parentName;
       if (isExternalFirrtl && outputsAttr && idx < outputsAttr.size()) {
-        auto portAttr = cast<FlatSymbolRefAttr>(outputsAttr[idx]);
+        auto portAttr = cast<StringAttr>(outputsAttr[idx]);
         parentName = builder.getStringAttr(portAttr.getValue().str());
       } else {
         parentName = builder.getStringAttr(buildPortName(parentMethodName, resName));

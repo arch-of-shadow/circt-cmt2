@@ -36,13 +36,13 @@ builtin.module {
             cmt2.bind.bare %clk, @clock : !firrtl.clock
             cmt2.bind.bare %rst, @reset : !firrtl.uint<1>
 
-            cmt2.bind.value @read : (!firrtl.uint<1>) -> (!firrtl.uint<32>) [ ready = @readReady, data = [@read]]
+            cmt2.bind.value @read : (!firrtl.uint<1>) -> (!firrtl.uint<32>) [ ready = @readReady, arguments = ["read"], results = []]
 
             cmt2.bind.method @write : (!firrtl.uint<1>, !firrtl.uint<32>) -> (!firrtl.uint<1>) [
                 enable = @writeEnable,
                 ready = @writeReady,
-                inputs = [@write],
-                outputs = []
+                arguments = ["write"],
+                results = []
             ]
         } {
             conflict = [[@write, @write]],

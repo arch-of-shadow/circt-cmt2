@@ -166,8 +166,7 @@ void ExtModuleFirrtlOp::getAsmBlockArgumentNames(Region &region,
 
 // Helper function to parse function-like operations with two regions
 static ParseResult parseFunctionLikeOp(OpAsmParser &parser,
-                                        OperationState &result,
-                                        bool hasBodyResults) {
+                                        OperationState &result) {
   auto builder = parser.getBuilder();
 
   // Parse the symbol name
@@ -214,12 +213,10 @@ static ParseResult parseFunctionLikeOp(OpAsmParser &parser,
   result.addAttribute("function_type", TypeAttr::get(funcType));
 
   // Initialize empty bodyResNames
-  if (hasBodyResults) {
-    SmallVector<Attribute> resNames;
-    for (size_t i = 0; i < bodyResTypes.size(); ++i)
-      resNames.push_back(builder.getStringAttr("res" + std::to_string(i)));
-    result.addAttribute("bodyResNames", builder.getArrayAttr(resNames));
-  }
+  SmallVector<Attribute> resNames;
+  for (size_t i = 0; i < bodyResTypes.size(); ++i)
+    resNames.push_back(builder.getStringAttr("res" + std::to_string(i)));
+  result.addAttribute("bodyResNames", builder.getArrayAttr(resNames));
 
   // Parse optional attribute dict
   if (parser.parseOptionalAttrDictWithKeyword(result.attributes))
@@ -323,7 +320,7 @@ static void printFunctionLikeOp(OpAsmPrinter &p, Operation *op,
 //===----------------------------------------------------------------------===//
 
 ParseResult RuleOp::parse(OpAsmParser &parser, OperationState &result) {
-  return parseFunctionLikeOp(parser, result, /*hasBodyResults=*/false);
+  return parseFunctionLikeOp(parser, result);
 }
 
 void RuleOp::print(OpAsmPrinter &p) {
@@ -350,7 +347,7 @@ Region &RuleOp::getFunctionBody() { return getBody(); }
 //===----------------------------------------------------------------------===//
 
 ParseResult MethodOp::parse(OpAsmParser &parser, OperationState &result) {
-  return parseFunctionLikeOp(parser, result, /*hasBodyResults=*/true);
+  return parseFunctionLikeOp(parser, result);
 }
 
 void MethodOp::print(OpAsmPrinter &p) {
@@ -377,7 +374,7 @@ Region &MethodOp::getFunctionBody() { return getBody(); }
 //===----------------------------------------------------------------------===//
 
 ParseResult ValueOp::parse(OpAsmParser &parser, OperationState &result) {
-  return parseFunctionLikeOp(parser, result, /*hasBodyResults=*/true);
+  return parseFunctionLikeOp(parser, result);
 }
 
 void ValueOp::print(OpAsmPrinter &p) {
@@ -605,67 +602,6 @@ llvm::SmallVector<InstanceOp, 4> getInstances(ModuleOp module) {
   }
   return instances;
 }
-
-// Commented out legacy helper functions
-// Cmt2ModuleLike getReferenceModule(InstanceOp instance) {
-//   auto circuit =
-//       instance.getOperation()->getParentOfType<circt::cmt2::CircuitOp>();
-//   if (!circuit)
-//     return nullptr;
-//   return circuit.lookupSymbol<Cmt2ModuleLike>(instance.moduleNameAttr());
-// }
-// llvm::SmallVector<Cmt2FunctionLike, 4> getFunctions(Cmt2ModuleLike module) {
-//   llvm::SmallVector<Cmt2FunctionLike, 4> functions;
-//   module.getOperation()->walk(
-//       [&](Cmt2FunctionLike function) { functions.push_back(function); });
-//   return functions;
-// }
-// llvm::SmallVector<MethodOp, 4> getMethods(ModuleOp module) {
-//   llvm::SmallVector<MethodOp, 4> methods;
-//   module.getOperation()->walk(
-//       [&](MethodOp method) { methods.push_back(method); });
-//   return methods;
-// }
-
-// llvm::SmallVector<ValueOp, 4> getValues(ModuleOp module) {
-//   llvm::SmallVector<ValueOp, 4> values;
-//   module.getOperation()->walk([&](ValueOp value) { values.push_back(value); });
-//   return values;
-// }
-
-// llvm::SmallVector<RuleOp, 4> getRules(ModuleOp module) {
-//   llvm::SmallVector<RuleOp, 4> rules;
-//   module.getOperation()->walk([&](RuleOp rule) { rules.push_back(rule); });
-//   return rules;
-// }
-
-// llvm::SmallVector<InstanceOp, 4> getInstances(ModuleOp module) {
-//   llvm::SmallVector<InstanceOp, 4> instances;
-//   module.getOperation()->walk(
-//       [&](InstanceOp instance) { instances.push_back(instance); });
-//   return instances;
-// }
-
-// llvm::SmallVector<BindMethodOp, 4> getMethods(ExtModuleOp module) {
-//   llvm::SmallVector<BindMethodOp, 4> methods;
-//   module.getOperation()->walk(
-//       [&](BindMethodOp method) { methods.push_back(method); });
-//   return methods;
-// }
-
-// llvm::SmallVector<BindValueOp, 4> getValues(ExtModuleOp module) {
-//   llvm::SmallVector<BindValueOp, 4> values;
-//   module.getOperation()->walk(
-//       [&](BindValueOp value) { values.push_back(value); });
-//   return values;
-// }
-
-// llvm::SmallVector<InstanceOp, 4> getInstances(Cmt2ModuleLike module) {
-//   llvm::SmallVector<InstanceOp, 4> instances;
-//   module.getOperation()->walk(
-//       [&](InstanceOp instance) { instances.push_back(instance); });
-//   return instances;
-// }
 
 //===----------------------------------------------------------------------===//
 // IfOp

@@ -49,7 +49,7 @@ int main() {
   auto *regMod = circuit.addExternalModule("FIRRTLReg", regParams);
   regMod->bindClock("clk", "clock")
         .bindReset("rst", "reset")
-        .bindValue("read", "read_ready", {"read_data"})
+        .bindValue("read", "read_ready", {}, {"read_data"})
         .bindMethod("write", "write_enable", "write_ready",
                    {"write_data"}, {})
         .addSequenceBefore("read", "write");

@@ -156,8 +156,9 @@ def BindValueOp : Cmt2Op<
     Arguments:
     - `sym_name`: The symbol name of the value method being bound.
     - `function_type`: The function type of the value method.
-    - `ready`: The signal (attribute) representing the ready output of the value method.
-    - `data`: The signal (attribute) representing the data output of the value method.
+    - `readyName`: The signal (attribute) representing the ready output of the value method.
+    - `argNames`: Names of the shared input arguments.
+    - `bodyResNames`: Names of the body region results.
 
     Results: None
 
@@ -165,7 +166,8 @@ def BindValueOp : Cmt2Op<
     ```mlir
     cmt2.bind.value @valMethod : (i1) -> (i32) [
       ready = %readySignal,
-      data = %dataSignal
+      arguments = [%input1, %input2],
+      results = [%output1, %output2]
     ]
     ```
   }];
@@ -173,14 +175,19 @@ def BindValueOp : Cmt2Op<
   let arguments = (ins
     SymbolNameAttr:$sym_name,
     TypeAttrOf<FunctionType>:$function_type,
-    OptionalAttr<FlatSymbolRefAttr>:$ready,
-    FlatSymbolRefArrayAttr:$data,
+    OptionalAttr<StrAttr>:$readyName,
+    StrArrayAttr:$argNames,
+    StrArrayAttr:$bodyResNames,
     OptionalAttr<ArrayAttr>:$arg_attrs,
     OptionalAttr<ArrayAttr>:$res_attrs
   );
 
   let assemblyFormat = [{
-    $sym_name `:` $function_type `[` (`ready` `=` $ready^ `,`)? `data` `=` $data `]` attr-dict
+    $sym_name `:` $function_type `[` 
+      (`ready` `=` $readyName^ `,`)? 
+      `arguments` `=` $argNames `,` 
+      `results` `=` $bodyResNames 
+    `]` attr-dict
   }];
 
   let extraClassDefinition = [{
@@ -206,10 +213,10 @@ def BindMethodOp : Cmt2Op<
     Arguments:
     - `sym_name`: The symbol name of the method being bound.
     - `function_type`: The function type of the method.
-    - `enable`: The signal (attribute) representing the enable input of the method.
-    - `ready`: The signal (attribute) representing the ready output of the method.
-    - `inputs`: The signals (attributes) representing the input arguments of the method.
-    - `outputs`: The signals (attributes) representing the output results of the method.
+    - `enableName`: The signal (attribute) representing the enable input of the method.
+    - `readyName`: The signal (attribute) representing the ready output of the method.
+    - `argNames`: Names of the shared input arguments.
+    - `bodyResNames`: Names of the body region results.
 
     Results: None
 
@@ -218,8 +225,8 @@ def BindMethodOp : Cmt2Op<
     cmt2.bind.method @methodName : (i1, i32) -> (i1, i32) [
       enable = %enableSignal,
       ready = %readySignal,
-      inputs = [%input1, %input2],
-      outputs = [%output1, %output2]
+      arguments = [%input1, %input2],
+      results = [%output1, %output2]
     ]
     ```
   }];
@@ -227,20 +234,20 @@ def BindMethodOp : Cmt2Op<
   let arguments = (ins
     SymbolNameAttr:$sym_name,
     TypeAttrOf<FunctionType>:$function_type,
-    OptionalAttr<FlatSymbolRefAttr>:$enable,
-    OptionalAttr<FlatSymbolRefAttr>:$ready,
-    FlatSymbolRefArrayAttr:$inputs,
-    FlatSymbolRefArrayAttr:$outputs,
+    OptionalAttr<StrAttr>:$enableName,
+    OptionalAttr<StrAttr>:$readyName,
+    StrArrayAttr:$argNames,
+    StrArrayAttr:$bodyResNames,
     OptionalAttr<ArrayAttr>:$arg_attrs,
     OptionalAttr<ArrayAttr>:$res_attrs
   );
 
   let assemblyFormat = [{
     $sym_name `:` $function_type `[` 
-      (`enable` `=` $enable^ `,`)? 
-      (`ready` `=` $ready^ `,`)? 
-      `inputs` `=` $inputs `,` 
-      `outputs` `=` $outputs 
+      (`enable` `=` $enableName^ `,`)? 
+      (`ready` `=` $readyName^ `,`)? 
+      `arguments` `=` $argNames `,` 
+      `results` `=` $bodyResNames 
     `]` attr-dict
   }];
 
@@ -437,7 +444,7 @@ def RuleOp : Cmt2Op<
     - `sym_name`: The symbol name of the rule being defined.
     - `function_type`: The function type of the rule (typically no arguments).
     - `argNames`: Names of the shared input arguments (typically empty for rules).
-    - `guardResName`: Optional name of the guard result (i1).
+    - `bodyResNames`: Names of the body region results.
 
     Results: None
 
@@ -458,7 +465,7 @@ def RuleOp : Cmt2Op<
     SymbolNameAttr:$sym_name,
     TypeAttrOf<FunctionType>:$function_type,
     StrArrayAttr:$argNames,
-    OptionalAttr<StrAttr>:$guardResName,
+    StrArrayAttr:$bodyResNames,
     OptionalAttr<ArrayAttr>:$arg_attrs,
     OptionalAttr<ArrayAttr>:$res_attrs
   );
@@ -499,7 +506,6 @@ def ValueOp : Cmt2Op<
     - `sym_name`: The symbol name of the value method being defined.
     - `function_type`: The function type of the value method (shared arguments).
     - `argNames`: Names of the shared input arguments.
-    - `guardResName`: Optional name of the guard result (i1).
     - `bodyResNames`: Names of the body region results.
 
     Results: None
@@ -521,7 +527,6 @@ def ValueOp : Cmt2Op<
     SymbolNameAttr:$sym_name,
     TypeAttrOf<FunctionType>:$function_type,
     StrArrayAttr:$argNames,
-    OptionalAttr<StrAttr>:$guardResName,
     StrArrayAttr:$bodyResNames,
     OptionalAttr<ArrayAttr>:$arg_attrs,
     OptionalAttr<ArrayAttr>:$res_attrs
@@ -558,7 +563,6 @@ def MethodOp : Cmt2Op<
     - `sym_name`: The symbol name of the method being defined.
     - `function_type`: The function type of the method (shared arguments).
     - `argNames`: Names of the shared input arguments.
-    - `guardResName`: Optional name of the guard result (i1).
     - `bodyResNames`: Names of the body region results.
 
     Results: None
@@ -573,7 +577,6 @@ def MethodOp : Cmt2Op<
     SymbolNameAttr:$sym_name,
     TypeAttrOf<FunctionType>:$function_type,
     StrArrayAttr:$argNames,
-    OptionalAttr<StrAttr>:$guardResName,
     StrArrayAttr:$bodyResNames,
     OptionalAttr<ArrayAttr>:$arg_attrs,
     OptionalAttr<ArrayAttr>:$res_attrs

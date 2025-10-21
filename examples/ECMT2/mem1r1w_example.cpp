@@ -59,7 +59,7 @@ int main() {
   memory->bindMethod("rd0", "en", "", {"raddr"}, {});
 
   // rd1: ready-based (rd1_valid), returns rdata
-  memory->bindValue("rd1", "rd1_valid", {"rdata"});
+  memory->bindValue("rd1", "rd1_valid", {}, {"rdata"});
 
   // write: enable-based, takes wdata and waddr inputs
   memory->bindMethod("write", "wen", "", {"wdata", "waddr"}, {});

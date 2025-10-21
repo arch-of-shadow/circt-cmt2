@@ -94,7 +94,7 @@ CallBuilder::buildCall(Instance *instance, llvm::StringRef entity,
       if (auto bindMethod = mlir::dyn_cast<cmt2::BindMethodOp>(bodyOp)) {
         if (bindMethod.getSymNameAttr() == entityAttr) {
           // For BindMethodOp, result count = number of outputs
-          auto outputsAttr = bindMethod.getOutputs();
+          auto outputsAttr = bindMethod.getBodyResNames();
 
           // Look up the FIRRTL module to get actual port types
           mlir::Operation *topModule = extModFirrtl->template getParentOfType<mlir::ModuleOp>();
@@ -103,7 +103,7 @@ CallBuilder::buildCall(Instance *instance, llvm::StringRef entity,
               if (firrtlMod.getModuleName() == firrtlModuleName) {
                 // For each output port, find its type in the FIRRTL module
                 for (auto outputAttr : outputsAttr) {
-                  auto portName = mlir::cast<mlir::FlatSymbolRefAttr>(outputAttr).getAttr();
+                  auto portName = mlir::cast<mlir::StringAttr>(outputAttr).getValue();
                   // Find the port in the FIRRTL module
                   for (size_t i = 0; i < firrtlMod.getNumPorts(); ++i) {
                     if (firrtlMod.getPortName(i) == portName) {
@@ -122,7 +122,7 @@ CallBuilder::buildCall(Instance *instance, llvm::StringRef entity,
       } else if (auto bindValue = mlir::dyn_cast<cmt2::BindValueOp>(bodyOp)) {
         if (bindValue.getSymNameAttr() == entityAttr) {
           // For BindValueOp, result count = number of data ports
-          auto dataAttr = bindValue.getData();
+          auto dataAttr = bindValue.getBodyResNames();
 
           // Look up the FIRRTL module to get actual port types
           mlir::Operation *topModule = extModFirrtl->template getParentOfType<mlir::ModuleOp>();
@@ -131,7 +131,7 @@ CallBuilder::buildCall(Instance *instance, llvm::StringRef entity,
               if (firrtlMod.getModuleName() == firrtlModuleName) {
                 // For each data port, find its type in the FIRRTL module
                 for (auto dataPortAttr : dataAttr) {
-                  auto portName = mlir::cast<mlir::FlatSymbolRefAttr>(dataPortAttr).getAttr();
+                  auto portName = mlir::cast<mlir::StringAttr>(dataPortAttr).getValue();
                   // Find the port in the FIRRTL module
                   for (size_t i = 0; i < firrtlMod.getNumPorts(); ++i) {
                     if (firrtlMod.getPortName(i) == portName) {

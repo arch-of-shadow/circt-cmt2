@@ -57,11 +57,11 @@ public:
 
   ExternalModule &bindMethod(llvm::StringRef name, llvm::StringRef enablePort,
                              llvm::StringRef readyPort,
-                             llvm::ArrayRef<std::string> inputPorts,
-                             llvm::ArrayRef<std::string> outputPorts);
+                             llvm::ArrayRef<std::string> argPorts,
+                             llvm::ArrayRef<std::string> resPorts);
 
   ExternalModule &bindValue(llvm::StringRef name, llvm::StringRef readyPort,
-                            llvm::ArrayRef<std::string> dataPorts);
+                            llvm::ArrayRef<std::string> argPorts,llvm::ArrayRef<std::string> resPorts);
 
   /// Conflict matrix setup
   ExternalModule &addConflict(llvm::StringRef a, llvm::StringRef b);
