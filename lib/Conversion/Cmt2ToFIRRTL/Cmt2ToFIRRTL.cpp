@@ -1143,22 +1143,34 @@ Value LowerCmt2ToFIRRTLPass::generateReadySignal(
   // AND with NOT(preceding conflicting functions fired)
   // Only ConflictMatrix relationships prevent concurrent firing
   const auto &funcs = group.getFunctions();
-  auto funcIt = llvm::find(funcs, func.functionNameAttr());
-  if (funcIt != funcs.end()) {
-    for (auto it = funcs.begin(); it != funcIt; ++it) {
-      StringAttr precedingFunc = *it;
-      auto rel = ctx.getConflictMatrix()->getRelationship(precedingFunc, func.functionNameAttr());
+  const auto &preventing = group.getPreventingFirings();
+  auto funcName = func.functionNameAttr();
 
-      // If preceding function conflicts or must execute before, ensure it hasn't fired
-      if (rel == Relationship::Conflict || rel == Relationship::SequentialBefore) {
-        if (Value precedingFire = ctx.getSignalTracker().getFire(precedingFunc)) {
-          Value notFired = builder.create<XorPrimOp>(func.getLoc(), precedingFire,
-              builder.create<ConstantOp>(func.getLoc(), UIntType::get(builder.getContext(), 1), APInt(1, 1)));
-          ready = builder.create<AndPrimOp>(func.getLoc(), ready, notFired);
-        }
+  for (auto prevent: preventing) {
+    if (prevent.later == funcName) {
+      if (auto precedingFire = ctx.getSignalTracker().getFire(prevent.earlier)) {
+        Value notFired = builder.create<XorPrimOp>(func.getLoc(), precedingFire,
+          builder.create<ConstantOp>(func.getLoc(), UIntType::get(builder.getContext(), 1), APInt(1, 1)));
+        ready = builder.create<AndPrimOp>(func.getLoc(), ready, notFired);
       }
     }
   }
+  // auto funcIt = llvm::find(funcs, func.functionNameAttr());
+  // if (funcIt != funcs.end()) {
+  //   for (auto it = funcs.begin(); it != funcIt; ++it) {
+  //     StringAttr precedingFunc = *it;
+  //     auto rel = ctx.getConflictMatrix()->getRelationship(precedingFunc, func.functionNameAttr());
+
+  //     // If preceding function conflicts or must execute before, ensure it hasn't fired
+  //     if (rel == Relationship::Conflict || rel == Relationship::SequentialAfter) {
+  //       if (Value precedingFire = ctx.getSignalTracker().getFire(precedingFunc)) {
+  //         Value notFired = builder.create<XorPrimOp>(func.getLoc(), precedingFire,
+  //             builder.create<ConstantOp>(func.getLoc(), UIntType::get(builder.getContext(), 1), APInt(1, 1)));
+  //         ready = builder.create<AndPrimOp>(func.getLoc(), ready, notFired);
+  //       }
+  //     }
+  //   }
+  // }
 
   return ready;
 }
