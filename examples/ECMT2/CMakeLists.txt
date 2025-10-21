@@ -306,3 +306,19 @@ target_include_directories(ecmt2-interface-demo
   PRIVATE
   ${CIRCT_MAIN_INCLUDE_DIR}
 )
+
+add_executable(ecmt2-stl-demo stl_minimal_demo.cpp)
+
+target_link_libraries(ecmt2-stl-demo
+  PRIVATE
+  CIRCTECMT2
+  CIRCTCmt2
+  CIRCTFIRRTL
+  MLIRIR
+  MLIRSupport
+)
+
+target_include_directories(ecmt2-stl-demo
+  PRIVATE
+  ${CIRCT_MAIN_INCLUDE_DIR}
+)

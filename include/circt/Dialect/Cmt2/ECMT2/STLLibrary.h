@@ -68,8 +68,13 @@ public:
   // Memory modules
   //===--------------------------------------------------------------------===//
 
-  /// Create a 1-read 1-write memory module
-  static ExternalModule* createMem1r1wModule(unsigned dataWidth, unsigned addrWidth, unsigned depth, Circuit& circuit);
+  /// Create a 1-read 1-write memory module, read latency and write latency are both 1
+  static ExternalModule* createMem1r1w1cModule(unsigned dataWidth, unsigned addrWidth, 
+    unsigned depth, unsigned readLatency, Circuit& circuit);
+
+  /// Create a 1-read 1-write memory module, write latency is 1, read latency is 0
+  static ExternalModule* createMem1r1w0cModule(unsigned dataWidth, unsigned addrWidth, 
+    unsigned depth, unsigned readLatency, Circuit& circuit);
 };
 
 } // namespace circt::cmt2::ecmt2::stl

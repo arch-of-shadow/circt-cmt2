@@ -41,8 +41,8 @@ done
 echo "DEBUG: Final DATA_WIDTH=$DATA_WIDTH, ADDR_WIDTH=$ADDR_WIDTH, DEPTH=$DEPTH" >&2
 
 # Output filename includes all parameters
-OUTPUT_FILE="Mem1r1w_w${DATA_WIDTH}_a${ADDR_WIDTH}_d${DEPTH}.mlir"
-MODULE_NAME="Mem1r1w_w${DATA_WIDTH}_a${ADDR_WIDTH}_d${DEPTH}"
+OUTPUT_FILE="Mem1r1w1c_w${DATA_WIDTH}_a${ADDR_WIDTH}_d${DEPTH}.mlir"
+MODULE_NAME="Mem1r1w1c_w${DATA_WIDTH}_a${ADDR_WIDTH}_d${DEPTH}"
 
 echo "Generating FIRRTL 1R1W memory (data_width=$DATA_WIDTH, addr_width=$ADDR_WIDTH, depth=$DEPTH)..." >&2
 

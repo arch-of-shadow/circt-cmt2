@@ -140,11 +140,12 @@ Module* STLLibrary::createFIFO1PushModule(unsigned dataWidth, Circuit& circuit) 
   // Instances
   auto *regDataT = createRegModule(dataWidth, 0, circuit);
   auto *regBooleanT = createRegModule(1, 0, circuit);
+  auto *wireBooleanT = createWireModule(1, circuit);
 
   auto *reg = fifoMod->addInstance("reg_data", regDataT, {clk.getValue(), rst.getValue()});
   auto *fullReg = fifoMod->addInstance("full_reg", regBooleanT, {clk.getValue(), rst.getValue()});
-  auto *deqed = fifoMod->addInstance("deqed", regBooleanT, {clk.getValue(), rst.getValue()});
-  auto *enqed = fifoMod->addInstance("enqed", regBooleanT, {clk.getValue(), rst.getValue()});
+  auto *deqed = fifoMod->addInstance("deqed", wireBooleanT, {clk.getValue(), rst.getValue()});
+  auto *enqed = fifoMod->addInstance("enqed", wireBooleanT, {clk.getValue(), rst.getValue()});
 
   // Value: full() -> bool
   auto *fullVal = fifoMod->addValue("full", {boolType});
@@ -257,11 +258,12 @@ Module* STLLibrary::createFIFO1PullModule(unsigned dataWidth, Circuit& circuit) 
   // Instances
   auto *regDataT = createRegModule(dataWidth, 0, circuit);
   auto *regBooleanT = createRegModule(1, 0, circuit);
+  auto *wireBooleanT = createWireModule(1, circuit);
 
   auto *reg = fifoMod->addInstance("reg_data", regDataT, {clk.getValue(), rst.getValue()});
   auto *fullReg = fifoMod->addInstance("full_reg", regBooleanT, {clk.getValue(), rst.getValue()});
-  auto *deqed = fifoMod->addInstance("deqed", regBooleanT, {clk.getValue(), rst.getValue()});
-  auto *enqed = fifoMod->addInstance("enqed", regBooleanT, {clk.getValue(), rst.getValue()});
+  auto *deqed = fifoMod->addInstance("deqed", wireBooleanT, {clk.getValue(), rst.getValue()});
+  auto *enqed = fifoMod->addInstance("enqed", wireBooleanT, {clk.getValue(), rst.getValue()});
 
   // Value: full() -> bool
   auto *fullVal = fifoMod->addValue("full", {boolType});
@@ -357,20 +359,40 @@ Module* STLLibrary::createFIFO1PullModule(unsigned dataWidth, Circuit& circuit) 
   return fifoMod;
 }
 
-ExternalModule* STLLibrary::createMem1r1wModule( unsigned dataWidth, unsigned addrWidth, unsigned depth, Circuit& circuit) {
+ExternalModule* STLLibrary::createMem1r1w1cModule( unsigned dataWidth, unsigned addrWidth, unsigned depth, unsigned readLatency, Circuit& circuit) {
   // Create external memory module with Mem1r1w binding
   llvm::StringMap<int64_t> params;
   params["data_width"] = dataWidth;
   params["addr_width"] = addrWidth;
   params["depth"] = depth;
+  params["read_latency"] = readLatency;
 
-  auto* memMod = circuit.addExternalModule("Mem1r1w", params);
+  auto* memMod = circuit.addExternalModule("Mem1r1w1c", params);
 
   // Bind memory interface
   memMod->bindClock("clk", "clock")
         .bindReset("rst", "reset")
         .bindMethod("rd0", "en", "", {"raddr"}, {})
         .bindValue("rd1", "rd1_valid", {}, {"rdata"})
+        .bindMethod("write", "wen", "", {"wdata", "waddr"}, {});
+
+  return memMod;
+}
+
+ExternalModule* STLLibrary::createMem1r1w0cModule( unsigned dataWidth, unsigned addrWidth, unsigned depth, unsigned readLatency, Circuit& circuit) {
+  // Create external memory module with Mem1r1w binding
+  llvm::StringMap<int64_t> params;
+  params["data_width"] = dataWidth;
+  params["addr_width"] = addrWidth;
+  params["depth"] = depth;
+  params["read_latency"] = readLatency;
+
+  auto* memMod = circuit.addExternalModule("Mem1r1w0c", params);
+
+  // Bind memory interface
+  memMod->bindClock("clk", "clock")
+        .bindReset("rst", "reset")
+        .bindMethod("read", "en", "", {"raddr"}, {"rdata"})
         .bindMethod("write", "wen", "", {"wdata", "waddr"}, {});
 
   return memMod;
