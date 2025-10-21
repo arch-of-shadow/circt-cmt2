@@ -60,7 +60,7 @@ int main() {
   // llvm::outs() << "✓ Instantiated register: my_reg\n";
 
   // 2. Create a depth-1 FIFO for 32-bit data (push-based)
-  // auto *fifo32Module = STLLibrary::createFIFO1PushModule(32, circuit);
+  auto *fifo32Module = STLLibrary::createFIFO1PushModule(32, circuit);
   // llvm::outs() << "✓ Created depth-1 FIFO module (32-bit data)\n";
   // auto *fifo32Inst = mainMod->addInstance("my_fifo", fifo32Module, {} /* {clk.getValue(), rst.getValue()} */);
   // llvm::outs() << "✓ Instantiated FIFO: my_fifo\n";
@@ -72,55 +72,55 @@ int main() {
   // llvm::outs() << "✓ Instantiated FIFO: my_fifo\n";
   
   // 3. Create a memory module (1KB, 32-bit data, 10-bit address)
-  auto *mainMod = circuit.addModule("STLMinimalDemoModule");
-  auto loc = mainMod->getLoc();
-  auto &b = mainMod->getBuilder();
+  // auto *mainMod = circuit.addModule("STLMinimalDemoModule");
+  // auto loc = mainMod->getLoc();
+  // auto &b = mainMod->getBuilder();
 
-  auto clk = mainMod->addClockArgument("clk");
-  auto rst = mainMod->addResetArgument("reset");
-  auto *memModule = STLLibrary::createMem1r1w1cModule( 32, 10, 1024, 
-    1, circuit);
-  llvm::outs() << "✓ Created 1KB memory module (32-bit data)\n";
-  auto *memInst = mainMod->addInstance("my_memory", memModule, {clk.getValue(), rst.getValue()});
+  // auto clk = mainMod->addClockArgument("clk");
+  // auto rst = mainMod->addResetArgument("reset");
+  // auto *memModule = STLLibrary::createMem1r1w1cModule( 32, 10, 1024, 
+  //   1, circuit);
+  // llvm::outs() << "✓ Created 1KB memory module (32-bit data)\n";
+  // auto *memInst = mainMod->addInstance("my_memory", memModule, {clk.getValue(), rst.getValue()});
 
-  auto u10Type = circt::firrtl::UIntType::get(b.getContext(), 10);
-  auto u32Type = circt::firrtl::UIntType::get(b.getContext(), 32);
-  auto *rd0_method = mainMod->addMethod("rd0", {{"inr_", u10Type}}, {});
-  rd0_method->guard([&](mlir::OpBuilder &b, llvm::ArrayRef<mlir::BlockArgument> args) {
-    Signal trueValue = UInt::constant(1, 1, b, loc);
-    b.create<circt::cmt2::ReturnOp>(loc, trueValue.getValue());
-  });
-  rd0_method->body([&, memInst](mlir::OpBuilder &b, llvm::ArrayRef<mlir::BlockArgument> args) {
-    auto inVal = args[0];
-    memInst->callMethod("rd0", {inVal}, b);
-    b.create<circt::cmt2::ReturnOp>(loc);
-  });
-  rd0_method->finalize();
+  // auto u10Type = circt::firrtl::UIntType::get(b.getContext(), 10);
+  // auto u32Type = circt::firrtl::UIntType::get(b.getContext(), 32);
+  // auto *rd0_method = mainMod->addMethod("rd0", {{"inr_", u10Type}}, {});
+  // rd0_method->guard([&](mlir::OpBuilder &b, llvm::ArrayRef<mlir::BlockArgument> args) {
+  //   Signal trueValue = UInt::constant(1, 1, b, loc);
+  //   b.create<circt::cmt2::ReturnOp>(loc, trueValue.getValue());
+  // });
+  // rd0_method->body([&, memInst](mlir::OpBuilder &b, llvm::ArrayRef<mlir::BlockArgument> args) {
+  //   auto inVal = args[0];
+  //   memInst->callMethod("rd0", {inVal}, b);
+  //   b.create<circt::cmt2::ReturnOp>(loc);
+  // });
+  // rd0_method->finalize();
 
-  auto *rd1_value = mainMod->addValue("rd1", {u32Type});
-  rd1_value->guard([&](mlir::OpBuilder &b) {
-    Signal trueValue = UInt::constant(1, 1, b, loc);
-    b.create<circt::cmt2::ReturnOp>(loc, trueValue.getValue());
-  });
-  rd1_value->body([&, memInst](mlir::OpBuilder &b) {
-    auto vals = memInst->callValue("rd1", b);
-    b.create<circt::cmt2::ReturnOp>(loc, mlir::ValueRange{vals[0]});
-  });
-  rd1_value->finalize();
+  // auto *rd1_value = mainMod->addValue("rd1", {u32Type});
+  // rd1_value->guard([&](mlir::OpBuilder &b) {
+  //   Signal trueValue = UInt::constant(1, 1, b, loc);
+  //   b.create<circt::cmt2::ReturnOp>(loc, trueValue.getValue());
+  // });
+  // rd1_value->body([&, memInst](mlir::OpBuilder &b) {
+  //   auto vals = memInst->callValue("rd1", b);
+  //   b.create<circt::cmt2::ReturnOp>(loc, mlir::ValueRange{vals[0]});
+  // });
+  // rd1_value->finalize();
 
-  auto *write_method = mainMod->addMethod("write", {{"inwd_", u32Type},{"inwa_", u10Type}}, {});
-  write_method->guard([&](mlir::OpBuilder &b, llvm::ArrayRef<mlir::BlockArgument> args) {
-    Signal trueValue = UInt::constant(1, 1, b, loc);
-    b.create<circt::cmt2::ReturnOp>(loc, trueValue.getValue());
-  });
-  write_method->body([&, memInst](mlir::OpBuilder &b, llvm::ArrayRef<mlir::BlockArgument> args) {
-    auto wdata = args[0];
-    auto waddr = args[1];
-    memInst->callMethod("write", {wdata, waddr}, b);
-    b.create<circt::cmt2::ReturnOp>(loc);
-  });
-  write_method->finalize();
-  llvm::outs() << "✓ Instantiated memory: my_memory\n";
+  // auto *write_method = mainMod->addMethod("write", {{"inwd_", u32Type},{"inwa_", u10Type}}, {});
+  // write_method->guard([&](mlir::OpBuilder &b, llvm::ArrayRef<mlir::BlockArgument> args) {
+  //   Signal trueValue = UInt::constant(1, 1, b, loc);
+  //   b.create<circt::cmt2::ReturnOp>(loc, trueValue.getValue());
+  // });
+  // write_method->body([&, memInst](mlir::OpBuilder &b, llvm::ArrayRef<mlir::BlockArgument> args) {
+  //   auto wdata = args[0];
+  //   auto waddr = args[1];
+  //   memInst->callMethod("write", {wdata, waddr}, b);
+  //   b.create<circt::cmt2::ReturnOp>(loc);
+  // });
+  // write_method->finalize();
+  // llvm::outs() << "✓ Instantiated memory: my_memory\n";
 
 
   // // 4. Create a memory module (1KB, 32-bit data, 10-bit address) LATENCY = 0

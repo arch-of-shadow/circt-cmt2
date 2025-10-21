@@ -95,6 +95,7 @@ private:
 
   /// Apply inference rules to determine relationship between fx and fy
   Relationship inferRelationship(StringAttr fxName, StringAttr fyName,
+                                 bool isAction, bool hasArguments,
                                  const ModuleCallInfo &callInfo,
                                  const DenseMap<StringAttr, InstanceOp> &instanceMap);
 

@@ -129,7 +129,14 @@ ExternalModule* STLLibrary::createRegModule(unsigned width, unsigned init, Circu
 Module* STLLibrary::createFIFO1PushModule(unsigned dataWidth, Circuit& circuit) {
   std::string moduleName = "FIFO1_PUSH_w" + std::to_string(dataWidth);
   auto *fifoMod = circuit.addModule(moduleName);
-
+  fifoMod->setPrecedence({
+      {"full", "deq"}, 
+      {"deq", "enq"}, 
+      {"enq", "deqed_default"},
+      {"deqed_default", "enqed_default"},
+      {"enqed_default", "next"}
+    });
+    
   Clock clk = fifoMod->addClockArgument("clk");
   Reset rst = fifoMod->addResetArgument("rst");
 

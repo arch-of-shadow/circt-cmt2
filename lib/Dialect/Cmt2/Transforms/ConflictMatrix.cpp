@@ -198,6 +198,16 @@ void ConflictMatrixAnalysis::parseExternalModuleMatrix(
                           << moduleName.getValue() << "\n");
 
   ModuleConflictMatrix matrix;
+  
+  extModule.getBodyRegion().walk([&](Cmt2FunctionLike func) {
+    matrix.setRelationship(
+      func.functionNameAttr(), 
+      func.functionNameAttr(), 
+      func.getFunctionKind() == FunctionKind::Value && func.getNumArguments() == 0 ?
+        Relationship::ConflictFree:
+        Relationship::Conflict
+    );
+  });
 
   // Parse "conflict" attribute: [[@f1, @f2], ...]
   if (auto conflictAttr = extModule->getAttrOfType<ArrayAttr>("conflict")) {
@@ -264,21 +274,24 @@ void ConflictMatrixAnalysis::inferModuleMatrix(
     return;
   }
 
-  // Collect all function names in this module
-  SmallVector<StringAttr> functionNames;
+  // Collect all function names, isAction, hasArgs in this module
+  SmallVector<std::tuple<StringAttr, bool, bool>> functionNames;
   for (auto &op : module.getBody().front().getOperations()) {
     if (auto funcLike = dyn_cast<Cmt2FunctionLike>(&op)) {
-      functionNames.push_back(funcLike.functionNameAttr());
+      functionNames.push_back({funcLike.functionNameAttr(), 
+        !(funcLike.getFunctionKind() == FunctionKind::Value),
+        funcLike.getFunctionType().getNumInputs() > 0
+      });
     }
   }
 
   // Infer relationships between all pairs of functions
   for (size_t i = 0; i < functionNames.size(); ++i) {
     for (size_t j = i; j < functionNames.size(); ++j) {
-      StringAttr fxName = functionNames[i];
-      StringAttr fyName = functionNames[j];
+      auto &[fxName, isAction, hasArgs] = functionNames[i];
+      auto &[fyName, isActionY, hasArgsY] = functionNames[j];
 
-      Relationship rel = inferRelationship(fxName, fyName, *modCallInfo, instanceMap);
+      Relationship rel = inferRelationship(fxName, fyName, isAction && isActionY, hasArgs && hasArgsY, *modCallInfo, instanceMap);
       matrix.setRelationship(fxName, fyName, rel);
 
       LLVM_DEBUG({
@@ -304,11 +317,15 @@ void ConflictMatrixAnalysis::inferModuleMatrix(
 }
 
 Relationship ConflictMatrixAnalysis::inferRelationship(
-    StringAttr fxName, StringAttr fyName, const ModuleCallInfo &callInfo,
+    StringAttr fxName, StringAttr fyName, bool isAction, bool hasArguments, 
+    const ModuleCallInfo &callInfo,
     const DenseMap<StringAttr, InstanceOp> &instanceMap) {
   // If same function, default to ConflictFree
   if (fxName == fyName) {
-    return Relationship::ConflictFree;
+    if (isAction || hasArguments) 
+      return Relationship::Conflict;
+    else  
+      return Relationship::ConflictFree;
   }
 
   // Get calls for both functions from CallInfo
@@ -353,8 +370,14 @@ Relationship ConflictMatrixAnalysis::inferRelationship(
 
       StringAttr refModuleName = refModule.moduleNameAttr();
       const auto *refMatrix = getModuleMatrix(refModuleName);
+
       if (!refMatrix)
         continue;
+
+        
+      // llvm::dbgs() << "Module " << refModuleName << " 's conflict matrix\n";
+
+      refMatrix->print(llvm::dbgs(), refModuleName);
 
       // Get method names (leaf references)
       StringAttr cxMethod = cx.calleeEntity.getLeafReference();
