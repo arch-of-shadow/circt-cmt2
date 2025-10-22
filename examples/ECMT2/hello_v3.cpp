@@ -69,22 +69,20 @@ public:
         // Read current value
         auto currentVals = r.callValue("read", b);
 
-        // // Get method argument
-        // auto vVal = args[0];
+        // Get method argument
+        auto vVal = args[0];
 
-        // // ✨ All helper functions!
-        // auto sum1 = Add(readerData[0], vVal);
-        // auto sum1_trunc = Bits(sum1, 31, 0);
-        // auto sum2 = Add(currentVals[0], sum1_trunc);
-        // auto newVal = Bits(sum2, 31, 0);
+        // ✨ All helper functions!
+        auto sum1 = Add(readerData[0], vVal);
+        auto sum1_trunc = Bits(sum1, 31, 0);
+        auto sum2 = Add(currentVals[0], sum1_trunc);
+        auto newVal = Bits(sum2, 31, 0);
 
-        // // Write back
-        // r.callMethod("write", b, newVal);
+        // Write back
+        r.callMethod("write", b, newVal);
 
         // Return result
-        // Return(newVal);
-        Return(currentVals[0]);
-        // Return();
+        Return(newVal);
       });
   }
 

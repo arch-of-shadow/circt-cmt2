@@ -151,13 +151,23 @@ def Cmt2FunctionLike : OpInterface<"Cmt2FunctionLike"> {
       Returns the name of the i-th function argument
     }],
     "std::string", "getArgumentName", (ins "unsigned":$index),
-    /*methodBody=*/[{ return llvm::cast<mlir::StringAttr>($_op.getArgNames()[index]).getValue().str(); }]>,
+    /*methodBody=*/[{
+      if (index < $_op.getArgNames().size()) 
+        return llvm::cast<mlir::StringAttr>($_op.getArgNames()[index]).getValue().str(); 
+      else
+        return "arg" + std::to_string(index);
+    }]>,
 
     InterfaceMethod<[{
       Returns the name of the i-th function results
     }],
     "std::string", "getResultName", (ins "unsigned":$index),
-    /*methodBody=*/[{ return llvm::cast<mlir::StringAttr>($_op.getBodyResNames()[index]).getValue().str(); }]>,
+    /*methodBody=*/[{ 
+      if (index < $_op.getBodyResNames().size()) 
+        return llvm::cast<mlir::StringAttr>($_op.getBodyResNames()[index]).getValue().str(); 
+      else
+        return "result" + std::to_string(index);
+    }]>,
 
 
     //===------------------------------------------------------------------===//
@@ -348,3 +358,42 @@ def Cmt2ModuleLike : OpInterface<"Cmt2ModuleLike"> {
   let verify = [{}];
 }
 
+def Cmt2CalleeLike: OpInterface<"Cmt2CalleeLike"> {
+  let cppNamespace = "::circt::cmt2";
+  let description = "Provide base callee interface.";
+  let methods = [
+    //===------------------------------------------------------------------===//
+    // Module Name
+    //===------------------------------------------------------------------===//
+
+    // InterfaceMethod<"Get the module name",
+    // "::llvm::StringRef", "moduleName", (ins),
+    // /*methodBody=*/[{ return $_op.getName(); }]>,
+
+    // InterfaceMethod<"Get the module name",
+    // "::mlir::StringAttr", "moduleNameAttr", (ins),
+    // /*methodBody=*/[{ return $_op.getNameAttr(); }]>,
+
+    //===------------------------------------------------------------------===//
+    // Symbol Lookup
+    //===------------------------------------------------------------------===//
+
+    // InterfaceMethod<[{
+    //   Look up a Cmt2FunctionLike by name in this module.
+    //   Returns the Cmt2FunctionLike if found, nullptr otherwise.
+    // }],
+    // "Cmt2FunctionLike", "lookupFunctionLike",
+    // (ins "::mlir::StringAttr":$name),
+    // /*methodBody=*/[{
+    //   return llvm::dyn_cast_or_null<Cmt2FunctionLike>(::mlir::SymbolTable::lookupSymbolIn($_op, name));
+    // }]>,
+
+    //===------------------------------------------------------------------===//
+    // Body
+    //===------------------------------------------------------------------===//
+    // InterfaceMethod<"Body region",
+    // "::mlir::Region&", "body", (ins),
+    // [{ return $_op.getBodyRegion(); }]>
+  ];
+  let verify = [{}];
+}
