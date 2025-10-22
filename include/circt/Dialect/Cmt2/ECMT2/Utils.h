@@ -24,10 +24,11 @@
 namespace circt {
 namespace cmt2 {
 namespace ecmt2 {
-    
+
 mlir::FunctionType getFunctionTypeFromBinding(
   cmt2::ExtModuleFirrtlOp extMod, 
-  StringAttr funcName,
+  llvm::ArrayRef<std::string> argPorts,
+  llvm::ArrayRef<std::string> resPorts,
   OpBuilder &builder
 );
 

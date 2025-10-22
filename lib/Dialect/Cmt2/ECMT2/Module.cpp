@@ -100,7 +100,8 @@ namespace ecmt2 {
 
 mlir::FunctionType getFunctionTypeFromBinding(
   cmt2::ExtModuleFirrtlOp extMod, 
-  StringAttr funcName,
+  llvm::ArrayRef<std::string> argPorts,
+  llvm::ArrayRef<std::string> resPorts,
   OpBuilder &builder
 ) {
   // Get the FIRRTL module name to look up port types
@@ -109,15 +110,13 @@ mlir::FunctionType getFunctionTypeFromBinding(
   llvm::SmallVector<mlir::Type> resultTypes;
 
   llvm::StringRef firrtlModuleName = extMod.getExtModuleName();
-  Cmt2FunctionLike func = dyn_cast<Cmt2ModuleLike>(extMod.getOperation()).lookupFunctionLike(funcName);
   
   mlir::Operation *topModule = extMod->template getParentOfType<mlir::ModuleOp>();
 
   topModule->walk([&](circt::firrtl::FModuleOp firrtlMod) {
     if (firrtlMod.getModuleName() == firrtlModuleName) {
-      // For each output port, find its type in the FIRRTL module
-      for (size_t idx = 0; idx < func.getNumResults(); idx++) {
-        auto portName = func.getResultName(idx);
+      // For each argument port, find its type in the FIRRTL module
+      for (auto portName: argPorts) {
         // Find the port in the FIRRTL module
         for (size_t i = 0; i < firrtlMod.getNumPorts(); ++i) {
           if (firrtlMod.getPortName(i) == portName) {
@@ -126,9 +125,8 @@ mlir::FunctionType getFunctionTypeFromBinding(
           }
         }
       }
-      // Also for each input port
-      for (size_t idx = 0; idx < func.getNumArguments(); idx++) {
-        auto portName = func.getArgumentName(idx);
+      // Also for each result port
+      for (auto portName: resPorts) {
         // Find the port in the FIRRTL module
         for (size_t i = 0; i < firrtlMod.getNumPorts(); ++i) {
           if (firrtlMod.getPortName(i) == portName) {
@@ -175,7 +173,7 @@ ExternalModule::bindMethod(llvm::StringRef name, llvm::StringRef enablePort,
     bodyResNames.push_back(builder_.getStringAttr(res));
 
   // Create function type (inputs -> outputs)
-  auto functionType = getFunctionTypeFromBinding(getInnerOp(), builder_.getStringAttr(name), builder_);
+  auto functionType = getFunctionTypeFromBinding(getInnerOp(), argPorts, resPorts, builder_);
 
   // Create empty arg_attrs and res_attrs
   auto emptyArrayAttr = builder_.getArrayAttr({});
@@ -221,7 +219,7 @@ ExternalModule::bindValue(llvm::StringRef name, llvm::StringRef readyPort,
 
 
   // Create function type (no inputs -> outputs)
-  auto functionType = getFunctionTypeFromBinding(getInnerOp(), builder_.getStringAttr(name), builder_);
+  auto functionType = getFunctionTypeFromBinding(getInnerOp(), {}, resPorts, builder_);
 
   // Create empty arg_attrs and res_attrs
   auto emptyArrayAttr = builder_.getArrayAttr({});
