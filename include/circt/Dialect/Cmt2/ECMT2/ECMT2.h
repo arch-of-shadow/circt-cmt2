@@ -20,6 +20,7 @@
 #define CIRCT_DIALECT_CMT2_ECMT2_H
 
 // Low-level API
+#include "circt/Dialect/Cmt2/ECMT2/Utils.h"
 #include "circt/Dialect/Cmt2/ECMT2/Circuit.h"
 #include "circt/Dialect/Cmt2/ECMT2/FunctionLike.h"
 #include "circt/Dialect/Cmt2/ECMT2/Instance.h"

@@ -6,13 +6,16 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "circt/Dialect/Cmt2/ECMT2/Utils.h"
 #include "circt/Dialect/Cmt2/ECMT2/Module.h"
 #include "circt/Dialect/Cmt2/ECMT2/FunctionLike.h"
 #include "circt/Dialect/Cmt2/ECMT2/Instance.h"
 #include "circt/Dialect/Cmt2/ECMT2/Interface.h"
 #include "circt/Dialect/Cmt2/Cmt2Ops.h"
+#include "circt/Dialect/Cmt2/Cmt2OpInterfaces.h"
 
 using namespace circt;
+using namespace cmt2;
 using namespace cmt2::ecmt2;
 
 //===----------------------------------------------------------------------===//
@@ -90,6 +93,64 @@ ExternalModule &ExternalModule::bindReset(llvm::StringRef argName,
   return *this;
 }
 
+namespace circt {
+namespace cmt2 {
+namespace ecmt2 {
+    
+
+mlir::FunctionType getFunctionTypeFromBinding(
+  cmt2::ExtModuleFirrtlOp extMod, 
+  StringAttr funcName,
+  OpBuilder &builder
+) {
+  // Get the FIRRTL module name to look up port types
+  
+  llvm::SmallVector<mlir::Type> argumentTypes;
+  llvm::SmallVector<mlir::Type> resultTypes;
+
+  llvm::StringRef firrtlModuleName = extMod.getExtModuleName();
+  Cmt2FunctionLike func = dyn_cast<Cmt2ModuleLike>(extMod.getOperation()).lookupFunctionLike(funcName);
+  
+  mlir::Operation *topModule = extMod->template getParentOfType<mlir::ModuleOp>();
+
+  topModule->walk([&](circt::firrtl::FModuleOp firrtlMod) {
+    if (firrtlMod.getModuleName() == firrtlModuleName) {
+      // For each output port, find its type in the FIRRTL module
+      for (size_t idx = 0; idx < func.getNumResults(); idx++) {
+        auto portName = func.getResultName(idx);
+        // Find the port in the FIRRTL module
+        for (size_t i = 0; i < firrtlMod.getNumPorts(); ++i) {
+          if (firrtlMod.getPortName(i) == portName) {
+            resultTypes.push_back(firrtlMod.getPortType(i));
+            break;
+          }
+        }
+      }
+      // Also for each input port
+      for (size_t idx = 0; idx < func.getNumArguments(); idx++) {
+        auto portName = func.getArgumentName(idx);
+        // Find the port in the FIRRTL module
+        for (size_t i = 0; i < firrtlMod.getNumPorts(); ++i) {
+          if (firrtlMod.getPortName(i) == portName) {
+            argumentTypes.push_back(firrtlMod.getPortType(i));
+            break;
+          }
+        }
+      }
+      return mlir::WalkResult::interrupt();
+    }
+    return mlir::WalkResult::advance();
+  });
+
+  return builder.getFunctionType(argumentTypes, resultTypes);
+}
+
+} // namespace ecmt2
+} // namespace cmt2
+} // namespace circt
+
+
+
 ExternalModule &
 ExternalModule::bindMethod(llvm::StringRef name, llvm::StringRef enablePort,
                            llvm::StringRef readyPort,
@@ -114,8 +175,7 @@ ExternalModule::bindMethod(llvm::StringRef name, llvm::StringRef enablePort,
     bodyResNames.push_back(builder_.getStringAttr(res));
 
   // Create function type (inputs -> outputs)
-  // For methods, there are no actual type arguments - bindings are by name
-  auto functionType = builder_.getFunctionType({}, {});
+  auto functionType = getFunctionTypeFromBinding(getInnerOp(), builder_.getStringAttr(name), builder_);
 
   // Create empty arg_attrs and res_attrs
   auto emptyArrayAttr = builder_.getArrayAttr({});
@@ -161,12 +221,12 @@ ExternalModule::bindValue(llvm::StringRef name, llvm::StringRef readyPort,
 
 
   // Create function type (no inputs -> outputs)
-  auto functionType = builder_.getFunctionType({}, {});
+  auto functionType = getFunctionTypeFromBinding(getInnerOp(), builder_.getStringAttr(name), builder_);
 
   // Create empty arg_attrs and res_attrs
   auto emptyArrayAttr = builder_.getArrayAttr({});
 
-  auto bind_value = builder_.create<cmt2::BindValueOp>(
+  builder_.create<cmt2::BindValueOp>(
       loc_,
       builder_.getStringAttr(name),
       mlir::TypeAttr::get(functionType),

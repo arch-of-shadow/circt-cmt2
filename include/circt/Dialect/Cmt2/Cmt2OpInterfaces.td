@@ -347,4 +347,3 @@ def Cmt2ModuleLike : OpInterface<"Cmt2ModuleLike"> {
   ];
   let verify = [{}];
 }
-

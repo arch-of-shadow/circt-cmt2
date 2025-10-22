@@ -69,6 +69,7 @@ public:
   ExternalModule &addSequenceBefore(llvm::StringRef before,
                                    llvm::StringRef after);
 
+  ExtModuleFirrtlOp getInnerOp() { return op_; }
   /// Overrides
   llvm::StringRef getName() const override { return name_; }
   mlir::Operation *getOperation() const override { return op_; }

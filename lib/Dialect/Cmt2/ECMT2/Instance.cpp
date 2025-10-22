@@ -83,95 +83,12 @@ CallBuilder::buildCall(Instance *instance, llvm::StringRef entity,
 
   // Check if the module is an external FIRRTL module by checking the operation type
   auto moduleOp = instance->moduleType_->getOperation();
-  if (auto extModFirrtl = mlir::dyn_cast<cmt2::ExtModuleFirrtlOp>(moduleOp)) {
-    // Walk the body to find the BindMethodOp or BindValueOp
-    auto entityAttr = builder.getStringAttr(entity);
+  auto modulelike = dyn_cast<Cmt2ModuleLike>(moduleOp);
+  auto entityAttr = builder.getStringAttr(entity);
+  auto func = modulelike.lookupFunctionLike(entityAttr);
 
-    // Get the FIRRTL module name to look up port types
-    llvm::StringRef firrtlModuleName = extModFirrtl.getExtModuleName();
-
-    for (auto &bodyOp : extModFirrtl.getBodyRegion().front()) {
-      if (auto bindMethod = mlir::dyn_cast<cmt2::BindMethodOp>(bodyOp)) {
-        if (bindMethod.getSymNameAttr() == entityAttr) {
-          // For BindMethodOp, result count = number of outputs
-          auto outputsAttr = bindMethod.getBodyResNames();
-
-          // Look up the FIRRTL module to get actual port types
-          mlir::Operation *topModule = extModFirrtl->template getParentOfType<mlir::ModuleOp>();
-          if (topModule) {
-            topModule->walk([&](circt::firrtl::FModuleOp firrtlMod) {
-              if (firrtlMod.getModuleName() == firrtlModuleName) {
-                // For each output port, find its type in the FIRRTL module
-                for (auto outputAttr : outputsAttr) {
-                  auto portName = mlir::cast<mlir::StringAttr>(outputAttr).getValue();
-                  // Find the port in the FIRRTL module
-                  for (size_t i = 0; i < firrtlMod.getNumPorts(); ++i) {
-                    if (firrtlMod.getPortName(i) == portName) {
-                      resultTypes.push_back(firrtlMod.getPortType(i));
-                      break;
-                    }
-                  }
-                }
-                return mlir::WalkResult::interrupt();
-              }
-              return mlir::WalkResult::advance();
-            });
-          }
-          break;
-        }
-      } else if (auto bindValue = mlir::dyn_cast<cmt2::BindValueOp>(bodyOp)) {
-        if (bindValue.getSymNameAttr() == entityAttr) {
-          // For BindValueOp, result count = number of data ports
-          auto dataAttr = bindValue.getBodyResNames();
-
-          // Look up the FIRRTL module to get actual port types
-          mlir::Operation *topModule = extModFirrtl->template getParentOfType<mlir::ModuleOp>();
-          if (topModule) {
-            topModule->walk([&](circt::firrtl::FModuleOp firrtlMod) {
-              if (firrtlMod.getModuleName() == firrtlModuleName) {
-                // For each data port, find its type in the FIRRTL module
-                for (auto dataPortAttr : dataAttr) {
-                  auto portName = mlir::cast<mlir::StringAttr>(dataPortAttr).getValue();
-                  // Find the port in the FIRRTL module
-                  for (size_t i = 0; i < firrtlMod.getNumPorts(); ++i) {
-                    if (firrtlMod.getPortName(i) == portName) {
-                      resultTypes.push_back(firrtlMod.getPortType(i));
-                      break;
-                    }
-                  }
-                }
-                return mlir::WalkResult::interrupt();
-              }
-              return mlir::WalkResult::advance();
-            });
-          }
-          break;
-        }
-      }
-    }
-  } else if (auto cmt2Mod = mlir::dyn_cast<cmt2::ModuleOp>(moduleOp)) {
-    // For regular Cmt2 modules, look up the method/value operation to get result types
-    auto entityAttr = builder.getStringAttr(entity);
-
-    for (auto &bodyOp : cmt2Mod.getBodyRegion().front()) {
-      if (auto method = mlir::dyn_cast<cmt2::MethodOp>(bodyOp)) {
-        if (method.getSymNameAttr() == entityAttr) {
-          // Get result types from MethodOp
-          for (auto resultType : method.getResultTypes()) {
-            resultTypes.push_back(resultType);
-          }
-          break;
-        }
-      } else if (auto value = mlir::dyn_cast<cmt2::ValueOp>(bodyOp)) {
-        if (value.getSymNameAttr() == entityAttr) {
-          // Get result types from ValueOp
-          for (auto resultType : value.getResultTypes()) {
-            resultTypes.push_back(resultType);
-          }
-          break;
-        }
-      }
-    }
+  for (auto resultType : func.getResultTypes()) {
+    resultTypes.push_back(resultType);
   }
 
   // Create call operation

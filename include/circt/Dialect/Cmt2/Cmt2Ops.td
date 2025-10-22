@@ -66,7 +66,7 @@ def ExtModuleFirrtlOp : Cmt2Op<
     NoTerminator,
     OpAsmOpInterface,
     DeclareOpInterfaceMethods<InstanceGraphModuleOpInterface>,
-    Cmt2ModuleLike,
+    Cmt2ModuleLike
   ]> {
   let summary = "Binding a `firrtl.module` to Cmt2 ExtModule.";
   let description = [{
