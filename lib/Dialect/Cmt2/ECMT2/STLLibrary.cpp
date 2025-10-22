@@ -51,7 +51,8 @@ ExternalModule* STLLibrary::createWireModule(unsigned width, Circuit& circuit) {
 }
 
 Module* STLLibrary::createWireDefaultModule(unsigned width, unsigned init, Circuit& circuit) {
-  auto *wireDefaultMod = circuit.addModule("WireDefault_w" + std::to_string(width) + "_i" + std::to_string(init));
+  std::string moduleName = "WireDefault_w" + std::to_string(width) + "_i" + std::to_string(init);
+  auto *wireDefaultMod = circuit.addModule(moduleName);
   auto &builder = wireDefaultMod->getBuilder();
   auto loc = wireDefaultMod->getLoc();
 
@@ -63,7 +64,7 @@ Module* STLLibrary::createWireDefaultModule(unsigned width, unsigned init, Circu
   // Add read value that delegates to inner wire
   auto *readVal = wireDefaultMod->addValue("read", {wireType});
   readVal->guard([&](mlir::OpBuilder &b) {
-    Signal trueValue = UInt::constant(1, 1, builder, loc);
+    Signal trueValue = UInt::constant(1, 1, b, loc);
     b.create<circt::cmt2::ReturnOp>(loc, trueValue.getValue());
   });
   readVal->body([&, innerinst](mlir::OpBuilder &b) {
@@ -75,7 +76,7 @@ Module* STLLibrary::createWireDefaultModule(unsigned width, unsigned init, Circu
   // Add write method that delegates to inner wire
   auto *writeMethod = wireDefaultMod->addMethod("write", {{"in_", wireType}}, {});
   writeMethod->guard([&](mlir::OpBuilder &b, llvm::ArrayRef<mlir::BlockArgument> args) {
-    Signal trueValue = UInt::constant(1, 1, builder, loc);
+    Signal trueValue = UInt::constant(1, 1, b, loc);
     b.create<circt::cmt2::ReturnOp>(loc, trueValue.getValue());
   });
   writeMethod->body([&, innerinst](mlir::OpBuilder &b, llvm::ArrayRef<mlir::BlockArgument> args) {
@@ -88,11 +89,11 @@ Module* STLLibrary::createWireDefaultModule(unsigned width, unsigned init, Circu
   // Add default rule that writes default value
   auto *defaultRule = wireDefaultMod->addRule("default");
   defaultRule->guard([&](mlir::OpBuilder &b) {
-    Signal trueValue = UInt::constant(1, 1, builder, loc);
+    Signal trueValue = UInt::constant(1, 1, b, loc);
     b.create<circt::cmt2::ReturnOp>(loc, trueValue.getValue());
   });
   defaultRule->body([&, innerinst](mlir::OpBuilder &b) {
-    Signal initValue = UInt::constant(init, width, builder, loc);
+    Signal initValue = UInt::constant(init, width, b, loc);
     innerinst->callMethod("write", {initValue.getValue()}, b);
     b.create<circt::cmt2::ReturnOp>(loc);
   });
@@ -366,16 +367,23 @@ Module* STLLibrary::createFIFO1PullModule(unsigned dataWidth, Circuit& circuit) 
   });
   nextRule->finalize();
 
+  fifoMod->setPrecedence({
+    {"full", "enq"}, 
+    {"enq", "dnq"}, 
+    {"dnq", "enqed_default"},
+    {"enqed_default", "deqed_default"},
+    {"deqed_default", "next"}
+  });
+
   return fifoMod;
 }
 
-ExternalModule* STLLibrary::createMem1r1w1cModule( unsigned dataWidth, unsigned addrWidth, unsigned depth, unsigned readLatency, Circuit& circuit) {
+ExternalModule* STLLibrary::createMem1r1w1cModule( unsigned dataWidth, unsigned addrWidth, unsigned depth, Circuit& circuit) {
   // Create external memory module with Mem1r1w binding
   llvm::StringMap<int64_t> params;
   params["data_width"] = dataWidth;
   params["addr_width"] = addrWidth;
   params["depth"] = depth;
-  params["read_latency"] = readLatency;
 
   auto* memMod = circuit.addExternalModule("Mem1r1w1c", params);
 
@@ -389,13 +397,12 @@ ExternalModule* STLLibrary::createMem1r1w1cModule( unsigned dataWidth, unsigned 
   return memMod;
 }
 
-ExternalModule* STLLibrary::createMem1r1w0cModule( unsigned dataWidth, unsigned addrWidth, unsigned depth, unsigned readLatency, Circuit& circuit) {
+ExternalModule* STLLibrary::createMem1r1w0cModule( unsigned dataWidth, unsigned addrWidth, unsigned depth, Circuit& circuit) {
   // Create external memory module with Mem1r1w binding
   llvm::StringMap<int64_t> params;
   params["data_width"] = dataWidth;
   params["addr_width"] = addrWidth;
   params["depth"] = depth;
-  params["read_latency"] = readLatency;
 
   auto* memMod = circuit.addExternalModule("Mem1r1w0c", params);
 

@@ -18,6 +18,7 @@
 #include "mlir/Support/LLVM.h"
 #include "llvm/Support/raw_ostream.h"
 #include <fstream>
+#include <string>
 
 using namespace circt;
 using namespace cmt2::ecmt2;
@@ -51,21 +52,21 @@ Module *Circuit::addModule(llvm::StringRef name) {
   // Set insertion point to circuit body for module creation
   builder_.setInsertionPointToEnd(&circuitOp_.getBody().front());
 
-
+  std::string finalName = name.str();
   if (modulesMap_.lookup(name)) {
     // same name exists
     size_t suffix = 0;
     while (modulesMap_.lookup(name.str() + std::to_string(suffix))) {
       suffix += 1;
     }
-    name = llvm::StringRef(name.str() + std::to_string(suffix));
+    finalName = name.str() + std::to_string(suffix);
   }
 
-  auto module = std::make_unique<Module>(name, builder_, loc_);
+  auto module = std::make_unique<Module>(finalName, builder_, loc_);
   auto *ptr = module.get();
   size_t len = modules_.size();
   modules_.push_back(std::move(module));
-  modulesMap_.insert_or_assign(name, len);
+  modulesMap_.insert_or_assign(finalName, len);
 
   // Note: insertion point is now inside the new module's body
   // (set by Module constructor)
