@@ -381,6 +381,8 @@ LogicalResult LowerCmt2ToFIRRTLPass::convertCircuit(cmt2::CircuitOp circuit) {
     convertedModules[module.getSymNameAttr()] = firrtlMod;
   }
 
+  // firrtlCircuit.print(llvm::dbgs());
+
   // Erase the original cmt2 circuit
   circuit.erase();
   return success();
@@ -1444,6 +1446,14 @@ LowerCmt2ToFIRRTLPass::convertCallOp(CallOp callOp,
       }
     }
 
+    // Map call results to instance ports
+    for (auto [callResult, portValue] :
+        llvm::zip(callOp.getResults(), mappedResults)) {
+      ctx.getIRMapping().map(callResult, portValue);
+    }
+
+
+
   } else {
     return callOp.emitError("Unsupported module type for call");
   }
@@ -1628,9 +1638,6 @@ LowerCmt2ToFIRRTLPass::getFunctionPortName(cmt2::Cmt2FunctionLike function,
       }
     }
   }
-
-  llvm::dbgs() << "prefix is " << prefix << ", base is " << base << "\n";
-
   return prefix + base;
 }
 
@@ -1646,8 +1653,6 @@ std::string LowerCmt2ToFIRRTLPass::getItfcDeclFunctionPortName(
     declName = decl.getSymName().str() + "_";
   }
 
-  llvm::dbgs() << "declName is " << declName << ", portName is " << portName
-               << "\n";
 
   return declName + portName;
 }
