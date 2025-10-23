@@ -54,14 +54,14 @@ int main() {
   // === Create STL Modules using Factory Methods ===
 
   // 1. Create a 32-bit register module
-  auto *reg32Module = STLLibrary::createRegModule(32, 0, circuit);
+  // auto *reg32Module = STLLibrary::createRegModule(32, 0, circuit);
   // llvm::outs() << "✓ Created 32-bit register module\n";
   // auto *reg32Inst = mainMod->addInstance("my_reg", reg32Module, {clk.getValue(), rst.getValue()});
   // llvm::outs() << "✓ Instantiated register: my_reg\n";
 
   // 2. Create a depth-1 FIFO for 32-bit data (push-based)
-  // auto *fifo32Module = STLLibrary::createFIFO1PushModule(32, circuit);
-  // llvm::outs() << "✓ Created depth-1 FIFO module (32-bit data)\n";
+  auto *fifo32Module = STLLibrary::createFIFO1PushModule(32, circuit);
+  llvm::outs() << "✓ Created depth-1 FIFO module (32-bit data)\n";
   // auto *fifo32Inst = mainMod->addInstance("my_fifo", fifo32Module, {} /* {clk.getValue(), rst.getValue()} */);
   // llvm::outs() << "✓ Instantiated FIFO: my_fifo\n";
 

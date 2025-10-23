@@ -171,7 +171,7 @@ SchedulerAnalysis::computeModuleSchedule(ModuleOp module) {
   }
 
   
-  matrix->print(llvm::dbgs(), "ToSchedule");
+  LLVM_DEBUG(matrix->print(llvm::dbgs(), "ToSchedule"));
   
   // Step 6: Solve scheduling for each group and analyze preventing firing
   for (const auto &[groupId, groupFuncs] : groupMap) {

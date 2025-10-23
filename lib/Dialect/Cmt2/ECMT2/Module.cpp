@@ -120,7 +120,7 @@ mlir::FunctionType getFunctionTypeFromBinding(
         // Find the port in the FIRRTL module
         for (size_t i = 0; i < firrtlMod.getNumPorts(); ++i) {
           if (firrtlMod.getPortName(i) == portName) {
-            resultTypes.push_back(firrtlMod.getPortType(i));
+            argumentTypes.push_back(firrtlMod.getPortType(i));
             break;
           }
         }
@@ -130,7 +130,7 @@ mlir::FunctionType getFunctionTypeFromBinding(
         // Find the port in the FIRRTL module
         for (size_t i = 0; i < firrtlMod.getNumPorts(); ++i) {
           if (firrtlMod.getPortName(i) == portName) {
-            argumentTypes.push_back(firrtlMod.getPortType(i));
+            resultTypes.push_back(firrtlMod.getPortType(i));
             break;
           }
         }
@@ -217,9 +217,8 @@ ExternalModule::bindValue(llvm::StringRef name, llvm::StringRef readyPort,
     bodyResNames.push_back(builder_.getStringAttr(res));
 
 
-
   // Create function type (no inputs -> outputs)
-  auto functionType = getFunctionTypeFromBinding(getInnerOp(), {}, resPorts, builder_);
+  auto functionType = getFunctionTypeFromBinding(getInnerOp(), argPorts, resPorts, builder_);
 
   // Create empty arg_attrs and res_attrs
   auto emptyArrayAttr = builder_.getArrayAttr({});

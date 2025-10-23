@@ -14,6 +14,7 @@
 using namespace circt;
 using namespace cmt2::ecmt2;
 
+#define DEBUG_TYPE "cmt2-api"
 //===----------------------------------------------------------------------===//
 // Instance
 //===----------------------------------------------------------------------===//
@@ -87,9 +88,15 @@ CallBuilder::buildCall(Instance *instance, llvm::StringRef entity,
   auto entityAttr = builder.getStringAttr(entity);
   auto func = modulelike.lookupFunctionLike(entityAttr);
 
+  LLVM_DEBUG(func.print(llvm::dbgs()));
+
   for (auto resultType : func.getResultTypes()) {
     resultTypes.push_back(resultType);
   }
+
+  LLVM_DEBUG(llvm::dbgs() << "\nbuild call on instance " << instance->getName() << " 's function " << func.functionName() << " (is value? " << (func.getFunctionKind() == FunctionKind::Value) << ")\n");
+  LLVM_DEBUG(llvm::dbgs() << "\tnumber of function results: " << func.getNumResults() << "\n");
+  LLVM_DEBUG(llvm::dbgs() << "\tnumber of function's result types: " << resultTypes.size() << "\n");
 
   // Create call operation
   // CallOp signature: (TypeRange outputs, ValueRange inputs, callee, methodOrValue, arg_attrs, res_attrs)
@@ -101,6 +108,8 @@ CallBuilder::buildCall(Instance *instance, llvm::StringRef entity,
   llvm::SmallVector<mlir::Value, 4> results;
   for (auto result : callOp.getResults())
     results.push_back(result);
+
+  LLVM_DEBUG(llvm::dbgs() << "\tnumber of result of callOp: "<< results.size() << "\n");
   return results;
 }
 
