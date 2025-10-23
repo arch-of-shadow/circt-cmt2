@@ -281,7 +281,7 @@ private:
   InterfaceOp getInterfaceForDecl(InterfaceDeclOp decl);
   void createInterfacePorts(cmt2::ModuleOp module, OpBuilder &builder,
                             SmallVectorImpl<PortInfo> &ports);
-  void invalidateInterfaceOutPorts(cmt2::ModuleOp module,
+  void initializeInterfaceOutPorts(cmt2::ModuleOp module,
                                    ModuleConversionContext &ctx,
                                    OpBuilder &builder);
   LogicalResult connectInterfaceCall(CallOp callOp,
@@ -452,7 +452,7 @@ LogicalResult LowerCmt2ToFIRRTLPass::convertModule(
     ctx.getIRMapping().map(cmt2Arg, firrtlArg);
   }
 
-  invalidateInterfaceOutPorts(module, ctx, implicitBuilder);
+  initializeInterfaceOutPorts(module, ctx, implicitBuilder);
 
   // Create FIRRTL instances for all cmt2.instance operations
   if (failed(createInstances(module, ctx, implicitBuilder, convertedModules))) {
@@ -610,7 +610,8 @@ LogicalResult LowerCmt2ToFIRRTLPass::createInstances(
     llvm::dbgs() << "initializeUnconnectedInputPorts done\n";
     // Process interface bindings (referenceMOdule must be ModuleOp)
     if (auto interfaceBinds = instOp.getInterfaceBinds()) {
-      llvm::dbgs() << "process " << (*interfaceBinds).size() << "interface bindings\n";
+      llvm::dbgs() << "process " << (*interfaceBinds).size()
+                   << "interface bindings\n";
       if (auto referenceMod =
               dyn_cast<cmt2::ModuleOp>(referencedModule.getOperation())) {
         for (auto bindAttr : *interfaceBinds) {
@@ -1448,11 +1449,9 @@ LowerCmt2ToFIRRTLPass::convertCallOp(CallOp callOp,
 
     // Map call results to instance ports
     for (auto [callResult, portValue] :
-        llvm::zip(callOp.getResults(), mappedResults)) {
+         llvm::zip(callOp.getResults(), mappedResults)) {
       ctx.getIRMapping().map(callResult, portValue);
     }
-
-
 
   } else {
     return callOp.emitError("Unsupported module type for call");
@@ -1652,7 +1651,6 @@ std::string LowerCmt2ToFIRRTLPass::getItfcDeclFunctionPortName(
   } else {
     declName = decl.getSymName().str() + "_";
   }
-
 
   return declName + portName;
 }
@@ -1976,7 +1974,7 @@ void LowerCmt2ToFIRRTLPass::createInterfacePorts(
   }
 }
 
-void LowerCmt2ToFIRRTLPass::invalidateInterfaceOutPorts(
+void LowerCmt2ToFIRRTLPass::initializeInterfaceOutPorts(
     cmt2::ModuleOp module, ModuleConversionContext &ctx, OpBuilder &builder) {
 
   auto firrtlModule = ctx.getFIRRTLModule();
@@ -2019,10 +2017,10 @@ void LowerCmt2ToFIRRTLPass::invalidateInterfaceOutPorts(
                ++portIdx)
             if (firrtlModule.getPortName(portIdx) == enableName) {
               Value enablePort = firrtlModule.getArgument(portIdx);
-              auto firrtlType = UIntType::get(builder.getContext(), 1);
-              Value invalid =
-                  builder.create<InvalidValueOp>(module.getLoc(), firrtlType);
-              builder.create<ConnectOp>(module.getLoc(), enablePort, invalid);
+              Value zero = builder.create<ConstantOp>(
+                  module.getLoc(), UIntType::get(builder.getContext(), 1),
+                  APInt(1, 0));
+              builder.create<ConnectOp>(module.getLoc(), enablePort, zero);
             }
         }
       }
