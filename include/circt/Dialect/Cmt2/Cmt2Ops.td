@@ -318,6 +318,34 @@ def ModuleOp : Cmt2Op<
 
     void getAsmBlockArgumentNames(mlir::Region &region,
                                   mlir::OpAsmSetValueNameFn setNameFn);
+    
+    cmt2::InstanceOp getInstanceOfName(llvm::StringRef instName) {
+      for (auto &op : getBodyRegion().front()) {
+        if (auto inst = dyn_cast<cmt2::InstanceOp>(op)) {
+          if (inst.getSymNameAttr().getValue() == instName) {
+            return inst;
+          }
+        }
+      }
+      return nullptr;
+    }
+
+        
+    cmt2::InterfaceDeclOp getItfcDeclOfName(llvm::StringRef declName) {
+      for (auto &op : getBodyRegion().front()) {
+        if (auto decl = dyn_cast<cmt2::InterfaceDeclOp>(op)) {
+          if (decl.getSymNameAttr().getValue() == declName) {
+            return decl;
+          }
+        }
+      }
+      return nullptr;
+    }
+
+  }];
+
+  let extraClassDefinition = [{
+
   }];
 
 }
@@ -686,6 +714,18 @@ def InterfaceOp : Cmt2Op<
   let regions = (region SizedRegion<1>:$body);
   let assemblyFormat = [{
     $sym_name $body attr-dict
+  }];
+
+  let extraClassDeclaration = [{
+    // get functionlike of the give name
+    Cmt2FunctionLike getFunctionOfName(StringAttr name) {
+      for (auto &op: getBodyRegion().front()) {
+        if (auto func = llvm::dyn_cast<Cmt2FunctionLike>(op))
+          if (func.functionNameAttr() == name)
+            return func;
+      }
+      return nullptr;
+    }
   }];
 }
 

@@ -151,13 +151,23 @@ def Cmt2FunctionLike : OpInterface<"Cmt2FunctionLike"> {
       Returns the name of the i-th function argument
     }],
     "std::string", "getArgumentName", (ins "unsigned":$index),
-    /*methodBody=*/[{ return llvm::cast<mlir::StringAttr>($_op.getArgNames()[index]).getValue().str(); }]>,
+    /*methodBody=*/[{
+      if (index < $_op.getArgNames().size()) 
+        return llvm::cast<mlir::StringAttr>($_op.getArgNames()[index]).getValue().str(); 
+      else
+        return "arg" + std::to_string(index);
+    }]>,
 
     InterfaceMethod<[{
       Returns the name of the i-th function results
     }],
     "std::string", "getResultName", (ins "unsigned":$index),
-    /*methodBody=*/[{ return llvm::cast<mlir::StringAttr>($_op.getBodyResNames()[index]).getValue().str(); }]>,
+    /*methodBody=*/[{ 
+      if (index < $_op.getBodyResNames().size()) 
+        return llvm::cast<mlir::StringAttr>($_op.getBodyResNames()[index]).getValue().str(); 
+      else
+        return "result" + std::to_string(index);
+    }]>,
 
 
     //===------------------------------------------------------------------===//
