@@ -559,7 +559,8 @@ LogicalResult LowerCmt2ToFIRRTLPass::createInstances(
     if (!instOp)
       continue;
 
-    LLVM_DEBUG(llvm::dbgs() << "create instance " << instOp.getSymName() << "\n");
+    LLVM_DEBUG(llvm::dbgs()
+               << "create instance " << instOp.getSymName() << "\n");
 
     auto referencedModule = instOp.getReferencedModule();
     if (!referencedModule)
@@ -630,7 +631,8 @@ LogicalResult LowerCmt2ToFIRRTLPass::createInstances(
       }
     }
 
-    LLVM_DEBUG(llvm::dbgs() << "create instance " << instOp.getSymName() << " succeed \n");
+    LLVM_DEBUG(llvm::dbgs()
+               << "create instance " << instOp.getSymName() << " succeed \n");
   }
 
   return success();
@@ -687,10 +689,15 @@ void LowerCmt2ToFIRRTLPass::initializeUnconnectedInputPorts(
 
     Value instPort = firrtlInst.getResult(i);
     Type portType = instPort.getType();
-
-    Value invalid =
-        builder.create<InvalidValueOp>(firrtlInst.getLoc(), portType);
-    builder.create<ConnectOp>(firrtlInst.getLoc(), instPort, invalid);
+    auto ftype = dyn_cast<UIntType>(portType);
+    Value init;
+    if (ftype && (ftype.getWidth().value_or(1) == 1)) {
+      init = builder.create<ConstantOp>(firrtlInst.getLoc(), ftype,
+                                        APInt(1, 0));
+    } else {
+      init = builder.create<InvalidValueOp>(firrtlInst.getLoc(), portType);
+    }
+    builder.create<ConnectOp>(firrtlInst.getLoc(), instPort, init);
   }
 }
 
