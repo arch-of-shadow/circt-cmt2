@@ -559,7 +559,7 @@ LogicalResult LowerCmt2ToFIRRTLPass::createInstances(
     if (!instOp)
       continue;
 
-    llvm::dbgs() << "create instance " << instOp.getSymName() << "\n";
+    LLVM_DEBUG(llvm::dbgs() << "create instance " << instOp.getSymName() << "\n");
 
     auto referencedModule = instOp.getReferencedModule();
     if (!referencedModule)
@@ -607,11 +607,11 @@ LogicalResult LowerCmt2ToFIRRTLPass::createInstances(
     // Initialize unconnected input ports with default values
     initializeUnconnectedInputPorts(firrtlInst, ports, connectedPorts, builder);
 
-    llvm::dbgs() << "initializeUnconnectedInputPorts done\n";
+    LLVM_DEBUG(llvm::dbgs() << "initializeUnconnectedInputPorts done\n");
     // Process interface bindings (referenceMOdule must be ModuleOp)
     if (auto interfaceBinds = instOp.getInterfaceBinds()) {
-      llvm::dbgs() << "process " << (*interfaceBinds).size()
-                   << "interface bindings\n";
+      // llvm::dbgs() << "process " << (*interfaceBinds).size()
+      //              << " interface bindings\n";
       if (auto referenceMod =
               dyn_cast<cmt2::ModuleOp>(referencedModule.getOperation())) {
         for (auto bindAttr : *interfaceBinds) {
@@ -630,7 +630,7 @@ LogicalResult LowerCmt2ToFIRRTLPass::createInstances(
       }
     }
 
-    llvm::dbgs() << "create instance " << instOp.getSymName() << " succeed \n";
+    LLVM_DEBUG(llvm::dbgs() << "create instance " << instOp.getSymName() << " succeed \n");
   }
 
   return success();
@@ -1819,9 +1819,9 @@ LogicalResult LowerCmt2ToFIRRTLPass::connectInterfaceBinding(
         defValue = firrtlMod.getArgument(*defIdx);
     }
 
-    llvm::dbgs() << "declInst has " << declInst.getNumResults()
-                 << " ports, and we will connect the " << *declIdx
-                 << "-th one; and defValue is " << defValue << "\n";
+    // llvm::dbgs() << "declInst has " << declInst.getNumResults()
+    //              << " ports, and we will connect the " << *declIdx
+    //              << "-th one; and defValue is " << defValue << "\n";
 
     builder.create<ConnectOp>(loc, declInst.getResult(*declIdx), defValue);
   }
