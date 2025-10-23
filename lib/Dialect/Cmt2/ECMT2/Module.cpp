@@ -388,7 +388,7 @@ cmt2::ecmt2::Value *Module::addValue(llvm::StringRef name,
   return ptr;
 }
 
-InterfaceDecl *Module::defineInterface(llvm::StringRef name,
+InterfaceDecl *Module::defineInterfaceDecl(llvm::StringRef name,
                                       llvm::StringRef type) {
   auto iface = std::make_unique<InterfaceDecl>(name, type, this);
   auto *ptr = iface.get();

@@ -109,7 +109,7 @@ public:
   Value *addValue(llvm::StringRef name, llvm::ArrayRef<mlir::Type> results);
 
   /// Interface support
-  InterfaceDecl *defineInterface(llvm::StringRef name, llvm::StringRef type);
+  InterfaceDecl *defineInterfaceDecl(llvm::StringRef name, llvm::StringRef type);
   InterfaceDef *defineInterfaceDef(llvm::StringRef name,
                                   llvm::StringRef type);
 

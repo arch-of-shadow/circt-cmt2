@@ -22,7 +22,7 @@ void InterfaceDeclBase::init(Cmt2Module *parent, llvm::StringRef name,
   interfaceType_ = interfaceType.str();
 
   // Create low-level interface declaration
-  lowLevelDecl_ = parent->lowLevelModule()->defineInterface(name, interfaceType);
+  lowLevelDecl_ = parent->lowLevelModule()->defineInterfaceDecl(name, interfaceType);
 }
 
 llvm::SmallVector<mlir::Value, 4>

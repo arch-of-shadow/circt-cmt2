@@ -89,7 +89,7 @@ int main() {
   Reset childRst = childMod->addResetArgument("rst");
 
   // Declare reader interface (inward interface - child needs this from parent)
-  auto *childReaderDecl = childMod->defineInterface("reader", "Reader");
+  auto *childReaderDecl = childMod->defineInterfaceDecl("reader", "Reader");
 
   // Create register instance in child
   auto *childReg = childMod->addInstance(
@@ -151,7 +151,7 @@ int main() {
   Reset helloRst = helloMod->addResetArgument("rst");
 
   // Declare writer interface (outward interface - for external connections)
-  auto *writerDecl = helloMod->defineInterface("writer", "Writer");
+  auto *writerDecl = helloMod->defineInterfaceDecl("writer", "Writer");
 
   // Create register instance @x
   auto *xReg = helloMod->addInstance(

@@ -61,7 +61,7 @@ public:
 
     // Declare reader interface (inward - child needs this from parent)
     // Still using low-level API for interfaces (no declarative wrapper yet)
-    auto *readerDecl = module->defineInterface("reader", "Reader");
+    auto *readerDecl = module->defineInterfaceDecl("reader", "Reader");
 
     // Add set method using low-level API temporarily
     // TODO: Use declarative Method<UInt32, UInt32> once we have proper type support
@@ -146,7 +146,7 @@ public:
     auto *module = lowLevelModule();
 
     // Declare writer interface (outward - for external connections)
-    auto *writerDecl = module->defineInterface("writer", "Writer");
+    auto *writerDecl = module->defineInterfaceDecl("writer", "Writer");
 
     // Define ReadX interface that binds x.read to Reader.getData
     auto *readXDef = module->defineInterfaceDef("ReadX", "Reader");

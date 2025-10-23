@@ -191,7 +191,7 @@ int main() {
     // ------------------------------------------------------------------------
     // This DECLARES that ModuleA needs access to a Calculator interface
     // The actual binding will happen at the top level
-    auto *calculatorDecl = moduleA->defineInterface("calc", "Calculator");
+    auto *calculatorDecl = moduleA->defineInterfaceDecl("calc", "Calculator");
 
     // ------------------------------------------------------------------------
     // Method: processData - demonstrates using ModuleB's calculator interface
