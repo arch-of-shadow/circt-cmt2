@@ -323,8 +323,9 @@ target_include_directories(ecmt2-stl-demo
   ${CIRCT_MAIN_INCLUDE_DIR}
 )
 
-
-add_executable(ecmt2-virtual-interface-demo virtual_interface_demo.cpp)
+add_executable(ecmt2-virtual-interface-demo
+  virtual_interface_demo.cpp
+)
 
 target_link_libraries(ecmt2-virtual-interface-demo
   PRIVATE
@@ -335,7 +336,7 @@ target_link_libraries(ecmt2-virtual-interface-demo
   MLIRSupport
 )
 
-target_include_directories(ecmt2-virtual-interface-demo 
+target_include_directories(ecmt2-virtual-interface-demo
   PRIVATE
   ${CIRCT_MAIN_INCLUDE_DIR}
 )

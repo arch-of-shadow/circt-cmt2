@@ -52,6 +52,7 @@ int main() {
   llvm::outs() << "=== Minimal ECMT2 STL Demo ===\n";
 
   // === Create STL Modules using Factory Methods ===
+  // auto *wireModule = STLLibrary::createWireDefaultModule(32, 0, circuit);
 
   // 1. Create a 32-bit register module
   // auto *reg32Module = STLLibrary::createRegModule(32, 0, circuit);
@@ -71,7 +72,7 @@ int main() {
   // auto *fifo32Inst = mainMod->addInstance("my_fifo", fifo32Module, {} /* {clk.getValue(), rst.getValue()} */);
   // llvm::outs() << "✓ Instantiated FIFO: my_fifo\n";
   
-  // 3. Create a memory module (1KB, 32-bit data, 10-bit address)
+  // // 3. Create a memory module (1KB, 32-bit data, 10-bit address)
   // auto *mainMod = circuit.addModule("STLMinimalDemoModule");
   // auto loc = mainMod->getLoc();
   // auto &b = mainMod->getBuilder();

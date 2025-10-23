@@ -608,6 +608,7 @@ LogicalResult LowerCmt2ToFIRRTLPass::createInstances(
     llvm::dbgs() << "initializeUnconnectedInputPorts done\n";
     // Process interface bindings (referenceMOdule must be ModuleOp)
     if (auto interfaceBinds = instOp.getInterfaceBinds()) {
+      llvm::dbgs() << "process " << (*interfaceBinds).size() << "interface bindings\n";
       if (auto referenceMod =
               dyn_cast<cmt2::ModuleOp>(referencedModule.getOperation())) {
         for (auto bindAttr : *interfaceBinds) {
@@ -619,7 +620,7 @@ LogicalResult LowerCmt2ToFIRRTLPass::createInstances(
           }
         }
 
-      } else {
+      } else if ((*interfaceBinds).size() > 0) {
         llvm::dbgs() << "reach here?\n";
         return instOp.emitError(
             "instantiate extern module with interface, illegal!");

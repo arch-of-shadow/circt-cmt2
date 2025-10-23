@@ -224,3 +224,116 @@ if (circuit.runCmt2ToFIRRTLPipeline().succeeded()) {
 5. **Hardware Generation**: The interface system generates proper FIRRTL with proper wiring and arbitration
 
 This pattern enables building complex, modular hardware designs where components communicate through well-defined interfaces rather than ad-hoc wiring.
+
+## Virtual Interface Pattern: Accessing Outer Module Methods
+
+### Overview
+
+The virtual interface pattern enables inner modules (submodules) to directly access methods from outer/parent modules through well-defined interfaces. This creates upward communication channels where submodules can request data or services from their container modules.
+
+### Key Architecture Pattern
+
+```
+TopModule (Outer Module)
+├── Interface Definition & Implementation
+└── ModuleB (Inner Module)
+    └── Interface Declaration (needs outer interface)
+```
+
+### Pattern Implementation
+
+#### 1. Interface Definition (at Circuit Level)
+```cpp
+// Define the interface that inner modules can use
+auto *outerInterface = circuit.addInterface("OuterInterface");
+outerInterface->addMethod("get_outer_data", {},
+    {circt::firrtl::UIntType::get(&context, 32)});
+```
+
+#### 2. Interface Declaration (Inner Module - Consumer)
+```cpp
+// ModuleB declares that it needs access to OuterInterface
+auto *outerInterfaceDecl = moduleB->defineInterface("outer_iface", "OuterInterface");
+
+// ModuleB's method directly calls the outer interface
+auto *writeDataMethod = moduleB->addMethod("write_data", {}, {});
+writeDataMethod->body([&](mlir::OpBuilder &builder, auto args) {
+    // Direct call to outer interface to get data
+    auto outerData = outerInterfaceDecl->callMethod("get_outer_data", {}, builder);
+
+    // Use the data from outer module
+    moduleBReg->callMethod("write", {outerData[0]}, builder);
+    builder.create<circt::cmt2::ReturnOp>(moduleB->getLoc(), mlir::ValueRange{});
+});
+```
+
+#### 3. Interface Implementation (Outer Module - Provider)
+```cpp
+// ModuleA implements the interface method
+auto *getOuterDataMethod = moduleA->addMethod("get_outer_data_impl", {},
+    {circt::firrtl::UIntType::get(&context, 32)});
+
+getOuterDataMethod->body([&](mlir::OpBuilder &builder, auto args) {
+    // Provide data to inner modules
+    Signal testData = UInt::constant(42, 32, builder, moduleA->getLoc());
+    builder.create<circt::cmt2::ReturnOp>(moduleA->getLoc(),
+        mlir::ValueRange{testData.getValue()});
+});
+```
+
+#### 4. Interface Binding (at Module Instantiation)
+```cpp
+// Bind the interface implementation to the inner module's declaration
+auto *outerInterfaceDef = moduleA->defineInterfaceDef("ModuleBOuter", "OuterInterface");
+outerInterfaceDef->bind("this", "get_outer_data_impl", "get_outer_data");
+outerInterfaceDef->finalize();
+
+// Instantiate ModuleB with interface binding
+auto *moduleBInst = moduleA->addInstance(
+    "submodule_b", moduleB,
+    {moduleAClk.getValue(), moduleARst.getValue()},
+    {{"ModuleBOuter", "outer_iface"}});  // Bind interface
+```
+
+### Key Benefits
+
+1. **Encapsulation**: Inner modules are self-contained and handle their own data acquisition
+2. **Decoupling**: Inner modules don't need to know implementation details of outer modules
+3. **Flexibility**: Different outer modules can provide different implementations of the same interface
+4. **Hierarchical Communication**: Enables both downward (parent→child) and upward (child→parent) communication
+5. **Testability**: Interfaces can be mocked or stubbed for testing
+
+### Data Flow Pattern
+
+```
+Outer World
+    ↓ (interface implementation)
+TopModule.get_outer_data_impl()
+    ↓ (interface binding)
+OuterInterface.get_outer_data()
+    ↓ (interface call)
+ModuleB.write_data() calls outerInterfaceDecl->callMethod()
+    ↓
+ModuleB Internal Register
+```
+
+### Use Cases
+
+- **Configuration**: Submodules requesting configuration from parent modules
+- **Data Sources**: Inner modules getting data from external sources through parent
+- **Resource Management**: Submodules requesting shared resources from container
+- **Service Access**: Inner modules accessing services provided by outer modules
+
+### Current Status
+
+**Note**: The interface binding mechanism (`defineInterfaceDef` and `bind`) has been designed and demonstrated in the virtual interface demo, but is not yet fully implemented in the CMT2 framework. The pattern shows the intended architecture for upward module communication.
+
+### Complete Example
+
+See `circt/examples/ECMT2/virtual_interface_demo.cpp` for a complete working example that demonstrates:
+- Inner module (ModuleB) declaring interface dependency
+- Outer module (ModuleA) implementing interface methods
+- Interface binding connecting declaration to implementation
+- Submodule directly accessing outer module methods through interface
+
+This virtual interface pattern enables sophisticated hierarchical designs where modules can communicate both downward and upward through well-defined, type-safe interfaces.
