@@ -24,45 +24,41 @@ using namespace mlir;
 // ModuleConflictMatrix
 //===----------------------------------------------------------------------===//
 
+Relationship ModuleConflictMatrix::rev(Relationship rel) {
+  if (rel == Relationship::SequentialAfter) 
+    return Relationship::SequentialBefore;
+  else if (rel == Relationship::SequentialBefore)
+    return Relationship::SequentialAfter;
+  else
+    return rel;
+}
+
 FunctionPair ModuleConflictMatrix::normalizePair(StringAttr fx,
                                                    StringAttr fy) const {
-  // Always store in sorted order to ensure consistent lookup
-  if (fx.getValue() < fy.getValue())
-    return {fx, fy};
-  return {fy, fx};
+  return {fx, fy};
 }
 
 void ModuleConflictMatrix::setRelationship(StringAttr fx, StringAttr fy,
                                             Relationship rel) {
   auto pair = normalizePair(fx, fy);
-
-  // If the pair is the same function, only allow ConflictFree or Conflict
-  if (fx == fy && rel == Relationship::SequentialBefore) {
-    // fx < fx doesn't make sense, treat as ConflictFree
-    rel = Relationship::ConflictFree;
-  }
+  auto rev_pair = normalizePair(fy, fx);
 
   // Check for existing relationship
   auto it = relationships.find(pair);
-  if (it != relationships.end()) {
-    // Merge relationships according to rule 3:
-    // If fx < fy AND fy < fx, then fx <> fy
-    if (it->second == Relationship::SequentialBefore &&
-        rel == Relationship::SequentialBefore) {
-      // Check if we're setting the reverse relationship
-      bool isReverse = (pair.first == fy && pair.second == fx);
-      if (isReverse) {
-        it->second = Relationship::Conflict;
-        return;
-      }
-    }
+  auto rev_it = relationships.find(rev_pair);
 
-    // Conflict takes precedence
-    if (rel == Relationship::Conflict) {
-      it->second = Relationship::Conflict;
+  if (it != relationships.end()) {
+    assert(rev_it != relationships.end());
+    // don't override conflictfree
+    if (it->second == Relationship::ConflictFree) {
+      return;
+    } else {
+      it->second = rel;
+      rev_it->second = rev(rel);
     }
   } else {
     relationships[pair] = rel;
+    relationships[rev_pair] = rev(rel);
   }
 }
 
@@ -80,9 +76,16 @@ bool ModuleConflictMatrix::hasRelationship(StringAttr fx, StringAttr fy) const {
   return relationships.count(pair) > 0;
 }
 
+
+
 void ModuleConflictMatrix::print(llvm::raw_ostream &os,
                                   StringAttr moduleName) const {
-  os << "Conflict Matrix for @" << moduleName.getValue() << ":\n";
+  print(os, moduleName.getValue());
+}
+
+                                  
+void ModuleConflictMatrix::print(llvm::raw_ostream &os, llvm::StringRef moduleName) const {
+  os << "Conflict Matrix for @" << moduleName << ":\n";
 
   // Group by relationship type
   SmallVector<FunctionPair> conflicts, conflictFrees, sequentials;
@@ -96,6 +99,8 @@ void ModuleConflictMatrix::print(llvm::raw_ostream &os,
       break;
     case Relationship::SequentialBefore:
       sequentials.push_back(pair);
+      break;
+    case Relationship::SequentialAfter:
       break;
     }
   }
@@ -142,8 +147,8 @@ void ConflictMatrixAnalysis::runAnalysis() {
   LLVM_DEBUG(llvm::dbgs() << "=== ConflictMatrix Analysis ===\n");
 
   // First, parse conflict matrices from external modules
-  circuit.walk([&](ExtModuleFirrtlOp extModule) {
-    parseExternalModuleMatrix(extModule);
+  circuit.walk([&](Cmt2ModuleLike module) {
+    parseModuleLikeMatrix(module);
   });
 
   // Build InstanceGraph and CallInfo for efficient lookup
@@ -191,16 +196,26 @@ void ConflictMatrixAnalysis::runAnalysis() {
   LLVM_DEBUG(llvm::dbgs() << "=== ConflictMatrix Analysis Complete ===\n");
 }
 
-void ConflictMatrixAnalysis::parseExternalModuleMatrix(
-    ExtModuleFirrtlOp extModule) {
-  StringAttr moduleName = extModule.getSymNameAttr();
+void ConflictMatrixAnalysis::parseModuleLikeMatrix(
+    Cmt2ModuleLike module) {
+  StringAttr moduleName = module.moduleNameAttr();
   LLVM_DEBUG(llvm::dbgs() << "Parsing external module: @"
                           << moduleName.getValue() << "\n");
 
   ModuleConflictMatrix matrix;
+  
+  module.body().walk([&](Cmt2FunctionLike func) {
+    matrix.setRelationship(
+      func.functionNameAttr(), 
+      func.functionNameAttr(), 
+      func.getFunctionKind() == FunctionKind::Value && func.getNumArguments() == 0 ?
+        Relationship::ConflictFree:
+        Relationship::Conflict
+    );
+  });
 
   // Parse "conflict" attribute: [[@f1, @f2], ...]
-  if (auto conflictAttr = extModule->getAttrOfType<ArrayAttr>("conflict")) {
+  if (auto conflictAttr = module->getAttrOfType<ArrayAttr>("conflict")) {
     for (auto pairAttr : conflictAttr) {
       if (auto array = dyn_cast<ArrayAttr>(pairAttr)) {
         if (array.size() == 2) {
@@ -215,7 +230,7 @@ void ConflictMatrixAnalysis::parseExternalModuleMatrix(
   }
 
   // Parse "conflictFree" attribute: [[@f1, @f2], ...]
-  if (auto cfAttr = extModule->getAttrOfType<ArrayAttr>("conflictFree")) {
+  if (auto cfAttr = module->getAttrOfType<ArrayAttr>("conflictFree")) {
     for (auto pairAttr : cfAttr) {
       if (auto array = dyn_cast<ArrayAttr>(pairAttr)) {
         if (array.size() == 2) {
@@ -230,7 +245,7 @@ void ConflictMatrixAnalysis::parseExternalModuleMatrix(
   }
 
   // Parse "sequenceBefore" attribute: [[@f1, @f2], ...] means f1 < f2
-  if (auto sbAttr = extModule->getAttrOfType<ArrayAttr>("sequenceBefore")) {
+  if (auto sbAttr = module->getAttrOfType<ArrayAttr>("sequenceBefore")) {
     for (auto pairAttr : sbAttr) {
       if (auto array = dyn_cast<ArrayAttr>(pairAttr)) {
         if (array.size() == 2) {
@@ -254,7 +269,8 @@ void ConflictMatrixAnalysis::inferModuleMatrix(
   LLVM_DEBUG(llvm::dbgs() << "Inferring matrix for module: @"
                           << moduleName.getValue() << "\n");
 
-  ModuleConflictMatrix matrix;
+  ModuleConflictMatrix matrix = matrices.lookup_or(moduleName, ModuleConflictMatrix{});
+
 
   // Get call info for this module
   const ModuleCallInfo *modCallInfo = callInfo.getModuleCallInfo(moduleName.getValue());
@@ -264,21 +280,24 @@ void ConflictMatrixAnalysis::inferModuleMatrix(
     return;
   }
 
-  // Collect all function names in this module
-  SmallVector<StringAttr> functionNames;
+  // Collect all function names, isAction, hasArgs in this module
+  SmallVector<std::tuple<StringAttr, bool, bool>> functionNames;
   for (auto &op : module.getBody().front().getOperations()) {
     if (auto funcLike = dyn_cast<Cmt2FunctionLike>(&op)) {
-      functionNames.push_back(funcLike.functionNameAttr());
+      functionNames.push_back({funcLike.functionNameAttr(), 
+        !(funcLike.getFunctionKind() == FunctionKind::Value),
+        funcLike.getFunctionType().getNumInputs() > 0
+      });
     }
   }
 
   // Infer relationships between all pairs of functions
   for (size_t i = 0; i < functionNames.size(); ++i) {
     for (size_t j = i; j < functionNames.size(); ++j) {
-      StringAttr fxName = functionNames[i];
-      StringAttr fyName = functionNames[j];
+      auto &[fxName, isAction, hasArgs] = functionNames[i];
+      auto &[fyName, isActionY, hasArgsY] = functionNames[j];
 
-      Relationship rel = inferRelationship(fxName, fyName, *modCallInfo, instanceMap);
+      Relationship rel = inferRelationship(fxName, fyName, isAction && isActionY, hasArgs && hasArgsY, *modCallInfo, instanceMap, matrix);
       matrix.setRelationship(fxName, fyName, rel);
 
       LLVM_DEBUG({
@@ -293,6 +312,9 @@ void ConflictMatrixAnalysis::inferModuleMatrix(
         case Relationship::SequentialBefore:
           relStr = "<";
           break;
+        case Relationship::SequentialAfter:
+          relStr = ">";
+          break;
         }
         llvm::dbgs() << "  @" << fxName.getValue() << " " << relStr << " @"
                      << fyName.getValue() << "\n";
@@ -304,11 +326,16 @@ void ConflictMatrixAnalysis::inferModuleMatrix(
 }
 
 Relationship ConflictMatrixAnalysis::inferRelationship(
-    StringAttr fxName, StringAttr fyName, const ModuleCallInfo &callInfo,
-    const DenseMap<StringAttr, InstanceOp> &instanceMap) {
+    StringAttr fxName, StringAttr fyName, bool isAction, bool hasArguments, 
+    const ModuleCallInfo &callInfo,
+    const DenseMap<StringAttr, InstanceOp> &instanceMap,
+    const ModuleConflictMatrix& matrix) {
   // If same function, default to ConflictFree
   if (fxName == fyName) {
-    return Relationship::ConflictFree;
+    if (isAction || hasArguments) 
+      return Relationship::Conflict;
+    else  
+      return Relationship::ConflictFree;
   }
 
   // Get calls for both functions from CallInfo
@@ -323,10 +350,12 @@ Relationship ConflictMatrixAnalysis::inferRelationship(
   const EntityCallInfo &callsFx = fxCallsIt->second;
   const EntityCallInfo &callsFy = fyCallsIt->second;
 
+  auto existing_relation = matrix.getRelationship(fxName, fyName);
+
   // Track inferred relationships
-  bool hasConflict = false;
-  bool hasSB_fx_fy = false; // fx < fy
-  bool hasSB_fy_fx = false; // fy < fx
+  bool hasConflict = existing_relation == Relationship::Conflict;
+  bool hasSB_fx_fy = existing_relation == Relationship::SequentialBefore; // fx < fy
+  bool hasSA_fx_fy = existing_relation == Relationship::SequentialAfter; // fx > fy
 
   // Apply inference rules
   for (const auto &cx : callsFx) {
@@ -353,6 +382,7 @@ Relationship ConflictMatrixAnalysis::inferRelationship(
 
       StringAttr refModuleName = refModule.moduleNameAttr();
       const auto *refMatrix = getModuleMatrix(refModuleName);
+
       if (!refMatrix)
         continue;
 
@@ -372,17 +402,15 @@ Relationship ConflictMatrixAnalysis::inferRelationship(
       else if (instRel == Relationship::SequentialBefore) {
         hasSB_fx_fy = true;
       }
-
-      // Check reverse direction for Rule 3
-      Relationship reverseRel = refMatrix->getRelationship(cyMethod, cxMethod);
-      if (reverseRel == Relationship::SequentialBefore) {
-        hasSB_fy_fx = true;
+      // Rule 3: If i.m0 > i.m1, then fx > fy
+      else if (instRel == Relationship::SequentialBefore) {
+        hasSA_fx_fy = true;
       }
     }
   }
 
   // Rule 3: If fx < fy AND fy < fx, then fx <> fy
-  if (hasSB_fx_fy && hasSB_fy_fx) {
+  if (hasSB_fx_fy && hasSA_fx_fy) {
     hasConflict = true;
   }
 
@@ -391,8 +419,9 @@ Relationship ConflictMatrixAnalysis::inferRelationship(
     return Relationship::Conflict;
   } else if (hasSB_fx_fy) {
     return Relationship::SequentialBefore;
-  }
-
+  } else if (hasSA_fx_fy) {
+    return Relationship::SequentialAfter;
+  } else
   // Rule 4: Default is ConflictFree
   return Relationship::ConflictFree;
 }

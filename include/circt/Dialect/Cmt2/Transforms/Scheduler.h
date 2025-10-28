@@ -26,6 +26,13 @@
 namespace circt {
 namespace cmt2 {
 
+/// Information about a preventing firing relationship
+struct PreventingFiring {
+  StringAttr earlier;      // Function scheduled earlier (c[i] > c[j])
+  StringAttr later;        // Function scheduled later (c[i] < c[j] in schedule)
+  Relationship relationship; // Type: SequentialBefore or Conflict
+};
+
 /// A schedule group contains functions that have Conflict or SequentialBefore
 /// relationships. Functions in the group are ordered to satisfy constraints.
 class ScheduleGroup {
@@ -38,6 +45,17 @@ public:
   /// Get all functions in this group (in scheduled order)
   const SmallVector<StringAttr> &getFunctions() const { return functions; }
 
+  /// Add a preventing firing violation
+  void addPreventingFiring(StringAttr earlier, StringAttr later,
+                           Relationship rel) {
+    preventingFirings.push_back({earlier, later, rel});
+  }
+  
+  /// Get all preventing firing violations
+  const SmallVector<PreventingFiring> &getPreventingFirings() const {
+    return preventingFirings;
+  }
+
   /// Get the number of functions
   size_t size() const { return functions.size(); }
 
@@ -46,14 +64,10 @@ public:
 
 private:
   SmallVector<StringAttr> functions;
+  SmallVector<PreventingFiring> preventingFirings;
 };
 
-/// Information about a preventing firing relationship
-struct PreventingFiring {
-  StringAttr earlier;      // Function scheduled earlier (c[i] > c[j])
-  StringAttr later;        // Function scheduled later (c[i] < c[j] in schedule)
-  Relationship relationship; // Type: SequentialBefore or Conflict
-};
+
 
 /// Result of scheduling analysis for a module
 class ModuleScheduleResult {
@@ -66,23 +80,11 @@ public:
   /// Get all schedule groups
   const SmallVector<ScheduleGroup> &getGroups() const { return groups; }
 
-  /// Add a preventing firing violation
-  void addPreventingFiring(StringAttr earlier, StringAttr later,
-                           Relationship rel) {
-    preventingFirings.push_back({earlier, later, rel});
-  }
-
-  /// Get all preventing firing violations
-  const SmallVector<PreventingFiring> &getPreventingFirings() const {
-    return preventingFirings;
-  }
-
   /// Print the schedule result
   void print(llvm::raw_ostream &os, StringAttr moduleName) const;
 
 private:
   SmallVector<ScheduleGroup> groups;
-  SmallVector<PreventingFiring> preventingFirings;
 };
 
 /// SchedulerAnalysis: computes scheduling for all modules
@@ -171,7 +173,7 @@ private:
   /// Returns violations where c[i] > c[j] but f[i] < f[j] or f[i] <> f[j]
   void analyzePreventingFiring(const SmallVector<StringAttr> &scheduledFunctions,
                                const ModuleConflictMatrix *matrix,
-                               ModuleScheduleResult &result);
+                               ScheduleGroup &group);
 
   /// Check if a function is a private function (only called via @this)
   /// Returns true if the function should not be in the schedule

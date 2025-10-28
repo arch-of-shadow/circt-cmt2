@@ -66,7 +66,7 @@ def ExtModuleFirrtlOp : Cmt2Op<
     NoTerminator,
     OpAsmOpInterface,
     DeclareOpInterfaceMethods<InstanceGraphModuleOpInterface>,
-    Cmt2ModuleLike,
+    Cmt2ModuleLike
   ]> {
   let summary = "Binding a `firrtl.module` to Cmt2 ExtModule.";
   let description = [{
@@ -156,8 +156,9 @@ def BindValueOp : Cmt2Op<
     Arguments:
     - `sym_name`: The symbol name of the value method being bound.
     - `function_type`: The function type of the value method.
-    - `ready`: The signal (attribute) representing the ready output of the value method.
-    - `data`: The signal (attribute) representing the data output of the value method.
+    - `readyName`: The signal (attribute) representing the ready output of the value method.
+    - `argNames`: Names of the shared input arguments.
+    - `bodyResNames`: Names of the body region results.
 
     Results: None
 
@@ -165,7 +166,8 @@ def BindValueOp : Cmt2Op<
     ```mlir
     cmt2.bind.value @valMethod : (i1) -> (i32) [
       ready = %readySignal,
-      data = %dataSignal
+      arguments = [%input1, %input2],
+      results = [%output1, %output2]
     ]
     ```
   }];
@@ -173,14 +175,19 @@ def BindValueOp : Cmt2Op<
   let arguments = (ins
     SymbolNameAttr:$sym_name,
     TypeAttrOf<FunctionType>:$function_type,
-    OptionalAttr<FlatSymbolRefAttr>:$ready,
-    FlatSymbolRefArrayAttr:$data,
+    OptionalAttr<StrAttr>:$readyName,
+    StrArrayAttr:$argNames,
+    StrArrayAttr:$bodyResNames,
     OptionalAttr<ArrayAttr>:$arg_attrs,
     OptionalAttr<ArrayAttr>:$res_attrs
   );
 
   let assemblyFormat = [{
-    $sym_name `:` $function_type `[` (`ready` `=` $ready^ `,`)? `data` `=` $data `]` attr-dict
+    $sym_name `:` $function_type `[` 
+      (`ready` `=` $readyName^ `,`)? 
+      `arguments` `=` $argNames `,` 
+      `results` `=` $bodyResNames 
+    `]` attr-dict
   }];
 
   let extraClassDefinition = [{
@@ -206,10 +213,10 @@ def BindMethodOp : Cmt2Op<
     Arguments:
     - `sym_name`: The symbol name of the method being bound.
     - `function_type`: The function type of the method.
-    - `enable`: The signal (attribute) representing the enable input of the method.
-    - `ready`: The signal (attribute) representing the ready output of the method.
-    - `inputs`: The signals (attributes) representing the input arguments of the method.
-    - `outputs`: The signals (attributes) representing the output results of the method.
+    - `enableName`: The signal (attribute) representing the enable input of the method.
+    - `readyName`: The signal (attribute) representing the ready output of the method.
+    - `argNames`: Names of the shared input arguments.
+    - `bodyResNames`: Names of the body region results.
 
     Results: None
 
@@ -218,8 +225,8 @@ def BindMethodOp : Cmt2Op<
     cmt2.bind.method @methodName : (i1, i32) -> (i1, i32) [
       enable = %enableSignal,
       ready = %readySignal,
-      inputs = [%input1, %input2],
-      outputs = [%output1, %output2]
+      arguments = [%input1, %input2],
+      results = [%output1, %output2]
     ]
     ```
   }];
@@ -227,20 +234,20 @@ def BindMethodOp : Cmt2Op<
   let arguments = (ins
     SymbolNameAttr:$sym_name,
     TypeAttrOf<FunctionType>:$function_type,
-    OptionalAttr<FlatSymbolRefAttr>:$enable,
-    OptionalAttr<FlatSymbolRefAttr>:$ready,
-    FlatSymbolRefArrayAttr:$inputs,
-    FlatSymbolRefArrayAttr:$outputs,
+    OptionalAttr<StrAttr>:$enableName,
+    OptionalAttr<StrAttr>:$readyName,
+    StrArrayAttr:$argNames,
+    StrArrayAttr:$bodyResNames,
     OptionalAttr<ArrayAttr>:$arg_attrs,
     OptionalAttr<ArrayAttr>:$res_attrs
   );
 
   let assemblyFormat = [{
     $sym_name `:` $function_type `[` 
-      (`enable` `=` $enable^ `,`)? 
-      (`ready` `=` $ready^ `,`)? 
-      `inputs` `=` $inputs `,` 
-      `outputs` `=` $outputs 
+      (`enable` `=` $enableName^ `,`)? 
+      (`ready` `=` $readyName^ `,`)? 
+      `arguments` `=` $argNames `,` 
+      `results` `=` $bodyResNames 
     `]` attr-dict
   }];
 
@@ -311,6 +318,34 @@ def ModuleOp : Cmt2Op<
 
     void getAsmBlockArgumentNames(mlir::Region &region,
                                   mlir::OpAsmSetValueNameFn setNameFn);
+    
+    cmt2::InstanceOp getInstanceOfName(llvm::StringRef instName) {
+      for (auto &op : getBodyRegion().front()) {
+        if (auto inst = dyn_cast<cmt2::InstanceOp>(op)) {
+          if (inst.getSymNameAttr().getValue() == instName) {
+            return inst;
+          }
+        }
+      }
+      return nullptr;
+    }
+
+        
+    cmt2::InterfaceDeclOp getItfcDeclOfName(llvm::StringRef declName) {
+      for (auto &op : getBodyRegion().front()) {
+        if (auto decl = dyn_cast<cmt2::InterfaceDeclOp>(op)) {
+          if (decl.getSymNameAttr().getValue() == declName) {
+            return decl;
+          }
+        }
+      }
+      return nullptr;
+    }
+
+  }];
+
+  let extraClassDefinition = [{
+
   }];
 
 }
@@ -437,7 +472,7 @@ def RuleOp : Cmt2Op<
     - `sym_name`: The symbol name of the rule being defined.
     - `function_type`: The function type of the rule (typically no arguments).
     - `argNames`: Names of the shared input arguments (typically empty for rules).
-    - `guardResName`: Optional name of the guard result (i1).
+    - `bodyResNames`: Names of the body region results.
 
     Results: None
 
@@ -458,7 +493,7 @@ def RuleOp : Cmt2Op<
     SymbolNameAttr:$sym_name,
     TypeAttrOf<FunctionType>:$function_type,
     StrArrayAttr:$argNames,
-    OptionalAttr<StrAttr>:$guardResName,
+    StrArrayAttr:$bodyResNames,
     OptionalAttr<ArrayAttr>:$arg_attrs,
     OptionalAttr<ArrayAttr>:$res_attrs
   );
@@ -499,7 +534,6 @@ def ValueOp : Cmt2Op<
     - `sym_name`: The symbol name of the value method being defined.
     - `function_type`: The function type of the value method (shared arguments).
     - `argNames`: Names of the shared input arguments.
-    - `guardResName`: Optional name of the guard result (i1).
     - `bodyResNames`: Names of the body region results.
 
     Results: None
@@ -521,7 +555,6 @@ def ValueOp : Cmt2Op<
     SymbolNameAttr:$sym_name,
     TypeAttrOf<FunctionType>:$function_type,
     StrArrayAttr:$argNames,
-    OptionalAttr<StrAttr>:$guardResName,
     StrArrayAttr:$bodyResNames,
     OptionalAttr<ArrayAttr>:$arg_attrs,
     OptionalAttr<ArrayAttr>:$res_attrs
@@ -544,6 +577,7 @@ def ValueOp : Cmt2Op<
 def MethodOp : Cmt2Op<
   "method", [
     ParentOneOf<["ModuleOp", "InterfaceOp"]>,
+    IsolatedFromAbove,
     DeclareOpInterfaceMethods<Cmt2FunctionLike, ["getCallableRegion", "getArgumentTypes", "getResultTypes", "isExternal", "getFunctionBody"]>,
     Symbol,
     SingleBlockImplicitTerminator<"ReturnOp">,
@@ -557,7 +591,6 @@ def MethodOp : Cmt2Op<
     - `sym_name`: The symbol name of the method being defined.
     - `function_type`: The function type of the method (shared arguments).
     - `argNames`: Names of the shared input arguments.
-    - `guardResName`: Optional name of the guard result (i1).
     - `bodyResNames`: Names of the body region results.
 
     Results: None
@@ -572,7 +605,6 @@ def MethodOp : Cmt2Op<
     SymbolNameAttr:$sym_name,
     TypeAttrOf<FunctionType>:$function_type,
     StrArrayAttr:$argNames,
-    OptionalAttr<StrAttr>:$guardResName,
     StrArrayAttr:$bodyResNames,
     OptionalAttr<ArrayAttr>:$arg_attrs,
     OptionalAttr<ArrayAttr>:$res_attrs
@@ -600,7 +632,7 @@ def MethodOp : Cmt2Op<
 
 def CallOp : Cmt2Op<
   "call", [
-    ParentOneOf<["MethodOp", "RuleOp", "ValueOp"]>,
+    ParentOneOf<["MethodOp", "RuleOp", "ValueOp", "IfOp"]>,
     DeclareOpInterfaceMethods<CallOpInterface>
   ]> {
   let summary = "Call Method/Value.";
@@ -683,6 +715,18 @@ def InterfaceOp : Cmt2Op<
   let assemblyFormat = [{
     $sym_name $body attr-dict
   }];
+
+  let extraClassDeclaration = [{
+    // get functionlike of the give name
+    Cmt2FunctionLike getFunctionOfName(StringAttr name) {
+      for (auto &op: getBodyRegion().front()) {
+        if (auto func = llvm::dyn_cast<Cmt2FunctionLike>(op))
+          if (func.functionNameAttr() == name)
+            return func;
+      }
+      return nullptr;
+    }
+  }];
 }
 
 def InterfaceDefOp : Cmt2Op<
@@ -743,13 +787,107 @@ def InterfaceDeclOp : Cmt2Op<
     cmt2.interface.decl @sym_name : @interface attr-dict
     ```
   }];
-  let arguments = (ins 
+  let arguments = (ins
     SymbolRefAttr:$interface,
     SymbolNameAttr:$sym_name
   );
   let assemblyFormat = [{
     $sym_name `:` $interface attr-dict
   }];
+}
+
+def IfOp : Cmt2Op<
+  "if", [
+    ParentOneOf<["MethodOp", "RuleOp", "ValueOp", "IfOp"]>,
+    NoRegionArguments
+  ]> {
+  let summary = "Conditional execution with if-else branches.";
+  let description = [{
+    The `cmt2.if` operation provides conditional execution within rules, methods,
+    and values. It has a required `then` region and an optional `else` region,
+    similar to standard if-else control flow.
+
+    Arguments:
+    - `condition`: A value of type !firrtl.uint<1> that determines which branch executes.
+
+    Results:
+    - Optional results if both branches return values of the same types.
+
+    Regions:
+    - `thenRegion`: The region executed when the condition is true.
+    - `elseRegion`: Optional region executed when the condition is false.
+
+    Assembly format:
+    ```mlir
+    cmt2.if %condition : !firrtl.uint<1> {
+      // then region
+    } else {
+      // else region (optional)
+    }
+    ```
+
+    For operations with results:
+    ```mlir
+    %result = cmt2.if %condition : !firrtl.uint<1> -> !firrtl.uint<32> {
+      %val = ...
+      cmt2.yield %val : !firrtl.uint<32>
+    } else {
+      %val = ...
+      cmt2.yield %val : !firrtl.uint<32>
+    }
+    ```
+  }];
+  let arguments = (ins
+    FIRRTLBaseType:$condition
+  );
+  let results = (outs Variadic<FIRRTLBaseType>:$results);
+  let regions = (region
+    SizedRegion<1>:$thenRegion,
+    AnyRegion:$elseRegion
+  );
+
+  let assemblyFormat = [{
+    $condition `:` qualified(type($condition))
+    (`->` type($results)^)?
+    $thenRegion
+    (`else` $elseRegion^)?
+    attr-dict
+  }];
+
+  let hasVerifier = 1;
+}
+
+def YieldOp : Cmt2Op<
+  "yield", [
+    Terminator,
+    ParentOneOf<["IfOp"]>,
+    ReturnLike
+  ]> {
+  let summary = "Yield values from an if region.";
+  let description = [{
+    The `cmt2.yield` operation is used to yield values from the regions of
+    a `cmt2.if` operation. It marks the end of a region and provides the
+    values to be returned.
+
+    Arguments:
+    - `results`: The values to yield from the region.
+
+    Assembly format:
+    ```mlir
+    cmt2.yield %result1, %result2, ... : <type>
+    ```
+  }];
+  let arguments = (ins
+    Variadic<FIRRTLBaseType>:$results
+  );
+
+  let assemblyFormat = [{
+    attr-dict ($results^ `:` qualified(type($results)))?
+  }];
+
+  let builders = [OpBuilder<(ins), [{
+    build($_builder, $_state, mlir::ValueRange());
+  }]>];
 }
 
 #endif // CIRCT_DIALECT_Cmt2_Cmt2OPS_TD

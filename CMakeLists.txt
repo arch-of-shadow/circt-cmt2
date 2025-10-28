@@ -643,6 +643,7 @@ if(CIRCT_INCLUDE_TOOLS)
   add_subdirectory(tools)
 endif()
 add_subdirectory(frontends)
+add_subdirectory(examples)
 
 if (CIRCT_INCLUDE_TESTS)
   # Test directories are added after everything else so their cmake files can

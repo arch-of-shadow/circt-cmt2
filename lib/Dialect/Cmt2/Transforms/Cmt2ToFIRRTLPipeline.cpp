@@ -11,6 +11,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "circt/Conversion/Cmt2ToFIRRTL.h"
+#include "circt/Dialect/Cmt2/Cmt2Ops.h"
 #include "circt/Dialect/Cmt2/Cmt2Passes.h"
 #include "mlir/Pass/Pass.h"
 
@@ -18,15 +19,18 @@ using namespace circt;
 using namespace cmt2;
 
 void circt::cmt2::populateCmt2ToFIRRTLPipeline(mlir::OpPassManager &pm) {
+  // Steps 1-3 run on CircuitOp, so create a nested pass manager
+  auto &circuitPM = pm.nest<cmt2::CircuitOp>();
+
   // Step 1: Inline all private functions (functions called via @this)
-  pm.addPass(createInlinePrivateFuncs());
+  circuitPM.addPass(createInlinePrivateFuncs());
 
   // Step 2: Verify that all private functions have been inlined
-  pm.addPass(createVerifyPrivateFuncsInlined());
+  circuitPM.addPass(createVerifyPrivateFuncsInlined());
 
   // Step 3: Verify that call sequences respect conflict matrix constraints
-  pm.addPass(createVerifyCallSequence());
+  circuitPM.addPass(createVerifyCallSequence());
 
-  // Step 4: Convert Cmt2 to FIRRTL
+  // Step 4: Convert Cmt2 to FIRRTL (runs on ModuleOp)
   pm.addPass(circt::createLowerCmt2ToFIRRTLPass());
 }

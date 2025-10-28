@@ -1,0 +1,140 @@
+//===- Instance.cpp - ECMT2 Instance Implementation -------------*- C++ -*-===//
+//
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+//
+//===----------------------------------------------------------------------===//
+
+#include "circt/Dialect/Cmt2/ECMT2/Instance.h"
+#include "circt/Dialect/Cmt2/Cmt2Ops.h"
+#include "circt/Dialect/FIRRTL/FIRRTLOps.h"
+#include "mlir/IR/BuiltinOps.h"
+
+using namespace circt;
+using namespace cmt2::ecmt2;
+
+#define DEBUG_TYPE "cmt2-api"
+//===----------------------------------------------------------------------===//
+// Instance
+//===----------------------------------------------------------------------===//
+
+Instance::Instance(llvm::StringRef name, ModuleBase *moduleType,
+                   llvm::ArrayRef<mlir::Value> args, Module *parent,
+                   llvm::ArrayRef<std::pair<std::string, std::string>>
+                       interfaceBindings)
+    : name_(name.str()), moduleType_(moduleType), loc_(parent->getLoc()) {
+
+  auto &builder = parent->getBuilder();
+
+  // Build interface bindings attribute
+  // Format: [[@interfaceDef, @interfaceDecl], ...]
+  llvm::SmallVector<mlir::Attribute> bindingAttrs;
+  for (auto &binding : interfaceBindings) {
+    auto bindingArray = builder.getArrayAttr({
+        mlir::FlatSymbolRefAttr::get(builder.getContext(), binding.first),
+        mlir::FlatSymbolRefAttr::get(builder.getContext(), binding.second)
+    });
+    bindingAttrs.push_back(bindingArray);
+  }
+
+  // Create instance operation
+  auto nameAttr = builder.getStringAttr(name);
+  auto moduleNameAttr =
+      mlir::FlatSymbolRefAttr::get(builder.getContext(),
+                                    moduleType->getName());
+
+  // Determine result types (empty for now, will be inferred)
+  llvm::SmallVector<mlir::Type> resultTypes;
+
+  op_ = builder.create<cmt2::InstanceOp>(
+      loc_, nameAttr, args, moduleNameAttr,
+      builder.getArrayAttr(bindingAttrs));
+}
+
+llvm::SmallVector<mlir::Value, 4>
+Instance::callMethod(llvm::StringRef method, llvm::ArrayRef<mlir::Value> args,
+                     mlir::OpBuilder &builder) {
+  return CallBuilder::buildCall(this, method, args, builder, loc_);
+}
+
+llvm::SmallVector<mlir::Value, 4>
+Instance::callValue(llvm::StringRef value, mlir::OpBuilder &builder) {
+  return CallBuilder::buildCall(this, value, {}, builder, loc_);
+}
+
+//===----------------------------------------------------------------------===//
+// CallBuilder
+//===----------------------------------------------------------------------===//
+
+llvm::SmallVector<mlir::Value, 4>
+CallBuilder::buildCall(Instance *instance, llvm::StringRef entity,
+                       llvm::ArrayRef<mlir::Value> args,
+                       mlir::OpBuilder &builder, mlir::Location loc) {
+
+  // Build callee symbol reference: @instance
+  auto instanceSym = mlir::SymbolRefAttr::get(builder.getContext(),
+                                                instance->getName());
+
+  // Build method/value symbol reference: @entity
+  auto entitySym = mlir::SymbolRefAttr::get(builder.getContext(), entity);
+
+  // Determine result types by looking up the bind operation and FIRRTL module
+  llvm::SmallVector<mlir::Type> resultTypes;
+
+  // Check if the module is an external FIRRTL module by checking the operation type
+  auto moduleOp = instance->moduleType_->getOperation();
+  auto modulelike = dyn_cast<Cmt2ModuleLike>(moduleOp);
+  auto entityAttr = builder.getStringAttr(entity);
+  auto func = modulelike.lookupFunctionLike(entityAttr);
+
+  LLVM_DEBUG(func.print(llvm::dbgs()));
+
+  for (auto resultType : func.getResultTypes()) {
+    resultTypes.push_back(resultType);
+  }
+
+  LLVM_DEBUG(llvm::dbgs() << "\nbuild call on instance " << instance->getName() << " 's function " << func.functionName() << " (is value? " << (func.getFunctionKind() == FunctionKind::Value) << ")\n");
+  LLVM_DEBUG(llvm::dbgs() << "\tnumber of function results: " << func.getNumResults() << "\n");
+  LLVM_DEBUG(llvm::dbgs() << "\tnumber of function's result types: " << resultTypes.size() << "\n");
+
+  // Create call operation
+  // CallOp signature: (TypeRange outputs, ValueRange inputs, callee, methodOrValue, arg_attrs, res_attrs)
+  auto callOp =
+      builder.create<cmt2::CallOp>(loc, resultTypes, args, instanceSym, entitySym,
+                                   builder.getArrayAttr({}), builder.getArrayAttr({}));
+
+  // Return results
+  llvm::SmallVector<mlir::Value, 4> results;
+  for (auto result : callOp.getResults())
+    results.push_back(result);
+
+  LLVM_DEBUG(llvm::dbgs() << "\tnumber of result of callOp: "<< results.size() << "\n");
+  return results;
+}
+
+llvm::SmallVector<mlir::Value, 4>
+CallBuilder::buildThisCall(llvm::StringRef entity,
+                           llvm::ArrayRef<mlir::Value> args,
+                           mlir::OpBuilder &builder, mlir::Location loc) {
+
+  // Build callee symbol reference: @this
+  auto thisSym =
+      mlir::SymbolRefAttr::get(builder.getContext(), "this");
+
+  // Build entity symbol reference: @entity
+  auto entitySym = mlir::SymbolRefAttr::get(builder.getContext(), entity);
+
+  // Create call operation
+  // CallOp signature: (TypeRange outputs, ValueRange inputs, callee, methodOrValue, arg_attrs, res_attrs)
+  llvm::SmallVector<mlir::Type> resultTypes;  // Empty, will be inferred
+  auto callOp =
+      builder.create<cmt2::CallOp>(loc, resultTypes, args, thisSym, entitySym,
+                                   builder.getArrayAttr({}), builder.getArrayAttr({}));
+
+  // Return results
+  llvm::SmallVector<mlir::Value, 4> results;
+  for (auto result : callOp.getResults())
+    results.push_back(result);
+  return results;
+}

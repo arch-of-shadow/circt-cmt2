@@ -19,5 +19,6 @@ add_circt_dialect_library(CIRCTCmt2
   MLIRIR
   CIRCTHW
   )
-  
+
 add_subdirectory(Transforms)
+add_subdirectory(ECMT2)

@@ -1,0 +1,342 @@
+# ECMT2 Examples
+
+add_executable(ecmt2-counter-example
+  counter_example.cpp
+)
+
+target_link_libraries(ecmt2-counter-example
+  PRIVATE
+  CIRCTECMT2
+  CIRCTCmt2
+  CIRCTFIRRTL
+  MLIRIR
+  MLIRSupport
+)
+
+target_include_directories(ecmt2-counter-example
+  PRIVATE
+  ${CIRCT_MAIN_INCLUDE_DIR}
+)
+
+add_executable(ecmt2-hello-example
+  hello_example.cpp
+)
+
+target_link_libraries(ecmt2-hello-example
+  PRIVATE
+  CIRCTECMT2
+  CIRCTCmt2
+  CIRCTFIRRTL
+  MLIRIR
+  MLIRSupport
+)
+
+target_include_directories(ecmt2-hello-example
+  PRIVATE
+  ${CIRCT_MAIN_INCLUDE_DIR}
+)
+
+add_executable(ecmt2-counter-highlevel-example
+  counter_highlevel.cpp
+)
+
+target_link_libraries(ecmt2-counter-highlevel-example
+  PRIVATE
+  CIRCTECMT2
+  CIRCTCmt2
+  CIRCTFIRRTL
+  MLIRIR
+  MLIRSupport
+)
+
+target_include_directories(ecmt2-counter-highlevel-example
+  PRIVATE
+  ${CIRCT_MAIN_INCLUDE_DIR}
+)
+
+add_executable(ecmt2-declarative-example
+  declarative_example.cpp
+)
+
+target_link_libraries(ecmt2-declarative-example
+  PRIVATE
+  CIRCTECMT2
+  CIRCTCmt2
+  CIRCTFIRRTL
+  MLIRIR
+  MLIRSupport
+)
+
+target_include_directories(ecmt2-declarative-example
+  PRIVATE
+  ${CIRCT_MAIN_INCLUDE_DIR}
+)
+
+add_executable(ecmt2-hello-highlevel-example
+  hello_highlevel.cpp
+)
+
+target_link_libraries(ecmt2-hello-highlevel-example
+  PRIVATE
+  CIRCTECMT2
+  CIRCTCmt2
+  CIRCTFIRRTL
+  MLIRIR
+  MLIRSupport
+)
+
+target_include_directories(ecmt2-hello-highlevel-example
+  PRIVATE
+  ${CIRCT_MAIN_INCLUDE_DIR}
+)
+
+add_executable(ecmt2-declarative-instance-example
+  declarative_instance_example.cpp
+)
+
+target_link_libraries(ecmt2-declarative-instance-example
+  PRIVATE
+  CIRCTECMT2
+  CIRCTCmt2
+  CIRCTFIRRTL
+  MLIRIR
+  MLIRSupport
+)
+
+target_include_directories(ecmt2-declarative-instance-example
+  PRIVATE
+  ${CIRCT_MAIN_INCLUDE_DIR}
+)
+
+
+add_executable(ecmt2-hello-v3-example
+  hello_v3.cpp
+)
+
+target_link_libraries(ecmt2-hello-v3-example
+  PRIVATE
+  CIRCTECMT2
+  CIRCTCmt2
+  CIRCTFIRRTL
+  MLIRIR
+  MLIRSupport
+)
+
+target_include_directories(ecmt2-hello-v3-example
+  PRIVATE
+  ${CIRCT_MAIN_INCLUDE_DIR}
+)
+
+add_executable(ecmt2-bundle-vector-example
+  bundle_vector_example.cpp
+)
+
+target_link_libraries(ecmt2-bundle-vector-example
+  PRIVATE
+  CIRCTECMT2
+  CIRCTCmt2
+  CIRCTFIRRTL
+  MLIRIR
+  MLIRSupport
+)
+
+target_include_directories(ecmt2-bundle-vector-example
+  PRIVATE
+  ${CIRCT_MAIN_INCLUDE_DIR}
+)
+
+add_executable(ecmt2-bundle-vector-highlevel-example
+  bundle_vector_highlevel_example.cpp
+)
+
+target_link_libraries(ecmt2-bundle-vector-highlevel-example
+  PRIVATE
+  CIRCTECMT2
+  CIRCTCmt2
+  CIRCTFIRRTL
+  MLIRIR
+  MLIRSupport
+)
+
+target_include_directories(ecmt2-bundle-vector-highlevel-example
+  PRIVATE
+  ${CIRCT_MAIN_INCLUDE_DIR}
+)
+
+add_executable(ecmt2-two-counter-if-example
+  two_counter_if_example.cpp
+)
+
+target_link_libraries(ecmt2-two-counter-if-example
+  PRIVATE
+  CIRCTECMT2
+  CIRCTCmt2
+  CIRCTFIRRTL
+  MLIRIR
+  MLIRSupport
+)
+
+target_include_directories(ecmt2-two-counter-if-example
+  PRIVATE
+  ${CIRCT_MAIN_INCLUDE_DIR}
+)
+
+add_executable(ecmt2-two-counter-if-highlevel-example
+  two_counter_if_highlevel.cpp
+)
+
+target_link_libraries(ecmt2-two-counter-if-highlevel-example
+  PRIVATE
+  CIRCTECMT2
+  CIRCTCmt2
+  CIRCTFIRRTL
+  MLIRIR
+  MLIRSupport
+)
+
+target_include_directories(ecmt2-two-counter-if-highlevel-example
+  PRIVATE
+  ${CIRCT_MAIN_INCLUDE_DIR}
+)
+
+add_executable(ecmt2-signal-args-example
+  signal_args_example.cpp
+)
+
+target_link_libraries(ecmt2-signal-args-example
+  PRIVATE
+  CIRCTECMT2
+  CIRCTCmt2
+  CIRCTFIRRTL
+  MLIRIR
+  MLIRSupport
+)
+
+target_include_directories(ecmt2-signal-args-example
+  PRIVATE
+  ${CIRCT_MAIN_INCLUDE_DIR}
+)
+
+# add_executable(ecmt2-fifo2-module
+#   fifo2_module.cpp
+# )
+
+# target_link_libraries(ecmt2-fifo2-module
+#   PRIVATE
+#   CIRCTECMT2
+#   CIRCTCmt2
+#   CIRCTFIRRTL
+#   MLIRIR
+#   MLIRSupport
+# )
+
+# target_include_directories(ecmt2-fifo2-module
+#   PRIVATE
+#   ${CIRCT_MAIN_INCLUDE_DIR}
+# )
+
+# add_executable(ecmt2-fifo1-push-module
+#   fifo1_push_module.cpp
+# )
+
+# target_link_libraries(ecmt2-fifo1-push-module
+#   PRIVATE
+#   CIRCTECMT2
+#   CIRCTCmt2
+#   CIRCTFIRRTL
+#   MLIRIR
+#   MLIRSupport
+# )
+
+# target_include_directories(ecmt2-fifo1-push-module
+#   PRIVATE
+#   ${CIRCT_MAIN_INCLUDE_DIR}
+# )
+
+add_executable(ecmt2-fifo-library
+  fifo_library.cpp
+)
+
+target_link_libraries(ecmt2-fifo-library
+  PRIVATE
+  CIRCTECMT2
+  CIRCTCmt2
+  CIRCTFIRRTL
+  MLIRIR
+  MLIRSupport
+)
+
+target_include_directories(ecmt2-fifo-library
+  PRIVATE
+  ${CIRCT_MAIN_INCLUDE_DIR}
+)
+
+add_executable(ecmt2-mem1r1w-example
+  mem1r1w_example.cpp
+)
+
+target_link_libraries(ecmt2-mem1r1w-example
+  PRIVATE
+  CIRCTECMT2
+  CIRCTCmt2
+  CIRCTFIRRTL
+  MLIRIR
+  MLIRSupport
+)
+
+target_include_directories(ecmt2-mem1r1w-example
+  PRIVATE
+  ${CIRCT_MAIN_INCLUDE_DIR}
+)
+
+add_executable(ecmt2-interface-demo
+  interface_demo.cpp
+)
+
+target_link_libraries(ecmt2-interface-demo
+  PRIVATE
+  CIRCTECMT2
+  CIRCTCmt2
+  CIRCTFIRRTL
+  MLIRIR
+  MLIRSupport
+)
+
+target_include_directories(ecmt2-interface-demo
+  PRIVATE
+  ${CIRCT_MAIN_INCLUDE_DIR}
+)
+
+add_executable(ecmt2-stl-demo stl_minimal_demo.cpp)
+
+target_link_libraries(ecmt2-stl-demo
+  PRIVATE
+  CIRCTECMT2
+  CIRCTCmt2
+  CIRCTFIRRTL
+  MLIRIR
+  MLIRSupport
+)
+
+target_include_directories(ecmt2-stl-demo
+  PRIVATE
+  ${CIRCT_MAIN_INCLUDE_DIR}
+)
+
+add_executable(ecmt2-virtual-interface-demo
+  virtual_interface_demo.cpp
+)
+
+target_link_libraries(ecmt2-virtual-interface-demo
+  PRIVATE
+  CIRCTECMT2
+  CIRCTCmt2
+  CIRCTFIRRTL
+  MLIRIR
+  MLIRSupport
+)
+
+target_include_directories(ecmt2-virtual-interface-demo
+  PRIVATE
+  ${CIRCT_MAIN_INCLUDE_DIR}
+)

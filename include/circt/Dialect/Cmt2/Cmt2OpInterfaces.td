@@ -135,13 +135,40 @@ def Cmt2FunctionLike : OpInterface<"Cmt2FunctionLike"> {
       Returns the number of function arguments.
     }],
     "unsigned", "getNumArguments", (ins),
-    /*methodBody=*/[{ return $_op.getArgumentTypes().size(); }]>,
+    /*methodBody=*/[{ return $_op.getArgNames().size(); }]>,
 
     InterfaceMethod<[{
       Returns the number of function results.
     }],
     "unsigned", "getNumResults", (ins),
-    /*methodBody=*/[{ return $_op.getResultTypes().size(); }]>,
+    /*methodBody=*/[{ return $_op.getBodyResNames().size(); }]>,
+
+    //===------------------------------------------------------------------===//
+    // Argument and result names
+    //===------------------------------------------------------------------===//
+
+    InterfaceMethod<[{
+      Returns the name of the i-th function argument
+    }],
+    "std::string", "getArgumentName", (ins "unsigned":$index),
+    /*methodBody=*/[{
+      if (index < $_op.getArgNames().size()) 
+        return llvm::cast<mlir::StringAttr>($_op.getArgNames()[index]).getValue().str(); 
+      else
+        return "arg" + std::to_string(index);
+    }]>,
+
+    InterfaceMethod<[{
+      Returns the name of the i-th function results
+    }],
+    "std::string", "getResultName", (ins "unsigned":$index),
+    /*methodBody=*/[{ 
+      if (index < $_op.getBodyResNames().size()) 
+        return llvm::cast<mlir::StringAttr>($_op.getBodyResNames()[index]).getValue().str(); 
+      else
+        return "result" + std::to_string(index);
+    }]>,
+
 
     //===------------------------------------------------------------------===//
     // Argument attributes
@@ -312,8 +339,14 @@ def Cmt2ModuleLike : OpInterface<"Cmt2ModuleLike"> {
     (ins "::mlir::StringAttr":$name),
     /*methodBody=*/[{
       return llvm::dyn_cast_or_null<Cmt2FunctionLike>(::mlir::SymbolTable::lookupSymbolIn($_op, name));
-    }]>
+    }]>,
 
+    //===------------------------------------------------------------------===//
+    // Body
+    //===------------------------------------------------------------------===//
+    InterfaceMethod<"Body region",
+    "::mlir::Region&", "body", (ins),
+    [{ return $_op.getBodyRegion(); }]>
 
     //===------------------------------------------------------------------===//
     // Instance
@@ -324,4 +357,3 @@ def Cmt2ModuleLike : OpInterface<"Cmt2ModuleLike"> {
   ];
   let verify = [{}];
 }
-

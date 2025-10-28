@@ -101,8 +101,8 @@ static void printModuleLikeOp(OpAsmPrinter &p, Operation *op,
   p << ' ';
   p.printRegion(body, /*printEntryBlockArgs=*/false);
 
-  // Print trailing attributes after body
-  p.printOptionalAttrDictWithKeyword(op->getAttrs(), elidedAttrs);
+  // Print trailing attributes after body (without "attributes" keyword)
+  p.printOptionalAttrDict(op->getAttrs(), elidedAttrs);
 }
 
 static void getAsmBlockArgumentNamesImpl(ArrayAttr argNames, Region &region,
@@ -151,7 +151,7 @@ void ExtModuleFirrtlOp::print(OpAsmPrinter &p) {
   p << " : ";
   p.printSymbolName(getExtModuleName());
 
-  SmallVector<StringRef> elidedAttrs = {"sym_name", "ext_module_name", "argNames"};
+  SmallVector<StringRef> elidedAttrs = {"sym_name", "ext_module_name", "argNames", "methods", "values"};
   printModuleLikeOp(p, *this, getArgNames(), getBody(), elidedAttrs);
 }
 
@@ -166,8 +166,7 @@ void ExtModuleFirrtlOp::getAsmBlockArgumentNames(Region &region,
 
 // Helper function to parse function-like operations with two regions
 static ParseResult parseFunctionLikeOp(OpAsmParser &parser,
-                                        OperationState &result,
-                                        bool hasBodyResults) {
+                                        OperationState &result) {
   auto builder = parser.getBuilder();
 
   // Parse the symbol name
@@ -214,12 +213,10 @@ static ParseResult parseFunctionLikeOp(OpAsmParser &parser,
   result.addAttribute("function_type", TypeAttr::get(funcType));
 
   // Initialize empty bodyResNames
-  if (hasBodyResults) {
-    SmallVector<Attribute> resNames;
-    for (size_t i = 0; i < bodyResTypes.size(); ++i)
-      resNames.push_back(builder.getStringAttr("res" + std::to_string(i)));
-    result.addAttribute("bodyResNames", builder.getArrayAttr(resNames));
-  }
+  SmallVector<Attribute> resNames;
+  for (size_t i = 0; i < bodyResTypes.size(); ++i)
+    resNames.push_back(builder.getStringAttr("res" + std::to_string(i)));
+  result.addAttribute("bodyResNames", builder.getArrayAttr(resNames));
 
   // Parse optional attribute dict
   if (parser.parseOptionalAttrDictWithKeyword(result.attributes))
@@ -323,7 +320,7 @@ static void printFunctionLikeOp(OpAsmPrinter &p, Operation *op,
 //===----------------------------------------------------------------------===//
 
 ParseResult RuleOp::parse(OpAsmParser &parser, OperationState &result) {
-  return parseFunctionLikeOp(parser, result, /*hasBodyResults=*/false);
+  return parseFunctionLikeOp(parser, result);
 }
 
 void RuleOp::print(OpAsmPrinter &p) {
@@ -350,7 +347,7 @@ Region &RuleOp::getFunctionBody() { return getBody(); }
 //===----------------------------------------------------------------------===//
 
 ParseResult MethodOp::parse(OpAsmParser &parser, OperationState &result) {
-  return parseFunctionLikeOp(parser, result, /*hasBodyResults=*/true);
+  return parseFunctionLikeOp(parser, result);
 }
 
 void MethodOp::print(OpAsmPrinter &p) {
@@ -377,7 +374,7 @@ Region &MethodOp::getFunctionBody() { return getBody(); }
 //===----------------------------------------------------------------------===//
 
 ParseResult ValueOp::parse(OpAsmParser &parser, OperationState &result) {
-  return parseFunctionLikeOp(parser, result, /*hasBodyResults=*/true);
+  return parseFunctionLikeOp(parser, result);
 }
 
 void ValueOp::print(OpAsmPrinter &p) {
@@ -606,66 +603,68 @@ llvm::SmallVector<InstanceOp, 4> getInstances(ModuleOp module) {
   return instances;
 }
 
-// Commented out legacy helper functions
-// Cmt2ModuleLike getReferenceModule(InstanceOp instance) {
-//   auto circuit =
-//       instance.getOperation()->getParentOfType<circt::cmt2::CircuitOp>();
-//   if (!circuit)
-//     return nullptr;
-//   return circuit.lookupSymbol<Cmt2ModuleLike>(instance.moduleNameAttr());
-// }
-// llvm::SmallVector<Cmt2FunctionLike, 4> getFunctions(Cmt2ModuleLike module) {
-//   llvm::SmallVector<Cmt2FunctionLike, 4> functions;
-//   module.getOperation()->walk(
-//       [&](Cmt2FunctionLike function) { functions.push_back(function); });
-//   return functions;
-// }
-// llvm::SmallVector<MethodOp, 4> getMethods(ModuleOp module) {
-//   llvm::SmallVector<MethodOp, 4> methods;
-//   module.getOperation()->walk(
-//       [&](MethodOp method) { methods.push_back(method); });
-//   return methods;
-// }
+//===----------------------------------------------------------------------===//
+// IfOp
+//===----------------------------------------------------------------------===//
 
-// llvm::SmallVector<ValueOp, 4> getValues(ModuleOp module) {
-//   llvm::SmallVector<ValueOp, 4> values;
-//   module.getOperation()->walk([&](ValueOp value) { values.push_back(value); });
-//   return values;
-// }
+LogicalResult IfOp::verify() {
+  // Check if the condition type is a 1-bit FIRRTL type
+  auto conditionType = getCondition().getType();
+  if (auto uintType = llvm::dyn_cast<circt::firrtl::UIntType>(conditionType)) {
+    if (!uintType.getWidth() || uintType.getWidth().value() != 1) {
+      return emitOpError("condition must be a 1-bit unsigned integer type");
+    }
+  } else if (auto sintType = llvm::dyn_cast<circt::firrtl::SIntType>(conditionType)) {
+    if (!sintType.getWidth() || sintType.getWidth().value() != 1) {
+      return emitOpError("condition must be a 1-bit type");
+    }
+  } else {
+    return emitOpError("condition must be a FIRRTL integer type");
+  }
 
-// llvm::SmallVector<RuleOp, 4> getRules(ModuleOp module) {
-//   llvm::SmallVector<RuleOp, 4> rules;
-//   module.getOperation()->walk([&](RuleOp rule) { rules.push_back(rule); });
-//   return rules;
-// }
+  // If the operation has results, both regions must be present and yield matching types
+  if (!getResults().empty()) {
+    if (getElseRegion().empty()) {
+      return emitOpError("must have an else region if it has results");
+    }
 
-// llvm::SmallVector<InstanceOp, 4> getInstances(ModuleOp module) {
-//   llvm::SmallVector<InstanceOp, 4> instances;
-//   module.getOperation()->walk(
-//       [&](InstanceOp instance) { instances.push_back(instance); });
-//   return instances;
-// }
+    // Check that both regions end with a yield operation
+    auto checkYield = [&](Region &region, StringRef regionName) -> LogicalResult {
+      if (region.empty() || region.front().empty()) {
+        return emitOpError(regionName + " region must not be empty");
+      }
 
-// llvm::SmallVector<BindMethodOp, 4> getMethods(ExtModuleOp module) {
-//   llvm::SmallVector<BindMethodOp, 4> methods;
-//   module.getOperation()->walk(
-//       [&](BindMethodOp method) { methods.push_back(method); });
-//   return methods;
-// }
+      auto *terminator = region.front().getTerminator();
+      auto yieldOp = llvm::dyn_cast_or_null<YieldOp>(terminator);
+      if (!yieldOp) {
+        return emitOpError(regionName + " region must end with cmt2.yield");
+      }
 
-// llvm::SmallVector<BindValueOp, 4> getValues(ExtModuleOp module) {
-//   llvm::SmallVector<BindValueOp, 4> values;
-//   module.getOperation()->walk(
-//       [&](BindValueOp value) { values.push_back(value); });
-//   return values;
-// }
+      // Check yield types match if results
+      if (yieldOp.getResults().size() != getResults().size()) {
+        return emitOpError(regionName + " region yields " +
+                          std::to_string(yieldOp.getResults().size()) +
+                          " values but " + std::to_string(getResults().size()) +
+                          " expected");
+      }
 
-// llvm::SmallVector<InstanceOp, 4> getInstances(Cmt2ModuleLike module) {
-//   llvm::SmallVector<InstanceOp, 4> instances;
-//   module.getOperation()->walk(
-//       [&](InstanceOp instance) { instances.push_back(instance); });
-//   return instances;
-// }
+      for (auto [yieldType, resultType] : llvm::zip(
+              yieldOp.getResults().getTypes(), getResults().getTypes())) {
+        if (yieldType != resultType) {
+          return emitOpError(regionName + " region yield type mismatch");
+        }
+      }
+      return success();
+    };
+
+    if (failed(checkYield(getThenRegion(), "then")))
+      return failure();
+    if (failed(checkYield(getElseRegion(), "else")))
+      return failure();
+  }
+
+  return success();
+}
 
 } // namespace cmt2
 } // namespace circt

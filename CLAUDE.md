@@ -6,6 +6,26 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 CIRCT (Circuit IR Compilers and Tools) is an experimental project applying MLIR and LLVM development methodology to hardware design tools. The project provides various dialects for representing and transforming hardware designs, from high-level abstractions down to Verilog generation.
 
+## Cmt2 Architecture
+
+### Document (`docs/Dialects/Cmt2`)
+
+ecmt2-Class-API.md  ecmt2-EDSL.md  _index.md  INTERFACE_HELPERS_SUMMARY.md  ModuleLibrary.md  RationaleCmt2.md
+
+### Include (`include/circt/Dialect/Cmt2`)
+
+CMakeLists.txt    Cmt2Attributes.td  Cmt2Dialect.td      Cmt2OpInterfaces.td  Cmt2Ops.td    Cmt2Passes.td  Cmt2Types.h   ECMT2
+Cmt2Attributes.h  Cmt2Dialect.h      Cmt2OpInterfaces.h  Cmt2Ops.h            Cmt2Passes.h  Cmt2.td        Cmt2Types.td  Transforms
+
+### Lib (`lib/Dialect/Cmt2`)
+
+CMakeLists.txt  Cmt2Dialect.cpp  Cmt2OpInterfaces.cpp  Cmt2Ops.cpp  ECMT2  ModuleLibrary  Transforms
+
+### Test (`test/Dialect/Cmt2`)
+
+
+### Example (`example/ECMT2`)
+
 ## Key Architecture
 
 ### Dialect Structure

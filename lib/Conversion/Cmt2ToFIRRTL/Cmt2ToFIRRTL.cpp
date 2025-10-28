@@ -1,4 +1,5 @@
-//===- Cmt2ToFIRRTL.cpp - Cmt2 to FIRRTL conversion --------------*- C++ -*-===//
+//===- Cmt2ToFIRRTL.cpp - Cmt2 to FIRRTL conversion --------------*- C++
+//-*-===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
@@ -11,37 +12,42 @@
 // CONVERSION STRATEGY:
 // ====================
 // The conversion transforms a Cmt2 circuit into a FIRRTL circuit by converting
-// each Cmt2 module into a FIRRTL module with proper scheduling and control logic.
+// each Cmt2 module into a FIRRTL module with proper scheduling and control
+// logic.
 //
 // High-level steps:
-// 1. Run analyses (Scheduler, ConflictMatrix, CallInfo) to understand module behavior
+// 1. Run analyses (Scheduler, ConflictMatrix) to understand module behavior
 // 2. For each Cmt2 module:
-//    a. Create FIRRTL module with ports for methods/values (enable, ready, args, results)
-//    b. Instantiate external FIRRTL modules for cmt2.instance operations
-//    c. Process each function (rule/method/value) in scheduled order:
+//    a. Create FIRRTL module with ports for methods/values (enable, ready,
+//    args, results) b. Instantiate external FIRRTL modules for cmt2.instance
+//    operations c. Process each function (rule/method/value) in scheduled
+//    order:
 //       - Clone guard region to compute guard result
 //       - Generate ready signal = guard ∧ called_readies ∧ ¬(conflicting_fires)
-//       - Generate fire signal = ready (for rules/values) or ready ∧ enable (for methods)
+//       - Generate fire signal = ready (for rules/values) or ready ∧ enable
+//       (for methods)
 //       - Clone body region inside firrtl.when(fire) block
 //       - Convert cmt2.call operations to FIRRTL signal connections
 //
 // SIGNAL GENERATION:
 // ==================
-// - ready: Indicates a function can execute (guard is true, dependencies ready, no conflicts)
+// - ready: Indicates a function can execute (guard is true, dependencies ready,
+// no conflicts)
 // - enable: Input port for methods, driven by callers to request execution
-// - fire: Indicates a function is actually executing (ready for rules/values, ready∧enable for methods)
+// - fire: Indicates a function is actually executing (ready for rules/values,
+// ready∧enable for methods)
 //
 // CALL CONVERSION:
 // ================
 // cmt2.call operations are converted to FIRRTL port connections:
-// - For method calls: Drive enable=1, connect arguments to input ports, read output ports
+// - For method calls: Drive enable=1, connect arguments to input ports, read
+// output ports
 // - For value calls: Read data output ports directly
 //
 //===----------------------------------------------------------------------===//
 
 #include "circt/Conversion/Cmt2ToFIRRTL.h"
 #include "circt/Dialect/Cmt2/Cmt2Ops.h"
-#include "circt/Dialect/Cmt2/Transforms/CallInfo.h"
 #include "circt/Dialect/Cmt2/Transforms/ConflictMatrix.h"
 #include "circt/Dialect/Cmt2/Transforms/InstanceGraph.h"
 #include "circt/Dialect/Cmt2/Transforms/Scheduler.h"
@@ -83,19 +89,25 @@ namespace {
 /// generated in earlier stages.
 class SignalTracker {
 public:
-  void setReady(StringAttr funcName, Value ready) { readySignals[funcName] = ready; }
-  Value getReady(StringAttr funcName) const {
+  void setReady(StringAttr funcName, Value ready) {
+    readySignals[funcName] = ready;
+  }
+  Value getReadyName(StringAttr funcName) const {
     auto it = readySignals.find(funcName);
     return it != readySignals.end() ? it->second : Value();
   }
 
-  void setEnable(StringAttr funcName, Value enable) { enableSignals[funcName] = enable; }
-  Value getEnable(StringAttr funcName) const {
+  void setEnable(StringAttr funcName, Value enable) {
+    enableSignals[funcName] = enable;
+  }
+  Value getEnableName(StringAttr funcName) const {
     auto it = enableSignals.find(funcName);
     return it != enableSignals.end() ? it->second : Value();
   }
 
-  void setFire(StringAttr funcName, Value fire) { fireSignals[funcName] = fire; }
+  void setFire(StringAttr funcName, Value fire) {
+    fireSignals[funcName] = fire;
+  }
   Value getFire(StringAttr funcName) const {
     auto it = fireSignals.find(funcName);
     return it != fireSignals.end() ? it->second : Value();
@@ -106,7 +118,8 @@ public:
   }
   ArrayRef<Value> getBodyResults(StringAttr funcName) const {
     auto it = bodyResults.find(funcName);
-    return it != bodyResults.end() ? ArrayRef<Value>(it->second) : ArrayRef<Value>();
+    return it != bodyResults.end() ? ArrayRef<Value>(it->second)
+                                   : ArrayRef<Value>();
   }
 
 private:
@@ -116,22 +129,22 @@ private:
   DenseMap<StringAttr, SmallVector<Value>> bodyResults;
 };
 
-/// Holds per-module conversion state including analysis results, signal tracker,
-/// and mappings between Cmt2 and FIRRTL constructs.
+/// Holds per-module conversion state including analysis results, signal
+/// tracker, and mappings between Cmt2 and FIRRTL constructs.
 class ModuleConversionContext {
 public:
   ModuleConversionContext(cmt2::ModuleOp cmt2Module, FModuleOp firrtlModule,
-                           const ModuleScheduleResult *schedule,
-                           const ModuleConflictMatrix *conflictMatrix,
-                           const ModuleCallInfo *callInfo)
+                          const ModuleScheduleResult *schedule,
+                          const ModuleConflictMatrix *conflictMatrix)
       : cmt2Module(cmt2Module), firrtlModule(firrtlModule), schedule(schedule),
-        conflictMatrix(conflictMatrix), callInfo(callInfo) {}
+        conflictMatrix(conflictMatrix) {}
 
   cmt2::ModuleOp getCmt2Module() const { return cmt2Module; }
   FModuleOp getFIRRTLModule() const { return firrtlModule; }
   const ModuleScheduleResult *getSchedule() const { return schedule; }
-  const ModuleConflictMatrix *getConflictMatrix() const { return conflictMatrix; }
-  const ModuleCallInfo *getCallInfo() const { return callInfo; }
+  const ModuleConflictMatrix *getConflictMatrix() const {
+    return conflictMatrix;
+  }
 
   SignalTracker &getSignalTracker() { return signalTracker; }
   IRMapping &getIRMapping() { return irMapping; }
@@ -149,7 +162,6 @@ private:
   FModuleOp firrtlModule;
   const ModuleScheduleResult *schedule;
   const ModuleConflictMatrix *conflictMatrix;
-  const ModuleCallInfo *callInfo;
   SignalTracker signalTracker;
   IRMapping irMapping;
   DenseMap<StringAttr, firrtl::InstanceOp> instances;
@@ -167,98 +179,115 @@ public:
 private:
   // Main conversion entry points
   LogicalResult convertCircuit(cmt2::CircuitOp circuit);
-  LogicalResult convertModule(cmt2::ModuleOp module, firrtl::CircuitOp firrtlCircuit,
-                                 const SchedulerAnalysis &scheduler,
-                                 const ConflictMatrixAnalysis &conflictAnalysis,
-                                 const CallInfoView &callInfo,
-                                 const DenseMap<StringAttr, FModuleOp> &convertedModules,
-                                 FModuleOp &outFirrtlModule);
+  LogicalResult
+  convertModule(cmt2::ModuleOp module, firrtl::CircuitOp firrtlCircuit,
+                const SchedulerAnalysis &scheduler,
+                const ConflictMatrixAnalysis &conflictAnalysis,
+                const DenseMap<StringAttr, FModuleOp> &convertedModules,
+                FModuleOp &outFirrtlModule);
 
   // Module-level operations
   void createFunctionPorts(cmt2::ModuleOp module, OpBuilder &builder,
-                            SmallVectorImpl<PortInfo> &ports);
-  LogicalResult createInstances(cmt2::ModuleOp module, ModuleConversionContext &ctx,
-                                  ImplicitLocOpBuilder &builder,
-                                  const DenseMap<StringAttr, FModuleOp> &convertedModules);
-  LogicalResult connectOutputPorts(cmt2::ModuleOp module, ModuleConversionContext &ctx,
-                                     ImplicitLocOpBuilder &builder);
-
-  // Function-level operations
-  LogicalResult processFunction(Cmt2FunctionLike func, ModuleConversionContext &ctx,
-                                  ImplicitLocOpBuilder &builder);
-  void mapFunctionArgumentsToports(Cmt2FunctionLike func, ModuleConversionContext &ctx,
-                                    OpBuilder &builder);
-
-  // Signal generation
-  Value generateReadySignal(Cmt2FunctionLike func, Value guardResult,
-                              const SmallVector<CallInfo> &calls,
-                              const ScheduleGroup &group,
-                              ModuleConversionContext &ctx,
-                              ImplicitLocOpBuilder &builder);
-  Value generateFireSignal(Cmt2FunctionLike func, Value readySignal,
-                            ModuleConversionContext &ctx,
-                            ImplicitLocOpBuilder &builder);
-
-  // Region cloning and call conversion
-  LogicalResult cloneRegionOps(Region &sourceRegion, ModuleConversionContext &ctx,
-                                ImplicitLocOpBuilder &builder,
-                                SmallVectorImpl<Value> &results);
-  LogicalResult convertCallOp(CallOp callOp, ModuleConversionContext &ctx,
-                                ImplicitLocOpBuilder &builder);
-  LogicalResult connectMethodCall(CallOp callOp, BindMethodOp bindMethod,
-                                    firrtl::InstanceOp firrtlInst,
-                                    ModuleConversionContext &ctx,
-                                    ImplicitLocOpBuilder &builder);
-  LogicalResult connectValueCall(CallOp callOp, BindValueOp bindValue,
-                                   firrtl::InstanceOp firrtlInst,
+                           SmallVectorImpl<PortInfo> &ports);
+  LogicalResult
+  createInstances(cmt2::ModuleOp module, ModuleConversionContext &ctx,
+                  ImplicitLocOpBuilder &builder,
+                  const DenseMap<StringAttr, FModuleOp> &convertedModules);
+  LogicalResult connectOutputPorts(cmt2::ModuleOp module,
                                    ModuleConversionContext &ctx,
                                    ImplicitLocOpBuilder &builder);
 
+  // Function-level operations
+  LogicalResult processFunction(Cmt2FunctionLike func,
+                                ModuleConversionContext &ctx,
+                                ImplicitLocOpBuilder &builder);
+  void mapFunctionArgumentsToPorts(Cmt2FunctionLike func,
+                                   ModuleConversionContext &ctx,
+                                   OpBuilder &builder);
+
+  // Signal generation
+  Value generateReadySignal(Cmt2FunctionLike func, Value guardResult,
+                            const ScheduleGroup &group,
+                            ModuleConversionContext &ctx,
+                            ImplicitLocOpBuilder &builder);
+  Value generateFireSignal(Cmt2FunctionLike func, Value readySignal,
+                           ModuleConversionContext &ctx,
+                           ImplicitLocOpBuilder &builder);
+
+  // Region cloning and call conversion
+  LogicalResult cloneRegionOps(Region &sourceRegion,
+                               ModuleConversionContext &ctx,
+                               ImplicitLocOpBuilder &builder,
+                               SmallVectorImpl<Value> &results);
+  LogicalResult convertCallOp(CallOp callOp, ModuleConversionContext &ctx,
+                              ImplicitLocOpBuilder &builder);
+  LogicalResult connectMethodCall(CallOp callOp, BindMethodOp bindMethod,
+                                  firrtl::InstanceOp firrtlInst,
+                                  ModuleConversionContext &ctx,
+                                  ImplicitLocOpBuilder &builder);
+  LogicalResult connectValueCall(CallOp callOp, BindValueOp bindValue,
+                                 firrtl::InstanceOp firrtlInst,
+                                 ModuleConversionContext &ctx,
+                                 ImplicitLocOpBuilder &builder);
+
   // Helper utilities
   FModuleOp findFIRRTLModule(StringRef moduleName, Operation *searchRoot);
-  std::optional<size_t> getPortIndex(firrtl::InstanceOp inst, StringAttr portName);
+  std::optional<size_t> getPortIndex(firrtl::InstanceOp &inst,
+                                     std::string portName);
+  std::optional<size_t> getPortIndex(firrtl::FModuleOp &fMod,
+                                     std::string portName);
   cmt2::ModuleOp findTopModule(cmt2::CircuitOp circuit);
 
-  // Port name helpers
-  std::string buildPortName(StringRef base, StringRef suffix);
-  std::string buildInterfacePortName(StringRef declName, StringRef methodName, StringRef suffix);
+  enum PortKind { Argument, Result, Help };
+
+  std::string getFunctionPortName(cmt2::Cmt2FunctionLike function,
+                                  PortKind portKind, size_t index);
+
+  std::string getItfcDeclFunctionPortName(cmt2::InterfaceDeclOp decl,
+                                          cmt2::Cmt2FunctionLike function,
+                                          PortKind portKind, size_t index);
 
   // Instance creation helpers
-  void connectInstanceModuleArguments(cmt2::InstanceOp instOp, firrtl::InstanceOp firrtlInst,
-                                       Operation *referencedModule, ModuleConversionContext &ctx,
-                                       ImplicitLocOpBuilder &builder,
-                                       llvm::SmallDenseSet<size_t> &connectedPorts);
-  void initializeUnconnectedInputPorts(firrtl::InstanceOp firrtlInst,
-                                        const SmallVector<PortInfo> &ports,
-                                        const llvm::SmallDenseSet<size_t> &connectedPorts,
+  void connectInstanceModuleArguments(
+      cmt2::InstanceOp instOp, firrtl::InstanceOp firrtlInst,
+      Operation *referencedModule, ModuleConversionContext &ctx,
+      ImplicitLocOpBuilder &builder,
+      llvm::SmallDenseSet<size_t> &connectedPorts);
+  void initializeUnconnectedInputPorts(
+      firrtl::InstanceOp firrtlInst, const SmallVector<PortInfo> &ports,
+      const llvm::SmallDenseSet<size_t> &connectedPorts,
+      ImplicitLocOpBuilder &builder);
+  LogicalResult processInterfaceBinding(cmt2::InstanceOp instOp,
+                                        firrtl::InstanceOp firrtlInst,
+                                        ArrayAttr interfaceBindAttr,
+                                        cmt2::ModuleOp module,
+                                        cmt2::ModuleOp referencedModule,
+                                        ModuleConversionContext &ctx,
                                         ImplicitLocOpBuilder &builder);
-  LogicalResult processInterfaceBinding(cmt2::InstanceOp instOp, firrtl::InstanceOp firrtlInst,
-                                         ArrayAttr interfaceBindAttr, cmt2::ModuleOp module,
-                                         ModuleConversionContext &ctx,
-                                         ImplicitLocOpBuilder &builder,
-                                         llvm::SmallDenseSet<size_t> &connectedPorts);
 
   // Interface binding helper
-  LogicalResult connectInterfaceBinding(firrtl::InstanceOp childInst,
-                                         firrtl::InstanceOp parentInst,
-                                         StringRef childDeclName, StringRef childMethodName,
-                                         StringRef parentMethodName, Cmt2FunctionLike ifaceFunc,
-                                         Operation *parentBindOp, bool isExternalFirrtl,
-                                         ImplicitLocOpBuilder &builder,
-                                         llvm::SmallDenseSet<size_t> &connectedPorts);
+  LogicalResult connectInterfaceBinding(
+      firrtl::InstanceOp declInst,  // decl's instance
+      StringAttr defEntity,         // either an instance, or an decl
+      std::string declFuncName,     // used also as decl's default func name,
+                                    // same as the interface's func name
+      std::string defFuncName,      // def's func name
+      cmt2::InterfaceDeclOp declOp, // decl op
+      cmt2::InterfaceOp iface, cmt2::InstanceOp declCmt2Inst,
+      ModuleConversionContext &ctx, ImplicitLocOpBuilder &builder);
 
   // Interface helpers
   bool isInterfaceCall(CallOp callOp, cmt2::ModuleOp module);
   InterfaceOp getInterfaceForDecl(InterfaceDeclOp decl);
   void createInterfacePorts(cmt2::ModuleOp module, OpBuilder &builder,
                             SmallVectorImpl<PortInfo> &ports);
-  LogicalResult connectInterfaceCall(CallOp callOp, InterfaceDeclOp interfaceDecl,
-                                      ModuleConversionContext &ctx,
-                                      ImplicitLocOpBuilder &builder);
-
-  // Naming helpers
-  ArrayAttr getArgNames(Cmt2FunctionLike func);
-  ArrayAttr getBodyResNames(Cmt2FunctionLike func);
+  void initializeInterfaceOutPorts(cmt2::ModuleOp module,
+                                   ModuleConversionContext &ctx,
+                                   OpBuilder &builder);
+  LogicalResult connectInterfaceCall(CallOp callOp,
+                                     InterfaceDeclOp interfaceDecl,
+                                     ModuleConversionContext &ctx,
+                                     ImplicitLocOpBuilder &builder);
 };
 
 //===----------------------------------------------------------------------===//
@@ -281,6 +310,7 @@ void LowerCmt2ToFIRRTLPass::runOnOperation() {
   }
 
   if (failed(convertCircuit(cmt2Circuit))) {
+    llvm::dbgs() << "conversion failed\n";
     signalPassFailure();
   }
 }
@@ -291,7 +321,6 @@ LogicalResult LowerCmt2ToFIRRTLPass::convertCircuit(cmt2::CircuitOp circuit) {
   // Run analyses on the circuit to gather scheduling and dependency information
   SchedulerAnalysis scheduler(circuit);
   ConflictMatrixAnalysis conflictAnalysis(circuit);
-  CallInfoView callInfo(circuit);
 
   // Build instance graph to determine conversion order (bottom-up)
   InstanceGraph instanceGraph(circuit);
@@ -299,7 +328,8 @@ LogicalResult LowerCmt2ToFIRRTLPass::convertCircuit(cmt2::CircuitOp circuit) {
   // Find the top module (not instantiated by any other module)
   cmt2::ModuleOp cmt2TopModule = findTopModule(circuit);
   if (!cmt2TopModule) {
-    return circuit.emitError("No top module found (all modules are instantiated)");
+    return circuit.emitError(
+        "No top module found (all modules are instantiated)");
   }
 
   // Find or create FIRRTL circuit with the top module name
@@ -319,7 +349,8 @@ LogicalResult LowerCmt2ToFIRRTLPass::convertCircuit(cmt2::CircuitOp circuit) {
 
   StringAttr topModuleName = cmt2TopModule.getSymNameAttr();
   if (!firrtlCircuit) {
-    firrtlCircuit = builder.create<firrtl::CircuitOp>(circuit.getLoc(), topModuleName);
+    firrtlCircuit =
+        builder.create<firrtl::CircuitOp>(circuit.getLoc(), topModuleName);
   } else if (firrtlCircuit.getName() != topModuleName) {
     firrtlCircuit.setNameAttr(topModuleName);
   }
@@ -343,12 +374,14 @@ LogicalResult LowerCmt2ToFIRRTLPass::convertCircuit(cmt2::CircuitOp circuit) {
   for (auto module : modulesToConvert) {
     FModuleOp firrtlMod;
     if (failed(convertModule(module, firrtlCircuit, scheduler, conflictAnalysis,
-                             callInfo, convertedModules, firrtlMod))) {
+                             convertedModules, firrtlMod))) {
       return failure();
     }
     // Track the converted module
     convertedModules[module.getSymNameAttr()] = firrtlMod;
   }
+
+  // firrtlCircuit.print(llvm::dbgs());
 
   // Erase the original cmt2 circuit
   circuit.erase();
@@ -359,35 +392,41 @@ LogicalResult LowerCmt2ToFIRRTLPass::convertModule(
     cmt2::ModuleOp module, firrtl::CircuitOp firrtlCircuit,
     const SchedulerAnalysis &scheduler,
     const ConflictMatrixAnalysis &conflictAnalysis,
-    const CallInfoView &callInfo,
     const DenseMap<StringAttr, FModuleOp> &convertedModules,
     FModuleOp &outFirrtlModule) {
 
-  OpBuilder builder(firrtlCircuit.getBodyBlock(), firrtlCircuit.getBodyBlock()->end());
+  OpBuilder builder(firrtlCircuit.getBodyBlock(),
+                    firrtlCircuit.getBodyBlock()->end());
   ImplicitLocOpBuilder implicitBuilder(module.getLoc(), builder);
 
   // Retrieve analysis results for this module
   StringAttr moduleName = module.getSymNameAttr();
-  const ModuleScheduleResult *schedule = scheduler.getModuleSchedule(moduleName);
-  const ModuleConflictMatrix *conflictMatrix = conflictAnalysis.getModuleMatrix(moduleName);
-  const ModuleCallInfo *moduleCallInfo = callInfo.getModuleCallInfo(moduleName.getValue());
+  const ModuleScheduleResult *schedule =
+      scheduler.getModuleSchedule(moduleName);
+  const ModuleConflictMatrix *conflictMatrix =
+      conflictAnalysis.getModuleMatrix(moduleName);
 
   if (!schedule) {
     return module.emitError("No schedule found for module");
   }
 
-  // Create FIRRTL module with ports for module arguments and function interfaces
+  // Create FIRRTL module with ports for module arguments and function
+  // interfaces
   SmallVector<PortInfo> ports;
 
   // Add input ports for module arguments
   auto moduleArgNames = module.getArgNames();
   for (auto arg : module.getBodyRegion().front().getArguments()) {
     auto type = cast<FIRRTLBaseType>(arg.getType());
-    StringRef argName = arg.getArgNumber() < moduleArgNames.size()
-                            ? cast<StringAttr>(moduleArgNames[arg.getArgNumber()]).getValue()
-                            : ("arg" + std::to_string(arg.getArgNumber()));
+    std::string argName =
+        arg.getArgNumber() < moduleArgNames.size()
+            ? cast<StringAttr>(moduleArgNames[arg.getArgNumber()])
+                  .getValue()
+                  .str()
+            : ("arg" + std::to_string(arg.getArgNumber()));
     StringAttr portName = builder.getStringAttr(argName);
-    ports.push_back(PortInfo(portName, type, Direction::In, {}, module.getLoc()));
+    ports.push_back(
+        PortInfo(portName, type, Direction::In, {}, module.getLoc()));
   }
 
   // Add ports for methods and values (enable, ready, args, results)
@@ -397,78 +436,27 @@ LogicalResult LowerCmt2ToFIRRTLPass::convertModule(
   createInterfacePorts(module, builder, ports);
 
   auto firrtlModule = builder.create<FModuleOp>(
-      module.getLoc(), moduleName, ConventionAttr::get(builder.getContext(), Convention::Internal), ports);
+      module.getLoc(), moduleName,
+      ConventionAttr::get(builder.getContext(), Convention::Internal), ports);
 
   implicitBuilder.setInsertionPointToStart(firrtlModule.getBodyBlock());
 
   // Create conversion context to track state during conversion
-  ModuleConversionContext ctx(module, firrtlModule, schedule, conflictMatrix, moduleCallInfo);
+  ModuleConversionContext ctx(module, firrtlModule, schedule, conflictMatrix);
 
   // Map module arguments to FIRRTL ports
-  for (auto [cmt2Arg, firrtlArg] : llvm::zip(
-           module.getBodyRegion().front().getArguments(),
-           firrtlModule.getBodyBlock()->getArguments().take_front(
-               module.getBodyRegion().front().getNumArguments()))) {
+  for (auto [cmt2Arg, firrtlArg] :
+       llvm::zip(module.getBodyRegion().front().getArguments(),
+                 firrtlModule.getBodyBlock()->getArguments().take_front(
+                     module.getBodyRegion().front().getNumArguments()))) {
     ctx.getIRMapping().map(cmt2Arg, firrtlArg);
   }
 
-  // Initialize interface output ports with default values
-  // Interface ports start after module arguments and function ports
-  for (auto &op : module.getBodyRegion().front()) {
-    auto decl = dyn_cast<InterfaceDeclOp>(op);
-    if (!decl)
-      continue;
-
-    InterfaceOp iface = getInterfaceForDecl(decl);
-    if (!iface)
-      continue;
-
-    StringRef declName = decl.getSymName();
-
-    // Initialize enable and data output ports for each method/value in the interface
-    for (auto &ifaceOp : iface.getBodyRegion().front()) {
-      if (auto method = dyn_cast<MethodOp>(ifaceOp)) {
-        auto funcType = cast<FunctionType>(method.getFunctionType());
-        StringRef methodName = method.getSymName();
-        auto argNames = method.getArgNames();
-
-        // Initialize enable port (out) with 0
-        StringAttr enablePortName = builder.getStringAttr(
-            declName.str() + "_" + methodName.str() + "_enable");
-        for (size_t portIdx = 0; portIdx < firrtlModule.getNumPorts(); ++portIdx) {
-          if (firrtlModule.getPortName(portIdx) == enablePortName) {
-            Value enablePort = firrtlModule.getArgument(portIdx);
-            Value zero = implicitBuilder.create<ConstantOp>(
-                module.getLoc(), UIntType::get(builder.getContext(), 1), APInt(1, 0));
-            implicitBuilder.create<ConnectOp>(module.getLoc(), enablePort, zero);
-            break;
-          }
-        }
-
-        // Initialize argument ports (out) with invalid
-        for (auto [idx, argType] : llvm::enumerate(funcType.getInputs())) {
-          StringRef argName = idx < argNames.size()
-                                  ? cast<StringAttr>(argNames[idx]).getValue()
-                                  : ("arg" + std::to_string(idx));
-          StringAttr argPortName = builder.getStringAttr(
-              declName.str() + "_" + methodName.str() + "_" + argName.str());
-          for (size_t portIdx = 0; portIdx < firrtlModule.getNumPorts(); ++portIdx) {
-            if (firrtlModule.getPortName(portIdx) == argPortName) {
-              Value argPort = firrtlModule.getArgument(portIdx);
-              auto firrtlType = cast<FIRRTLBaseType>(argType);
-              Value invalid = implicitBuilder.create<InvalidValueOp>(
-                  module.getLoc(), firrtlType);
-              implicitBuilder.create<ConnectOp>(module.getLoc(), argPort, invalid);
-              break;
-            }
-          }
-        }
-      }
-    }
-  }
+  initializeInterfaceOutPorts(module, ctx, implicitBuilder);
 
   // Create FIRRTL instances for all cmt2.instance operations
   if (failed(createInstances(module, ctx, implicitBuilder, convertedModules))) {
+    llvm::dbgs() << "createInstances failed\n";
     return failure();
   }
 
@@ -491,6 +479,7 @@ LogicalResult LowerCmt2ToFIRRTLPass::convertModule(
       }
 
       if (failed(processFunction(func, ctx, implicitBuilder))) {
+        llvm::dbgs() << "processFunction failed\n";
         return failure();
       }
     }
@@ -498,6 +487,7 @@ LogicalResult LowerCmt2ToFIRRTLPass::convertModule(
 
   // Connect function outputs to FIRRTL module ports
   if (failed(connectOutputPorts(module, ctx, implicitBuilder))) {
+    llvm::dbgs() << "connectOutputPorts failed\n";
     return failure();
   }
 
@@ -510,9 +500,11 @@ LogicalResult LowerCmt2ToFIRRTLPass::convertModule(
 // Module-Level Operations
 //===----------------------------------------------------------------------===//
 
-void LowerCmt2ToFIRRTLPass::createFunctionPorts(cmt2::ModuleOp module,
-                                                  OpBuilder &builder,
-                                                  SmallVectorImpl<PortInfo> &ports) {
+// method: argument, results, ready, enable
+// value: agument, results, ready
+void LowerCmt2ToFIRRTLPass::createFunctionPorts(
+    cmt2::ModuleOp module, OpBuilder &builder,
+    SmallVectorImpl<PortInfo> &ports) {
   // For each function (method/value/rule), create appropriate ports
   for (auto &op : module.getBodyRegion().front()) {
     auto func = dyn_cast<Cmt2FunctionLike>(op);
@@ -520,86 +512,79 @@ void LowerCmt2ToFIRRTLPass::createFunctionPorts(cmt2::ModuleOp module,
       continue;
 
     auto funcType = cast<FunctionType>(func.getFunctionType());
-    StringRef funcName = func.functionName();
-    auto argNames = getArgNames(func);
-    auto bodyResNames = getBodyResNames(func);
 
+    // Add enable (in) for method
     if (func.getFunctionKind() == FunctionKind::Method) {
-      // Methods need: enable (in), ready (out), args (in), results (out)
-      ports.push_back(PortInfo(builder.getStringAttr(funcName.str() + "_enable"),
-                                UIntType::get(builder.getContext(), 1),
-                                Direction::In, {}, func.getLoc()));
-      ports.push_back(PortInfo(builder.getStringAttr(funcName.str() + "_ready"),
-                                UIntType::get(builder.getContext(), 1),
-                                Direction::Out, {}, func.getLoc()));
-
-      // Add argument ports with meaningful names
-      for (auto [idx, argType] : llvm::enumerate(funcType.getInputs())) {
-        StringRef argName = idx < argNames.size()
-                                ? cast<StringAttr>(argNames[idx]).getValue()
-                                : ("arg" + std::to_string(idx));
-        ports.push_back(PortInfo(
-            builder.getStringAttr(funcName.str() + "_" + argName.str()),
-            cast<FIRRTLBaseType>(argType), Direction::In, {}, func.getLoc()));
-      }
-
-      // Add result ports with meaningful names
-      for (auto [idx, resType] : llvm::enumerate(funcType.getResults())) {
-        StringRef resName = bodyResNames && idx < bodyResNames.size()
-                                ? cast<StringAttr>(bodyResNames[idx]).getValue()
-                                : ("result" + std::to_string(idx));
-        ports.push_back(PortInfo(
-            builder.getStringAttr(funcName.str() + "_" + resName.str()),
-            cast<FIRRTLBaseType>(resType), Direction::Out, {}, func.getLoc()));
-      }
-
-    } else if (func.getFunctionKind() == FunctionKind::Value) {
-      // Values need: ready (out), results (out)
-      ports.push_back(PortInfo(builder.getStringAttr(funcName.str() + "_ready"),
-                                UIntType::get(builder.getContext(), 1),
-                                Direction::Out, {}, func.getLoc()));
-
-      // Add result ports with meaningful names
-      for (auto [idx, resType] : llvm::enumerate(funcType.getResults())) {
-        StringRef resName = bodyResNames && idx < bodyResNames.size()
-                                ? cast<StringAttr>(bodyResNames[idx]).getValue()
-                                : ("result" + std::to_string(idx));
-        ports.push_back(PortInfo(
-            builder.getStringAttr(funcName.str() + "_" + resName.str()),
-            cast<FIRRTLBaseType>(resType), Direction::Out, {}, func.getLoc()));
-      }
+      auto enableName = getFunctionPortName(func, PortKind::Help, 1);
+      ports.push_back(PortInfo(builder.getStringAttr(enableName),
+                               UIntType::get(builder.getContext(), 1),
+                               Direction::In, {}, func.getLoc()));
     }
-    // Rules have no external ports (they're internal to the module)
+
+    // Add ready (out) for method/value
+    if (func.getFunctionKind() == FunctionKind::Method ||
+        func.getFunctionKind() == FunctionKind::Value) {
+      auto readyName = getFunctionPortName(func, PortKind::Help, 0);
+      ports.push_back(PortInfo(builder.getStringAttr(readyName),
+                               UIntType::get(builder.getContext(), 1),
+                               Direction::Out, {}, func.getLoc()));
+    }
+
+    // Add argument ports with meaningful names
+    for (auto [idx, argType] : llvm::enumerate(funcType.getInputs())) {
+      std::string argName = getFunctionPortName(func, PortKind::Argument, idx);
+      ports.push_back(PortInfo(builder.getStringAttr(argName),
+                               cast<FIRRTLBaseType>(argType), Direction::In, {},
+                               func.getLoc()));
+    }
+
+    // Add result ports with meaningful names
+    for (auto [idx, resType] : llvm::enumerate(funcType.getResults())) {
+      std::string resName = getFunctionPortName(func, PortKind::Result, idx);
+      ports.push_back(PortInfo(builder.getStringAttr(resName),
+                               cast<FIRRTLBaseType>(resType), Direction::Out,
+                               {}, func.getLoc()));
+    }
   }
 }
 
-LogicalResult LowerCmt2ToFIRRTLPass::createInstances(cmt2::ModuleOp module,
-                                                   ModuleConversionContext &ctx,
-                                                   ImplicitLocOpBuilder &builder,
-                                                   const DenseMap<StringAttr, FModuleOp> &convertedModules) {
+LogicalResult LowerCmt2ToFIRRTLPass::createInstances(
+    cmt2::ModuleOp module, ModuleConversionContext &ctx,
+    ImplicitLocOpBuilder &builder,
+    const DenseMap<StringAttr, FModuleOp> &convertedModules) {
+
   // For each cmt2.instance, create a corresponding firrtl.instance
   for (auto &op : module.getBodyRegion().front()) {
     auto instOp = dyn_cast<cmt2::InstanceOp>(op);
     if (!instOp)
       continue;
 
+    LLVM_DEBUG(llvm::dbgs()
+               << "create instance " << instOp.getSymName() << "\n");
+
     auto referencedModule = instOp.getReferencedModule();
     if (!referencedModule)
-      return instOp.emitError("Referenced module not found: ") << instOp.getModuleName();
+      return instOp.emitError("Referenced module not found: ")
+             << instOp.getModuleName();
 
     // Determine target FIRRTL module (external or converted cmt2 module)
     FModuleOp firrtlMod;
     StringRef targetModuleName;
-    if (auto extModOp = dyn_cast<ExtModuleFirrtlOp>(referencedModule.getOperation())) {
+    if (auto extModOp =
+            dyn_cast<ExtModuleFirrtlOp>(referencedModule.getOperation())) {
       targetModuleName = extModOp.getExtModuleName();
-      firrtlMod = findFIRRTLModule(targetModuleName, module->getParentOfType<mlir::ModuleOp>());
+      firrtlMod = findFIRRTLModule(targetModuleName,
+                                   module->getParentOfType<mlir::ModuleOp>());
       if (!firrtlMod)
-        return instOp.emitError("FIRRTL module not found: ") << targetModuleName;
-    } else if (auto cmt2Mod = dyn_cast<cmt2::ModuleOp>(referencedModule.getOperation())) {
+        return instOp.emitError("FIRRTL module not found: ")
+               << targetModuleName;
+    } else if (auto cmt2Mod =
+                   dyn_cast<cmt2::ModuleOp>(referencedModule.getOperation())) {
       targetModuleName = cmt2Mod.getSymName();
       auto it = convertedModules.find(cmt2Mod.getSymNameAttr());
       if (it == convertedModules.end())
-        return instOp.emitError("Cmt2 module not yet converted: ") << targetModuleName;
+        return instOp.emitError("Cmt2 module not yet converted: ")
+               << targetModuleName;
       firrtlMod = it->second;
     } else {
       return instOp.emitError("Unsupported module type for instantiation");
@@ -608,27 +593,46 @@ LogicalResult LowerCmt2ToFIRRTLPass::createInstances(cmt2::ModuleOp module,
     // Create the FIRRTL instance
     SmallVector<PortInfo> ports = firrtlMod.getPorts();
     auto firrtlInst = builder.create<firrtl::InstanceOp>(
-        instOp.getLoc(), ports, targetModuleName, instOp.getSymName(), NameKindEnum::DroppableName);
+        instOp.getLoc(), ports, targetModuleName, instOp.getSymName(),
+        NameKindEnum::DroppableName);
     ctx.registerInstance(instOp.getSymNameAttr(), firrtlInst);
 
     // Track connected ports
     llvm::SmallDenseSet<size_t> connectedPorts;
 
     // Connect module arguments to FIRRTL ports
-    connectInstanceModuleArguments(instOp, firrtlInst, referencedModule.getOperation(),
-                                    ctx, builder, connectedPorts);
+    connectInstanceModuleArguments(instOp, firrtlInst,
+                                   referencedModule.getOperation(), ctx,
+                                   builder, connectedPorts);
 
     // Initialize unconnected input ports with default values
     initializeUnconnectedInputPorts(firrtlInst, ports, connectedPorts, builder);
 
-    // Process interface bindings
+    LLVM_DEBUG(llvm::dbgs() << "initializeUnconnectedInputPorts done\n");
+    // Process interface bindings (referenceMOdule must be ModuleOp)
     if (auto interfaceBinds = instOp.getInterfaceBinds()) {
-      for (auto bindAttr : *interfaceBinds) {
-        if (failed(processInterfaceBinding(instOp, firrtlInst, cast<ArrayAttr>(bindAttr),
-                                            module, ctx, builder, connectedPorts)))
-          return failure();
+      // llvm::dbgs() << "process " << (*interfaceBinds).size()
+      //              << " interface bindings\n";
+      if (auto referenceMod =
+              dyn_cast<cmt2::ModuleOp>(referencedModule.getOperation())) {
+        for (auto bindAttr : *interfaceBinds) {
+          if (failed(processInterfaceBinding(instOp, firrtlInst,
+                                             cast<ArrayAttr>(bindAttr), module,
+                                             referenceMod, ctx, builder))) {
+            llvm::dbgs() << "processInterfaceBinding failed\n";
+            return failure();
+          }
+        }
+
+      } else if ((*interfaceBinds).size() > 0) {
+        llvm::dbgs() << "reach here?\n";
+        return instOp.emitError(
+            "instantiate extern module with interface, illegal!");
       }
     }
+
+    LLVM_DEBUG(llvm::dbgs()
+               << "create instance " << instOp.getSymName() << " succeed \n");
   }
 
   return success();
@@ -638,7 +642,8 @@ LogicalResult LowerCmt2ToFIRRTLPass::createInstances(cmt2::ModuleOp module,
 void LowerCmt2ToFIRRTLPass::connectInstanceModuleArguments(
     cmt2::InstanceOp instOp, firrtl::InstanceOp firrtlInst,
     Operation *referencedModule, ModuleConversionContext &ctx,
-    ImplicitLocOpBuilder &builder, llvm::SmallDenseSet<size_t> &connectedPorts) {
+    ImplicitLocOpBuilder &builder,
+    llvm::SmallDenseSet<size_t> &connectedPorts) {
 
   auto instanceArgs = instOp.getArgs();
   if (auto extModOp = dyn_cast<ExtModuleFirrtlOp>(referencedModule)) {
@@ -648,9 +653,12 @@ void LowerCmt2ToFIRRTLPass::connectInstanceModuleArguments(
       auto bindBare = dyn_cast<BindBareOp>(bodyOp);
       if (!bindBare || barePortIdx >= instanceArgs.size())
         continue;
-      Value firrtlArg = ctx.getIRMapping().lookupOrDefault(instanceArgs[barePortIdx]);
-      if (auto portIdx = getPortIndex(firrtlInst, bindBare.getPortAttr().getAttr())) {
-        builder.create<ConnectOp>(instOp.getLoc(), firrtlInst.getResult(*portIdx), firrtlArg);
+      Value firrtlArg =
+          ctx.getIRMapping().lookupOrDefault(instanceArgs[barePortIdx]);
+      if (auto portIdx = getPortIndex(
+              firrtlInst, bindBare.getPortAttr().getAttr().getValue().str())) {
+        builder.create<ConnectOp>(instOp.getLoc(),
+                                  firrtlInst.getResult(*portIdx), firrtlArg);
         connectedPorts.insert(*portIdx);
       }
       barePortIdx++;
@@ -659,8 +667,10 @@ void LowerCmt2ToFIRRTLPass::connectInstanceModuleArguments(
     // Regular cmt2 module - connect arguments directly (first N ports)
     size_t numModuleArgs = cmt2Mod.getBodyRegion().front().getNumArguments();
     for (size_t i = 0; i < instanceArgs.size() && i < numModuleArgs; ++i) {
-      if (Value firrtlArg = ctx.getIRMapping().lookupOrDefault(instanceArgs[i])) {
-        builder.create<ConnectOp>(instOp.getLoc(), firrtlInst.getResult(i), firrtlArg);
+      if (Value firrtlArg =
+              ctx.getIRMapping().lookupOrDefault(instanceArgs[i])) {
+        builder.create<ConnectOp>(instOp.getLoc(), firrtlInst.getResult(i),
+                                  firrtlArg);
         connectedPorts.insert(i);
       }
     }
@@ -670,7 +680,8 @@ void LowerCmt2ToFIRRTLPass::connectInstanceModuleArguments(
 // Helper: Initialize all unconnected input ports with default values
 void LowerCmt2ToFIRRTLPass::initializeUnconnectedInputPorts(
     firrtl::InstanceOp firrtlInst, const SmallVector<PortInfo> &ports,
-    const llvm::SmallDenseSet<size_t> &connectedPorts, ImplicitLocOpBuilder &builder) {
+    const llvm::SmallDenseSet<size_t> &connectedPorts,
+    ImplicitLocOpBuilder &builder) {
 
   for (size_t i = 0; i < ports.size(); ++i) {
     if (connectedPorts.contains(i) || ports[i].direction != Direction::In)
@@ -678,29 +689,27 @@ void LowerCmt2ToFIRRTLPass::initializeUnconnectedInputPorts(
 
     Value instPort = firrtlInst.getResult(i);
     Type portType = instPort.getType();
-
-    // Create default zero value for UInt/SInt types
-    if (auto uintType = dyn_cast<UIntType>(portType)) {
-      Value zero = builder.create<ConstantOp>(
-          firrtlInst.getLoc(), uintType, APInt(uintType.getWidth().value_or(1), 0));
-      builder.create<ConnectOp>(firrtlInst.getLoc(), instPort, zero);
-    } else if (auto sintType = dyn_cast<SIntType>(portType)) {
-      Value zero = builder.create<ConstantOp>(
-          firrtlInst.getLoc(), sintType, APInt(sintType.getWidth().value_or(1), 0));
-      builder.create<ConnectOp>(firrtlInst.getLoc(), instPort, zero);
+    auto ftype = dyn_cast<UIntType>(portType);
+    Value init;
+    if (ftype && (ftype.getWidth().value_or(1) == 1)) {
+      init = builder.create<ConstantOp>(firrtlInst.getLoc(), ftype,
+                                        APInt(1, 0));
+    } else {
+      init = builder.create<InvalidValueOp>(firrtlInst.getLoc(), portType);
     }
-    // Clock/Reset types are typically connected via bare args
+    builder.create<ConnectOp>(firrtlInst.getLoc(), instPort, init);
   }
 }
 
 // Helper: Process a single interface binding
 LogicalResult LowerCmt2ToFIRRTLPass::processInterfaceBinding(
-    cmt2::InstanceOp instOp, firrtl::InstanceOp firrtlInst, ArrayAttr interfaceBindAttr,
-    cmt2::ModuleOp module, ModuleConversionContext &ctx,
-    ImplicitLocOpBuilder &builder, llvm::SmallDenseSet<size_t> &connectedPorts) {
+    cmt2::InstanceOp instOp, firrtl::InstanceOp firrtlInst,
+    ArrayAttr interfaceBindAttr, cmt2::ModuleOp module,
+    cmt2::ModuleOp referencedModule, ModuleConversionContext &ctx,
+    ImplicitLocOpBuilder &builder) {
 
   if (interfaceBindAttr.size() < 2)
-    return success();
+    return instOp.emitError("wrong number of interface binding attributes");
 
   // Parse: [@interfaceDefName, @interfaceDeclName]
   auto defRef = cast<mlir::SymbolRefAttr>(interfaceBindAttr[0]);
@@ -716,101 +725,84 @@ LogicalResult LowerCmt2ToFIRRTLPass::processInterfaceBinding(
       }
     }
   }
-  if (!interfaceDef)
-    return instOp.emitError("InterfaceDefOp not found: ") << defRef;
 
-  // Find InterfaceOp to get method signatures
-  auto circuit = module->getParentOfType<cmt2::CircuitOp>();
-  InterfaceOp iface;
-  for (auto &op : circuit.getBodyRegion().front()) {
-    if (auto ifaceOp = dyn_cast<InterfaceOp>(op)) {
-      if (ifaceOp.getSymNameAttr() == interfaceDef.getInterface().getLeafReference()) {
-        iface = ifaceOp;
+  InterfaceDeclOp interfaceDecl;
+  for (auto &op : referencedModule.getBodyRegion().front()) {
+    if (auto decl = dyn_cast<InterfaceDeclOp>(op)) {
+      if (decl.getSymNameAttr() == declRef.getLeafReference()) {
+        interfaceDecl = decl;
         break;
       }
     }
   }
+
+  // Find InterfaceOp to get method signatures
+  InterfaceOp iface = getInterfaceForDecl(interfaceDecl);
   if (!iface)
-    return instOp.emitError("InterfaceOp not found: ") << interfaceDef.getInterface();
+    return instOp.emitError("InterfaceOp not found: ")
+           << interfaceDef.getInterface();
 
-  // Process each method/value mapping in the interface definition
-  for (auto methodEntry : interfaceDef.getMethods()) {
-    auto methodArray = cast<mlir::ArrayAttr>(methodEntry);
-    if (methodArray.size() < 3)
-      continue;
+  if (interfaceDef) {
 
-    // Parse: [@instance, @instanceMethod, @interfaceMethod]
-    auto instanceRef = cast<mlir::SymbolRefAttr>(methodArray[0]);
-    auto instanceMethodRef = cast<mlir::SymbolRefAttr>(methodArray[1]);
-    auto ifaceMethodRef = cast<mlir::SymbolRefAttr>(methodArray[2]);
+    llvm::dbgs() << "reach A\n";
+    // Process each method/value mapping in the interface definition
+    for (auto methodEntry : interfaceDef.getMethods()) {
+      auto methodArray = cast<mlir::ArrayAttr>(methodEntry);
+      if (methodArray.size() < 3)
+        continue;
 
-    // Find the interface method/value definition
-    Cmt2FunctionLike ifaceFunc;
+      // Parse: [@def, @defFunc, @declFun]
+      auto defRef = cast<mlir::SymbolRefAttr>(methodArray[0]);
+      auto defFuncRef = cast<mlir::SymbolRefAttr>(methodArray[1]);
+      auto declFuncRef = cast<mlir::SymbolRefAttr>(methodArray[2]);
+
+      if (failed(connectInterfaceBinding(
+              firrtlInst, defRef.getLeafReference(),
+              declFuncRef.getLeafReference().getValue().str(),
+              defFuncRef.getLeafReference().getValue().str(), interfaceDecl,
+              iface, instOp, ctx, builder))) {
+        llvm::dbgs() << "reach B\n";
+
+        return failure();
+      }
+    }
+
+  } else {
+    // There must be an interface-decl with the name defRef
+    InterfaceDeclOp defDecl;
+    for (auto &op : module.getBodyRegion().front()) {
+      if (auto itfcDecl = dyn_cast<InterfaceDeclOp>(op)) {
+        if (itfcDecl.getSymNameAttr() == defRef.getLeafReference()) {
+          defDecl = itfcDecl;
+        }
+      }
+    }
+
+    if (!defDecl) {
+      return instOp.emitError("InterfaceDef/Decl not found: ") << defRef;
+    }
+
+    // Process each method/value from the defDecl (same signature as interface)
     for (auto &op : iface.getBodyRegion().front()) {
       if (auto func = dyn_cast<Cmt2FunctionLike>(op)) {
-        if (func.functionNameAttr() == ifaceMethodRef.getLeafReference()) {
-          ifaceFunc = func;
-          break;
+        if (failed(connectInterfaceBinding(
+                firrtlInst, defRef.getLeafReference(),
+                func.functionName().str(), func.functionName().str(),
+                interfaceDecl, iface, instOp, ctx, builder))) {
+          llvm::dbgs() << "reach here C\n";
+          return failure();
         }
       }
     }
-    if (!ifaceFunc)
-      return instOp.emitError("Interface method not found: ") << ifaceMethodRef;
-
-    // Get the source instance (providing the implementation)
-    firrtl::InstanceOp sourceInst = ctx.getInstance(instanceRef.getLeafReference());
-    if (!sourceInst)
-      return instOp.emitError("Source instance not found: ") << instanceRef;
-
-    // Find the cmt2 instance to check if it's external FIRRTL
-    cmt2::InstanceOp sourceCmt2Inst;
-    for (auto &op : module.getBodyRegion().front()) {
-      if (auto inst = dyn_cast<cmt2::InstanceOp>(op)) {
-        if (inst.getSymNameAttr() == instanceRef.getLeafReference()) {
-          sourceCmt2Inst = inst;
-          break;
-        }
-      }
-    }
-
-    // Extract bind operations for external FIRRTL modules
-    bool isExternalFirrtl = false;
-    BindMethodOp parentBindMethod;
-    BindValueOp parentBindValue;
-    if (sourceCmt2Inst) {
-      if (auto extMod = dyn_cast<ExtModuleFirrtlOp>(sourceCmt2Inst.getReferencedModule().getOperation())) {
-        isExternalFirrtl = true;
-        for (auto &op : extMod.getBodyRegion().front()) {
-          if (auto bm = dyn_cast<BindMethodOp>(op)) {
-            if (bm.getSymNameAttr() == instanceMethodRef.getLeafReference())
-              parentBindMethod = bm;
-          } else if (auto bv = dyn_cast<BindValueOp>(op)) {
-            if (bv.getSymNameAttr() == instanceMethodRef.getLeafReference())
-              parentBindValue = bv;
-          }
-        }
-      }
-    }
-
-    // Connect interface ports
-    Operation *parentBindOp = ifaceFunc.getFunctionKind() == FunctionKind::Method
-        ? parentBindMethod.getOperation()
-        : parentBindValue.getOperation();
-    if (failed(connectInterfaceBinding(
-            firrtlInst, sourceInst,
-            declRef.getLeafReference().getValue(),
-            ifaceMethodRef.getLeafReference().getValue(),
-            instanceMethodRef.getLeafReference().getValue(),
-            ifaceFunc, parentBindOp, isExternalFirrtl, builder, connectedPorts)))
-      return failure();
   }
 
   return success();
 }
 
-LogicalResult LowerCmt2ToFIRRTLPass::connectOutputPorts(cmt2::ModuleOp module,
-                                                          ModuleConversionContext &ctx,
-                                                          ImplicitLocOpBuilder &builder) {
+LogicalResult
+LowerCmt2ToFIRRTLPass::connectOutputPorts(cmt2::ModuleOp module,
+                                          ModuleConversionContext &ctx,
+                                          ImplicitLocOpBuilder &builder) {
   FModuleOp firrtlModule = ctx.getFIRRTLModule();
   size_t portIndex = module.getBodyRegion().front().getNumArguments();
 
@@ -826,7 +818,8 @@ LogicalResult LowerCmt2ToFIRRTLPass::connectOutputPorts(cmt2::ModuleOp module,
 
       // Connect ready output
       Value readyPort = firrtlModule.getBodyBlock()->getArgument(portIndex++);
-      if (Value readySignal = ctx.getSignalTracker().getReady(func.functionNameAttr())) {
+      if (Value readySignal =
+              ctx.getSignalTracker().getReadyName(func.functionNameAttr())) {
         builder.create<ConnectOp>(func.getLoc(), readyPort, readySignal);
       }
 
@@ -835,28 +828,38 @@ LogicalResult LowerCmt2ToFIRRTLPass::connectOutputPorts(cmt2::ModuleOp module,
       portIndex += funcType.getInputs().size();
 
       // Connect result outputs
-      ArrayRef<Value> bodyResults = ctx.getSignalTracker().getBodyResults(func.functionNameAttr());
+      ArrayRef<Value> bodyResults =
+          ctx.getSignalTracker().getBodyResults(func.functionNameAttr());
       for (auto [idx, _] : llvm::enumerate(funcType.getResults())) {
-        Value resultPort = firrtlModule.getBodyBlock()->getArgument(portIndex++);
+        Value resultPort =
+            firrtlModule.getBodyBlock()->getArgument(portIndex++);
         if (idx < bodyResults.size() && bodyResults[idx]) {
-          builder.create<ConnectOp>(func.getLoc(), resultPort, bodyResults[idx]);
+          builder.create<ConnectOp>(func.getLoc(), resultPort,
+                                    bodyResults[idx]);
         }
       }
 
     } else if (func.getFunctionKind() == FunctionKind::Value) {
       // Connect ready output
       Value readyPort = firrtlModule.getBodyBlock()->getArgument(portIndex++);
-      if (Value readySignal = ctx.getSignalTracker().getReady(func.functionNameAttr())) {
+      if (Value readySignal =
+              ctx.getSignalTracker().getReadyName(func.functionNameAttr())) {
         builder.create<ConnectOp>(func.getLoc(), readyPort, readySignal);
       }
 
-      // Connect result outputs
+      // Skip arg input ports
       auto funcType = cast<FunctionType>(func.getFunctionType());
-      ArrayRef<Value> bodyResults = ctx.getSignalTracker().getBodyResults(func.functionNameAttr());
+      portIndex += funcType.getInputs().size();
+
+      // Connect result outputs
+      ArrayRef<Value> bodyResults =
+          ctx.getSignalTracker().getBodyResults(func.functionNameAttr());
       for (auto [idx, _] : llvm::enumerate(funcType.getResults())) {
-        Value resultPort = firrtlModule.getBodyBlock()->getArgument(portIndex++);
+        Value resultPort =
+            firrtlModule.getBodyBlock()->getArgument(portIndex++);
         if (idx < bodyResults.size() && bodyResults[idx]) {
-          builder.create<ConnectOp>(func.getLoc(), resultPort, bodyResults[idx]);
+          builder.create<ConnectOp>(func.getLoc(), resultPort,
+                                    bodyResults[idx]);
         }
       }
     }
@@ -869,22 +872,14 @@ LogicalResult LowerCmt2ToFIRRTLPass::connectOutputPorts(cmt2::ModuleOp module,
 // Function-Level Operations
 //===----------------------------------------------------------------------===//
 
-LogicalResult LowerCmt2ToFIRRTLPass::processFunction(Cmt2FunctionLike func,
-                                                   ModuleConversionContext &ctx,
-                                                   ImplicitLocOpBuilder &builder) {
-  // Get calls for this function from CallInfo analysis
-  const ModuleCallInfo *callInfo = ctx.getCallInfo();
-  SmallVector<CallInfo> calls;
-  if (callInfo) {
-    auto it = callInfo->find(SymbolRefAttr::get(func.functionNameAttr()));
-    if (it != callInfo->end()) {
-      calls.assign(it->second.begin(), it->second.end());
-    }
-  }
+LogicalResult
+LowerCmt2ToFIRRTLPass::processFunction(Cmt2FunctionLike func,
+                                       ModuleConversionContext &ctx,
+                                       ImplicitLocOpBuilder &builder) {
 
   // Map function parameters to FIRRTL module ports
   if (!func.isExternal()) {
-    mapFunctionArgumentsToports(func, ctx, builder);
+    mapFunctionArgumentsToPorts(func, ctx, builder);
   }
 
   // Clone guard region to compute guard condition
@@ -897,9 +892,12 @@ LogicalResult LowerCmt2ToFIRRTLPass::processFunction(Cmt2FunctionLike func,
   }
 
   // Default guard to true if not specified
-  Value guardResult = guardResults.empty()
-      ? builder.create<ConstantOp>(func.getLoc(), UIntType::get(builder.getContext(), 1), APInt(1, 1))
-      : guardResults[0];
+  Value guardResult =
+      guardResults.empty()
+          ? builder.create<ConstantOp>(func.getLoc(),
+                                       UIntType::get(builder.getContext(), 1),
+                                       APInt(1, 1))
+          : guardResults[0];
 
   // Find the schedule group containing this function
   const ScheduleGroup *containingGroup = nullptr;
@@ -915,7 +913,8 @@ LogicalResult LowerCmt2ToFIRRTLPass::processFunction(Cmt2FunctionLike func,
   }
 
   // Generate control signals
-  Value readySignal = generateReadySignal(func, guardResult, calls, *containingGroup, ctx, builder);
+  Value readySignal =
+      generateReadySignal(func, guardResult, *containingGroup, ctx, builder);
   ctx.getSignalTracker().setReady(func.functionNameAttr(), readySignal);
 
   Value fireSignal = generateFireSignal(func, readySignal, ctx, builder);
@@ -925,11 +924,9 @@ LogicalResult LowerCmt2ToFIRRTLPass::processFunction(Cmt2FunctionLike func,
   if (!func.isExternal() && func->getNumRegions() > 1) {
     Region &bodyRegion = func->getRegion(1);
 
-    // Get result names if available
-    ArrayAttr bodyResNames = getBodyResNames(func);
-
     // Create wires for result values (to escape the when block's region)
-    // Only create wires for Methods and Values (which have output ports), not for Rules
+    // Only create wires for Methods and Values (which have output ports), not
+    // for Rules
     auto funcType = cast<FunctionType>(func.getFunctionType());
     SmallVector<Value> resultWires;
     bool needsResultWires = (func.getFunctionKind() == FunctionKind::Method ||
@@ -939,21 +936,24 @@ LogicalResult LowerCmt2ToFIRRTLPass::processFunction(Cmt2FunctionLike func,
     if (needsResultWires) {
       for (auto [idx, resType] : llvm::enumerate(funcType.getResults())) {
         auto firrtlType = cast<FIRRTLBaseType>(resType);
-        StringRef resName = bodyResNames && idx < bodyResNames.size()
-                                ? cast<StringAttr>(bodyResNames[idx]).getValue()
-                                : ("result" + std::to_string(idx));
-        auto wire = builder.create<WireOp>(func.getLoc(), firrtlType,
-                                            builder.getStringAttr(func.functionName().str() + "_" + resName.str()));
 
-        // Initialize wire with invalidvalue to satisfy FIRRTL's full initialization requirement
-        Value invalid = builder.create<InvalidValueOp>(func.getLoc(), firrtlType);
+        std::string resultName =
+            getFunctionPortName(func, PortKind::Result, idx);
+        auto wire = builder.create<WireOp>(func.getLoc(), firrtlType,
+                                           builder.getStringAttr(resultName));
+
+        // Initialize wire with invalidvalue to satisfy FIRRTL's full
+        // initialization requirement
+        Value invalid =
+            builder.create<InvalidValueOp>(func.getLoc(), firrtlType);
         builder.create<ConnectOp>(func.getLoc(), wire.getResult(), invalid);
 
         resultWires.push_back(wire.getResult());
       }
     }
 
-    auto whenOp = builder.create<WhenOp>(func.getLoc(), fireSignal, /*withElseRegion=*/false);
+    auto whenOp = builder.create<WhenOp>(func.getLoc(), fireSignal,
+                                         /*withElseRegion=*/false);
 
     OpBuilder::InsertionGuard guard(builder);
     builder.setInsertionPointToStart(&whenOp.getThenBlock());
@@ -963,7 +963,8 @@ LogicalResult LowerCmt2ToFIRRTLPass::processFunction(Cmt2FunctionLike func,
       return failure();
     }
 
-    // Connect body results to wires inside the when block (only if there are results)
+    // Connect body results to wires inside the when block (only if there are
+    // results)
     if (!resultWires.empty()) {
       for (auto [wire, result] : llvm::zip(resultWires, bodyResults)) {
         if (result) {
@@ -979,27 +980,24 @@ LogicalResult LowerCmt2ToFIRRTLPass::processFunction(Cmt2FunctionLike func,
   return success();
 }
 
-void LowerCmt2ToFIRRTLPass::mapFunctionArgumentsToports(Cmt2FunctionLike func,
-                                                         ModuleConversionContext &ctx,
-                                                         OpBuilder &builder) {
+void LowerCmt2ToFIRRTLPass::mapFunctionArgumentsToPorts(
+    Cmt2FunctionLike func, ModuleConversionContext &ctx, OpBuilder &builder) {
   FModuleOp firrtlModule = ctx.getFIRRTLModule();
-  auto argNames = getArgNames(func);
 
   // Map block arguments from all regions (guard and body) to FIRRTL ports
   for (Region &region : func->getRegions()) {
     if (region.empty())
       continue;
 
-    for (auto [idx, blockArg] : llvm::enumerate(region.front().getArguments())) {
+    for (auto [idx, blockArg] :
+         llvm::enumerate(region.front().getArguments())) {
       // Use the same naming convention as createFunctionPorts
-      StringRef argName = idx < argNames.size()
-                              ? cast<StringAttr>(argNames[idx]).getValue()
-                              : ("arg" + std::to_string(idx));
-      StringAttr argPortName = builder.getStringAttr(
-          func.functionName().str() + "_" + argName.str());
+      std::string argPortName =
+          getFunctionPortName(func, PortKind::Argument, idx);
 
       // Find the corresponding port in the FIRRTL module
-      for (size_t portIdx = 0; portIdx < firrtlModule.getNumPorts(); ++portIdx) {
+      for (size_t portIdx = 0; portIdx < firrtlModule.getNumPorts();
+           ++portIdx) {
         if (firrtlModule.getPortName(portIdx) == argPortName) {
           ctx.getIRMapping().map(blockArg, firrtlModule.getArgument(portIdx));
           break;
@@ -1015,9 +1013,8 @@ void LowerCmt2ToFIRRTLPass::mapFunctionArgumentsToports(Cmt2FunctionLike func,
 
 Value LowerCmt2ToFIRRTLPass::generateReadySignal(
     Cmt2FunctionLike func, Value guardResult,
-    const SmallVector<CallInfo> &calls,
-    const ScheduleGroup &group,
-    ModuleConversionContext &ctx,
+    // const SmallVector<CallInfo> &calls,
+    const ScheduleGroup &group, ModuleConversionContext &ctx,
     ImplicitLocOpBuilder &builder) {
 
   // ready = guard ∧ called_readies ∧ ¬(conflicting_fires)
@@ -1026,12 +1023,11 @@ Value LowerCmt2ToFIRRTLPass::generateReadySignal(
   FModuleOp firrtlModule = ctx.getFIRRTLModule();
 
   // AND with ready signals of called functions
-  for (const auto &call : calls) {
-    // Check if this is an interface call
+  func->walk([&](cmt2::CallOp call) {
     InterfaceDeclOp interfaceDecl;
     for (auto &op : ctx.getCmt2Module().getBodyRegion().front()) {
       if (auto decl = dyn_cast<InterfaceDeclOp>(op)) {
-        if (decl.getSymNameAttr() == call.calleeInstance.getLeafReference()) {
+        if (decl.getSymNameAttr() == call.getCallee().getLeafReference()) {
           interfaceDecl = decl;
           break;
         }
@@ -1040,71 +1036,144 @@ Value LowerCmt2ToFIRRTLPass::generateReadySignal(
 
     if (interfaceDecl) {
       // Interface call - get ready from interface port
-      StringRef declName = interfaceDecl.getSymName();
-      StringRef methodName = call.calleeEntity.getLeafReference().getValue();
-      StringAttr readyPortName = builder.getStringAttr(
-          declName.str() + "_" + methodName.str() + "_ready");
 
-      Value readyPort = nullptr;
-      for (size_t portIdx = 0; portIdx < firrtlModule.getNumPorts(); ++portIdx) {
-        if (firrtlModule.getPortName(portIdx) == readyPortName) {
-          readyPort = firrtlModule.getArgument(portIdx);
-          break;
-        }
-      }
+      // get the callee function
+      auto iface = getInterfaceForDecl(interfaceDecl);
+      auto func =
+          iface.getFunctionOfName(call.getMethodOrValue().getLeafReference());
+      std::string readyPortName =
+          getItfcDeclFunctionPortName(interfaceDecl, func, PortKind::Help, 0);
 
-      if (readyPort) {
-        ready = builder.create<AndPrimOp>(func.getLoc(), ready, readyPort);
+      if (auto readyPortIdx = getPortIndex(firrtlModule, readyPortName)) {
+        ready = builder.create<AndPrimOp>(
+            func.getLoc(), ready, firrtlModule.getArgument(*readyPortIdx));
       }
     } else {
-      // Regular instance call - get ready from signal tracker
-      if (Value calleeReady = ctx.getSignalTracker().getReady(call.calleeEntity.getLeafReference())) {
-        ready = builder.create<AndPrimOp>(func.getLoc(), ready, calleeReady);
+      // Regular instance call - external or cmt2.module
+
+      auto instanceName = call.getCallee().getRootReference();
+      auto methodName = call.getMethodOrValue().getLeafReference();
+      firrtl::InstanceOp firrtlInst = ctx.getInstance(instanceName);
+
+      cmt2::InstanceOp cmt2Inst;
+
+      for (auto &op : ctx.getCmt2Module().getBodyRegion().front()) {
+        if (auto inst = dyn_cast<cmt2::InstanceOp>(op)) {
+          if (inst.getSymNameAttr() == instanceName) {
+            cmt2Inst = inst;
+            break;
+          }
+        }
       }
-    }
-  }
 
-  // AND with NOT(preceding conflicting functions fired)
-  const auto &funcs = group.getFunctions();
-  auto funcIt = llvm::find(funcs, func.functionNameAttr());
-  if (funcIt != funcs.end()) {
-    for (auto it = funcs.begin(); it != funcIt; ++it) {
-      StringAttr precedingFunc = *it;
-      auto rel = ctx.getConflictMatrix()->getRelationship(precedingFunc, func.functionNameAttr());
+      auto referencedModule = cmt2Inst.getReferencedModule();
 
-      // If preceding function conflicts or must execute before, ensure it hasn't fired
-      if (rel == Relationship::Conflict || rel == Relationship::SequentialBefore) {
-        if (Value precedingFire = ctx.getSignalTracker().getFire(precedingFunc)) {
-          Value notFired = builder.create<XorPrimOp>(func.getLoc(), precedingFire,
-              builder.create<ConstantOp>(func.getLoc(), UIntType::get(builder.getContext(), 1), APInt(1, 1)));
-          ready = builder.create<AndPrimOp>(func.getLoc(), ready, notFired);
+      if (auto extModOp =
+              dyn_cast<ExtModuleFirrtlOp>(referencedModule.getOperation())) {
+        // External FIRRTL module - use bind operations
+        Cmt2FunctionLike bindFunc;
+        for (auto &bodyOp : extModOp.getBodyRegion().front()) {
+          if (auto bindMethod = dyn_cast<BindMethodOp>(bodyOp)) {
+            if (bindMethod.getSymNameAttr() == methodName) {
+              bindFunc = bindMethod;
+              break;
+            }
+          } else if (auto bindValue = dyn_cast<BindValueOp>(bodyOp)) {
+            if (bindValue.getSymNameAttr() == methodName) {
+              bindFunc = bindValue;
+              break;
+            }
+          }
+        }
+
+        std::optional<std::string> readyName;
+        if (auto bindMethod = dyn_cast<BindMethodOp>(bindFunc.getOperation())) {
+          readyName = bindMethod.getReadyName();
+        } else if (auto bindValue =
+                       dyn_cast<BindValueOp>(bindFunc.getOperation())) {
+          readyName = bindValue.getReadyName();
+        }
+
+        if (readyName) {
+          auto readyPortName = builder.getStringAttr(readyName.value());
+          if (auto readyPortIdx =
+                  getPortIndex(firrtlInst, readyPortName.getValue().str())) {
+            LLVM_DEBUG(llvm::dbgs() << "ready port found from external: "
+                                    << readyPortName << "\n");
+            ready = builder.create<AndPrimOp>(
+                call.getLoc(), ready, firrtlInst.getResult(*readyPortIdx));
+          }
+        }
+      } else if (auto cmt2Mod = dyn_cast<cmt2::ModuleOp>(
+                     referencedModule.getOperation())) {
+        Cmt2FunctionLike targetFunc;
+        for (auto &op : cmt2Mod.getBodyRegion().front()) {
+          if (auto func = dyn_cast<Cmt2FunctionLike>(op)) {
+            if (func.functionNameAttr() == methodName) {
+              targetFunc = func;
+              break;
+            }
+          }
+        }
+
+        std::string readyPortName =
+            getFunctionPortName(targetFunc, PortKind::Help, 0);
+        if (auto readyPortIdx = getPortIndex(firrtlInst, readyPortName)) {
+          LLVM_DEBUG(llvm::dbgs()
+                     << "ready port found for " << referencedModule.moduleName()
+                     << " : " << readyPortName << "\n");
+          ready = builder.create<AndPrimOp>(
+              call.getLoc(), ready, firrtlInst.getResult(*readyPortIdx));
         }
       }
     }
-  }
+  });
 
+  // AND with NOT(preceding conflicting functions fired)
+  // Only ConflictMatrix relationships prevent concurrent firing
+  // const auto &funcs = group.getFunctions();
+  const auto &preventing = group.getPreventingFirings();
+  auto funcName = func.functionNameAttr();
+
+  for (auto prevent : preventing) {
+    if (prevent.later == funcName) {
+      if (auto precedingFire =
+              ctx.getSignalTracker().getFire(prevent.earlier)) {
+        Value notFired = builder.create<XorPrimOp>(
+            func.getLoc(), precedingFire,
+            builder.create<ConstantOp>(func.getLoc(),
+                                       UIntType::get(builder.getContext(), 1),
+                                       APInt(1, 1)));
+        ready = builder.create<AndPrimOp>(func.getLoc(), ready, notFired);
+      }
+    }
+  }
   return ready;
 }
 
-Value LowerCmt2ToFIRRTLPass::generateFireSignal(
-    Cmt2FunctionLike func, Value readySignal,
-    ModuleConversionContext &ctx,
-    ImplicitLocOpBuilder &builder) {
+Value LowerCmt2ToFIRRTLPass::generateFireSignal(Cmt2FunctionLike func,
+                                                Value readySignal,
+                                                ModuleConversionContext &ctx,
+                                                ImplicitLocOpBuilder &builder) {
 
   // For methods: fire = ready ∧ enable
   // For rules/values: fire = ready
   if (func.getFunctionKind() == FunctionKind::Method) {
-    Value enableSignal = ctx.getSignalTracker().getEnable(func.functionNameAttr());
+    Value enableSignal =
+        ctx.getSignalTracker().getEnableName(func.functionNameAttr());
 
     if (!enableSignal) {
       // Find enable port in FIRRTL module
       FModuleOp firrtlModule = ctx.getFIRRTLModule();
-      StringAttr enablePortName = builder.getStringAttr(func.functionName().str() + "_enable");
+      StringAttr enablePortName =
+          builder.getStringAttr(func.functionName().str() + "_enable");
 
-      for (size_t portIdx = 0; portIdx < firrtlModule.getNumPorts(); ++portIdx) {
+      for (size_t portIdx = 0; portIdx < firrtlModule.getNumPorts();
+           ++portIdx) {
         if (firrtlModule.getPortName(portIdx) == enablePortName) {
           enableSignal = firrtlModule.getArgument(portIdx);
-          ctx.getSignalTracker().setEnable(func.functionNameAttr(), enableSignal);
+          ctx.getSignalTracker().setEnable(func.functionNameAttr(),
+                                           enableSignal);
           break;
         }
       }
@@ -1127,17 +1196,16 @@ Value LowerCmt2ToFIRRTLPass::generateFireSignal(
 //===----------------------------------------------------------------------===//
 
 LogicalResult LowerCmt2ToFIRRTLPass::cloneRegionOps(
-    Region &sourceRegion,
-    ModuleConversionContext &ctx,
-    ImplicitLocOpBuilder &builder,
-    SmallVectorImpl<Value> &results) {
+    Region &sourceRegion, ModuleConversionContext &ctx,
+    ImplicitLocOpBuilder &builder, SmallVectorImpl<Value> &results) {
 
   if (sourceRegion.empty())
     return success();
 
   Block &sourceBlock = sourceRegion.front();
 
-  // Clone each operation, handling cmt2.return and cmt2.call specially
+  // Clone each operation, handling cmt2.return, cmt2.call, and cmt2.if
+  // specially
   for (Operation &op : sourceBlock) {
     if (auto returnOp = dyn_cast<ReturnOp>(op)) {
       // Collect return values as results
@@ -1155,9 +1223,80 @@ LogicalResult LowerCmt2ToFIRRTLPass::cloneRegionOps(
       continue;
     }
 
+    if (auto ifOp = dyn_cast<IfOp>(op)) {
+      // Convert cmt2.if to firrtl.when
+      Value condition = ctx.getIRMapping().lookupOrDefault(ifOp.getCondition());
+      bool hasElse = !ifOp.getElseRegion().empty();
+
+      // Create result wires if the if operation has results
+      SmallVector<Value> resultWires;
+      for (auto resultType : ifOp.getResults().getTypes()) {
+        auto wire = builder.create<WireOp>(ifOp.getLoc(), resultType,
+                                           builder.getStringAttr("if_result"));
+        resultWires.push_back(wire.getResult());
+      }
+
+      auto whenOp = builder.create<WhenOp>(ifOp.getLoc(), condition, hasElse);
+
+      // Clone then region
+      {
+        OpBuilder::InsertionGuard guard(builder);
+        builder.setInsertionPointToStart(&whenOp.getThenBlock());
+
+        SmallVector<Value> thenResults;
+        if (failed(cloneRegionOps(ifOp.getThenRegion(), ctx, builder,
+                                  thenResults))) {
+          return failure();
+        }
+
+        // Connect then results to wires
+        for (auto [wire, result] : llvm::zip(resultWires, thenResults)) {
+          if (result) {
+            builder.create<ConnectOp>(ifOp.getLoc(), wire, result);
+          }
+        }
+      }
+
+      // Clone else region if present
+      if (hasElse) {
+        OpBuilder::InsertionGuard guard(builder);
+        builder.setInsertionPointToStart(&whenOp.getElseBlock());
+
+        SmallVector<Value> elseResults;
+        if (failed(cloneRegionOps(ifOp.getElseRegion(), ctx, builder,
+                                  elseResults))) {
+          return failure();
+        }
+
+        // Connect else results to wires
+        for (auto [wire, result] : llvm::zip(resultWires, elseResults)) {
+          if (result) {
+            builder.create<ConnectOp>(ifOp.getLoc(), wire, result);
+          }
+        }
+      }
+
+      // Map the if results to the wires
+      for (auto [oldResult, newResult] :
+           llvm::zip(ifOp.getResults(), resultWires)) {
+        ctx.getIRMapping().map(oldResult, newResult);
+      }
+
+      continue;
+    }
+
+    if (auto yieldOp = dyn_cast<YieldOp>(op)) {
+      // Collect yield values as results (similar to return)
+      for (Value result : yieldOp.getOperands()) {
+        results.push_back(ctx.getIRMapping().lookupOrDefault(result));
+      }
+      continue;
+    }
+
     // Clone other operations normally
     Operation *cloned = builder.clone(op, ctx.getIRMapping());
-    for (auto [oldResult, newResult] : llvm::zip(op.getResults(), cloned->getResults())) {
+    for (auto [oldResult, newResult] :
+         llvm::zip(op.getResults(), cloned->getResults())) {
       ctx.getIRMapping().map(oldResult, newResult);
     }
   }
@@ -1165,10 +1304,10 @@ LogicalResult LowerCmt2ToFIRRTLPass::cloneRegionOps(
   return success();
 }
 
-LogicalResult LowerCmt2ToFIRRTLPass::convertCallOp(
-    CallOp callOp,
-    ModuleConversionContext &ctx,
-    ImplicitLocOpBuilder &builder) {
+LogicalResult
+LowerCmt2ToFIRRTLPass::convertCallOp(CallOp callOp,
+                                     ModuleConversionContext &ctx,
+                                     ImplicitLocOpBuilder &builder) {
 
   // Get callee information from the call
   StringAttr instanceName = callOp.getCallee().getRootReference();
@@ -1188,7 +1327,8 @@ LogicalResult LowerCmt2ToFIRRTLPass::convertCallOp(
     }
 
     if (!interfaceDecl) {
-      return callOp.emitError("Interface declaration not found: ") << instanceName;
+      return callOp.emitError("Interface declaration not found: ")
+             << instanceName;
     }
 
     return connectInterfaceCall(callOp, interfaceDecl, ctx, builder);
@@ -1217,11 +1357,13 @@ LogicalResult LowerCmt2ToFIRRTLPass::convertCallOp(
 
   auto referencedModule = cmt2Inst.getReferencedModule();
   if (!referencedModule) {
-    return callOp.emitError("Referenced module not found for instance: ") << instanceName;
+    return callOp.emitError("Referenced module not found for instance: ")
+           << instanceName;
   }
 
   // Check if it's an external FIRRTL module or a regular cmt2 module
-  if (auto extModOp = dyn_cast<ExtModuleFirrtlOp>(referencedModule.getOperation())) {
+  if (auto extModOp =
+          dyn_cast<ExtModuleFirrtlOp>(referencedModule.getOperation())) {
     // External FIRRTL module - use bind operations
     Cmt2FunctionLike bindFunc;
     for (auto &bodyOp : extModOp.getBodyRegion().front()) {
@@ -1245,10 +1387,12 @@ LogicalResult LowerCmt2ToFIRRTLPass::convertCallOp(
     // Dispatch to method or value conversion
     if (auto bindMethod = dyn_cast<BindMethodOp>(bindFunc.getOperation())) {
       return connectMethodCall(callOp, bindMethod, firrtlInst, ctx, builder);
-    } else if (auto bindValue = dyn_cast<BindValueOp>(bindFunc.getOperation())) {
+    } else if (auto bindValue =
+                   dyn_cast<BindValueOp>(bindFunc.getOperation())) {
       return connectValueCall(callOp, bindValue, firrtlInst, ctx, builder);
     }
-  } else if (auto cmt2Mod = dyn_cast<cmt2::ModuleOp>(referencedModule.getOperation())) {
+  } else if (auto cmt2Mod =
+                 dyn_cast<cmt2::ModuleOp>(referencedModule.getOperation())) {
     // Regular cmt2 module - directly access method/value ports
     // Find the function in the module to determine if it's a method or value
     Cmt2FunctionLike targetFunc;
@@ -1265,124 +1409,109 @@ LogicalResult LowerCmt2ToFIRRTLPass::convertCallOp(
       return callOp.emitError("Function not found in module: ") << methodName;
     }
 
-    auto targetArgNames = getArgNames(targetFunc);
-    auto targetBodyResNames = getBodyResNames(targetFunc);
-
     SmallVector<Value> mappedResults;
 
     if (targetFunc.getFunctionKind() == FunctionKind::Method) {
       // Drive enable signal
-      StringAttr enablePortName = builder.getStringAttr(methodName.str() + "_enable");
+      std::string enablePortName =
+          getFunctionPortName(targetFunc, PortKind::Help, 1);
       if (auto enablePortIdx = getPortIndex(firrtlInst, enablePortName)) {
         Value one = builder.create<ConstantOp>(
-            callOp.getLoc(), UIntType::get(builder.getContext(), 1), APInt(1, 1));
-        builder.create<ConnectOp>(callOp.getLoc(), firrtlInst.getResult(*enablePortIdx), one);
+            callOp.getLoc(), UIntType::get(builder.getContext(), 1),
+            APInt(1, 1));
+        builder.create<ConnectOp>(callOp.getLoc(),
+                                  firrtlInst.getResult(*enablePortIdx), one);
       } else {
         return callOp.emitError("Enable port not found: ") << enablePortName;
       }
+    }
 
-      // Connect input arguments using proper names
-      for (auto [idx, operand] : llvm::enumerate(callOp.getOperands())) {
-        StringRef argName = idx < targetArgNames.size()
-                                ? cast<StringAttr>(targetArgNames[idx]).getValue()
-                                : ("arg" + std::to_string(idx));
-        StringAttr argPortName = builder.getStringAttr(
-            methodName.str() + "_" + argName.str());
-        if (auto portIdx = getPortIndex(firrtlInst, argPortName)) {
-          Value mappedOperand = ctx.getIRMapping().lookupOrDefault(operand);
-          if (!mappedOperand) {
-            return callOp.emitError("Call operand was not properly mapped to FIRRTL context");
-          }
-          builder.create<ConnectOp>(callOp.getLoc(), firrtlInst.getResult(*portIdx), mappedOperand);
-        } else {
-          return callOp.emitError("Argument port not found: ") << argPortName;
+    // Connect input arguments using proper names
+    for (auto [idx, operand] : llvm::enumerate(callOp.getOperands())) {
+      std::string argName =
+          getFunctionPortName(targetFunc, PortKind::Argument, idx);
+      if (auto portIdx = getPortIndex(firrtlInst, argName)) {
+        Value mappedOperand = ctx.getIRMapping().lookupOrDefault(operand);
+        if (!mappedOperand) {
+          return callOp.emitError(
+              "Call operand was not properly mapped to FIRRTL context");
         }
+        builder.create<ConnectOp>(
+            callOp.getLoc(), firrtlInst.getResult(*portIdx), mappedOperand);
+      } else {
+        return callOp.emitError("Argument port not found: ") << argName;
       }
+    }
 
-      // Read output results using proper names
-      for (size_t idx = 0; idx < callOp.getNumResults(); ++idx) {
-        StringRef resName = targetBodyResNames && idx < targetBodyResNames.size()
-                                ? cast<StringAttr>(targetBodyResNames[idx]).getValue()
-                                : ("result" + std::to_string(idx));
-        StringAttr resultPortName = builder.getStringAttr(
-            methodName.str() + "_" + resName.str());
-        if (auto portIdx = getPortIndex(firrtlInst, resultPortName)) {
-          mappedResults.push_back(firrtlInst.getResult(*portIdx));
-        } else {
-          return callOp.emitError("Result port not found: ") << resultPortName;
-        }
-      }
-    } else if (targetFunc.getFunctionKind() == FunctionKind::Value) {
-      // Read data results directly (values have no enable signal) using proper names
-      for (size_t idx = 0; idx < callOp.getNumResults(); ++idx) {
-        StringRef resName = targetBodyResNames && idx < targetBodyResNames.size()
-                                ? cast<StringAttr>(targetBodyResNames[idx]).getValue()
-                                : ("result" + std::to_string(idx));
-        StringAttr resultPortName = builder.getStringAttr(
-            methodName.str() + "_" + resName.str());
-        if (auto portIdx = getPortIndex(firrtlInst, resultPortName)) {
-          mappedResults.push_back(firrtlInst.getResult(*portIdx));
-        } else {
-          return callOp.emitError("Result port not found: ") << resultPortName;
-        }
+    // Read output results using proper names
+    for (size_t idx = 0; idx < callOp.getNumResults(); ++idx) {
+      std::string resName =
+          getFunctionPortName(targetFunc, PortKind::Result, idx);
+      if (auto portIdx = getPortIndex(firrtlInst, resName)) {
+        mappedResults.push_back(firrtlInst.getResult(*portIdx));
+      } else {
+        return callOp.emitError("Result port not found: ") << resName;
       }
     }
 
     // Map call results to instance ports
-    for (auto [callResult, portValue] : llvm::zip(callOp.getResults(), mappedResults)) {
+    for (auto [callResult, portValue] :
+         llvm::zip(callOp.getResults(), mappedResults)) {
       ctx.getIRMapping().map(callResult, portValue);
     }
 
-    return success();
   } else {
     return callOp.emitError("Unsupported module type for call");
   }
 
-  return failure();
+  return success();
 }
 
 LogicalResult LowerCmt2ToFIRRTLPass::connectMethodCall(
-    CallOp callOp, BindMethodOp bindMethod,
-    firrtl::InstanceOp firrtlInst,
-    ModuleConversionContext &ctx,
-    ImplicitLocOpBuilder &builder) {
+    CallOp callOp, BindMethodOp bindMethod, firrtl::InstanceOp firrtlInst,
+    ModuleConversionContext &ctx, ImplicitLocOpBuilder &builder) {
 
   // Drive enable signal to 1
-  if (auto enableAttr = bindMethod.getEnable()) {
+  if (auto enableAttr = bindMethod.getEnableName()) {
     StringAttr enablePortName = builder.getStringAttr(enableAttr.value());
-    if (auto enablePortIdx = getPortIndex(firrtlInst, enablePortName)) {
+    if (auto enablePortIdx =
+            getPortIndex(firrtlInst, enablePortName.getValue().str())) {
       Value one = builder.create<ConstantOp>(
           callOp.getLoc(), UIntType::get(builder.getContext(), 1), APInt(1, 1));
-      builder.create<ConnectOp>(callOp.getLoc(), firrtlInst.getResult(*enablePortIdx), one);
+      builder.create<ConnectOp>(callOp.getLoc(),
+                                firrtlInst.getResult(*enablePortIdx), one);
     } else {
       return callOp.emitError("Enable port not found: ") << enablePortName;
     }
   }
 
   // Connect input arguments
-  auto inputsAttr = bindMethod.getInputs();
+  auto inputsAttr = bindMethod.getArgNames();
   if (inputsAttr.size() != callOp.getNumOperands()) {
     return callOp.emitError("Operand count mismatch: expected ")
            << inputsAttr.size() << " but got " << callOp.getNumOperands();
   }
 
-  for (auto [operand, inputAttr] : llvm::zip(callOp.getOperands(), inputsAttr)) {
-    auto portAttr = cast<FlatSymbolRefAttr>(inputAttr);
-    auto portIdx = getPortIndex(firrtlInst, portAttr.getAttr());
+  for (auto [operand, inputAttr] :
+       llvm::zip(callOp.getOperands(), inputsAttr)) {
+    auto portAttr = cast<StringAttr>(inputAttr);
+    auto portIdx = getPortIndex(firrtlInst, portAttr.getValue().str());
     if (!portIdx) {
       return callOp.emitError("Input port not found: ") << portAttr;
     }
 
     Value mappedOperand = ctx.getIRMapping().lookupOrDefault(operand);
     if (!mappedOperand) {
-      return callOp.emitError("Call operand was not properly mapped to FIRRTL context");
+      return callOp.emitError(
+          "Call operand was not properly mapped to FIRRTL context");
     }
 
-    builder.create<ConnectOp>(callOp.getLoc(), firrtlInst.getResult(*portIdx), mappedOperand);
+    builder.create<ConnectOp>(callOp.getLoc(), firrtlInst.getResult(*portIdx),
+                              mappedOperand);
   }
 
   // Read output results
-  auto outputsAttr = bindMethod.getOutputs();
+  auto outputsAttr = bindMethod.getBodyResNames();
   if (outputsAttr.size() != callOp.getNumResults()) {
     return callOp.emitError("Result count mismatch: expected ")
            << outputsAttr.size() << " but got " << callOp.getNumResults();
@@ -1390,8 +1519,8 @@ LogicalResult LowerCmt2ToFIRRTLPass::connectMethodCall(
 
   SmallVector<Value> mappedResults;
   for (auto outputAttr : outputsAttr) {
-    auto portAttr = cast<FlatSymbolRefAttr>(outputAttr);
-    auto portIdx = getPortIndex(firrtlInst, portAttr.getAttr());
+    auto portAttr = cast<StringAttr>(outputAttr);
+    auto portIdx = getPortIndex(firrtlInst, portAttr.getValue().str());
     if (!portIdx) {
       return callOp.emitError("Output port not found: ") << portAttr;
     }
@@ -1399,7 +1528,8 @@ LogicalResult LowerCmt2ToFIRRTLPass::connectMethodCall(
   }
 
   // Map call results to instance ports
-  for (auto [callResult, portValue] : llvm::zip(callOp.getResults(), mappedResults)) {
+  for (auto [callResult, portValue] :
+       llvm::zip(callOp.getResults(), mappedResults)) {
     ctx.getIRMapping().map(callResult, portValue);
   }
 
@@ -1407,13 +1537,36 @@ LogicalResult LowerCmt2ToFIRRTLPass::connectMethodCall(
 }
 
 LogicalResult LowerCmt2ToFIRRTLPass::connectValueCall(
-    CallOp callOp, BindValueOp bindValue,
-    firrtl::InstanceOp firrtlInst,
-    ModuleConversionContext &ctx,
-    ImplicitLocOpBuilder &builder) {
+    CallOp callOp, BindValueOp bindValue, firrtl::InstanceOp firrtlInst,
+    ModuleConversionContext &ctx, ImplicitLocOpBuilder &builder) {
 
-  // Read data results directly (values have no enable signal)
-  auto dataAttr = bindValue.getData();
+  // Connect input arguments
+  auto inputsAttr = bindValue.getArgNames();
+  if (inputsAttr.size() != callOp.getNumOperands()) {
+    return callOp.emitError("Operand count mismatch: expected ")
+           << inputsAttr.size() << " but got " << callOp.getNumOperands();
+  }
+
+  for (auto [operand, inputAttr] :
+       llvm::zip(callOp.getOperands(), inputsAttr)) {
+    auto portAttr = cast<StringAttr>(inputAttr);
+    auto portIdx = getPortIndex(firrtlInst, portAttr.getValue().str());
+    if (!portIdx) {
+      return callOp.emitError("Input port not found: ") << portAttr;
+    }
+
+    Value mappedOperand = ctx.getIRMapping().lookupOrDefault(operand);
+    if (!mappedOperand) {
+      return callOp.emitError(
+          "Call operand was not properly mapped to FIRRTL context");
+    }
+
+    builder.create<ConnectOp>(callOp.getLoc(), firrtlInst.getResult(*portIdx),
+                              mappedOperand);
+  }
+
+  // Read data results
+  auto dataAttr = bindValue.getBodyResNames();
   if (dataAttr.size() != callOp.getNumResults()) {
     return callOp.emitError("Result count mismatch: expected ")
            << dataAttr.size() << " but got " << callOp.getNumResults();
@@ -1421,8 +1574,8 @@ LogicalResult LowerCmt2ToFIRRTLPass::connectValueCall(
 
   SmallVector<Value> mappedResults;
   for (auto dataPortAttr : dataAttr) {
-    auto portAttr = cast<FlatSymbolRefAttr>(dataPortAttr);
-    auto portIdx = getPortIndex(firrtlInst, portAttr.getAttr());
+    auto portAttr = cast<StringAttr>(dataPortAttr);
+    auto portIdx = getPortIndex(firrtlInst, portAttr.getValue().str());
     if (!portIdx) {
       return callOp.emitError("Data port not found: ") << portAttr;
     }
@@ -1430,7 +1583,8 @@ LogicalResult LowerCmt2ToFIRRTLPass::connectValueCall(
   }
 
   // Map call results to instance ports
-  for (auto [callResult, portValue] : llvm::zip(callOp.getResults(), mappedResults)) {
+  for (auto [callResult, portValue] :
+       llvm::zip(callOp.getResults(), mappedResults)) {
     ctx.getIRMapping().map(callResult, portValue);
   }
 
@@ -1441,8 +1595,75 @@ LogicalResult LowerCmt2ToFIRRTLPass::connectValueCall(
 // Helper Utilities
 //===----------------------------------------------------------------------===//
 
+// if PortKind == Help, index== 0 (ready), 1 (enable)
+std::string
+LowerCmt2ToFIRRTLPass::getFunctionPortName(cmt2::Cmt2FunctionLike function,
+                                           PortKind portKind, size_t index) {
+  std::string prefix;
+
+  if (!function) {
+    llvm::dbgs() << "Function is nullptr in getFunctionPortName!\n";
+    llvm::dbgs().flush();
+  }
+
+  if (auto p = ::llvm::dyn_cast_or_null<::mlir::StringAttr>(
+          function.getOperation()->getAttr("prefix"))) {
+    prefix = p.getValue().str();
+  } else if (function.isExternal()) {
+    prefix = "";
+  } else {
+    prefix = function.functionName().str() + "_";
+  }
+
+  std::string base;
+
+  if (portKind == PortKind::Argument) {
+    if (index < function.getNumArguments())
+      base = function.getArgumentName(index);
+    else
+      base = "ArgumentOutOfBound";
+  } else if (portKind == PortKind::Result) {
+    if (index < function.getNumResults())
+      base = function.getResultName(index);
+    else
+      base = "ResultOutOfBound";
+  } else {
+    if (index == 0) {
+      // ready
+      if (auto ready = function.getReadyNameAttr()) {
+        base = ready.getValue().str();
+      } else {
+        base = "ready";
+      }
+    } else {
+      // enable
+      if (auto enable = function.getEnableNameAttr()) {
+        base = enable.getValue().str();
+      } else {
+        base = "enable";
+      }
+    }
+  }
+  return prefix + base;
+}
+
+std::string LowerCmt2ToFIRRTLPass::getItfcDeclFunctionPortName(
+    cmt2::InterfaceDeclOp decl, cmt2::Cmt2FunctionLike function,
+    PortKind portKind, size_t index) {
+
+  std::string portName = getFunctionPortName(function, portKind, index);
+  std::string declName;
+  if (auto prefix = decl.getOperation()->getAttrOfType<StringAttr>("prefix")) {
+    declName = prefix.getValue().str();
+  } else {
+    declName = decl.getSymName().str() + "_";
+  }
+
+  return declName + portName;
+}
+
 FModuleOp LowerCmt2ToFIRRTLPass::findFIRRTLModule(StringRef moduleName,
-                                                    Operation *searchRoot) {
+                                                  Operation *searchRoot) {
   FModuleOp result;
 
   // Search for FIRRTL module in circuits
@@ -1471,10 +1692,22 @@ FModuleOp LowerCmt2ToFIRRTLPass::findFIRRTLModule(StringRef moduleName,
   return result;
 }
 
-std::optional<size_t> LowerCmt2ToFIRRTLPass::getPortIndex(
-    firrtl::InstanceOp inst, StringAttr portName) {
+std::optional<size_t>
+LowerCmt2ToFIRRTLPass::getPortIndex(firrtl::InstanceOp &inst,
+                                    std::string portName) {
   for (size_t i = 0; i < inst.getNumResults(); ++i) {
-    if (inst.getPortName(i) == portName) {
+    if (inst.getPortName(i).getValue() == portName) {
+      return i;
+    }
+  }
+  return std::nullopt;
+}
+
+std::optional<size_t>
+LowerCmt2ToFIRRTLPass::getPortIndex(firrtl::FModuleOp &fMod,
+                                    std::string portName) {
+  for (size_t i = 0; i < fMod.getNumPorts(); ++i) {
+    if (fMod.getPortName(i) == portName) {
       return i;
     }
   }
@@ -1506,136 +1739,145 @@ cmt2::ModuleOp LowerCmt2ToFIRRTLPass::findTopModule(cmt2::CircuitOp circuit) {
   return cmt2::ModuleOp();
 }
 
-ArrayAttr LowerCmt2ToFIRRTLPass::getArgNames(Cmt2FunctionLike func) {
-  if (auto method = dyn_cast<MethodOp>(func.getOperation()))
-    return method.getArgNames();
-  if (auto value = dyn_cast<ValueOp>(func.getOperation()))
-    return value.getArgNames();
-  if (auto rule = dyn_cast<RuleOp>(func.getOperation()))
-    return rule.getArgNames();
-  // BindMethodOp and BindValueOp don't have argNames
-  return ArrayAttr();
-}
-
-ArrayAttr LowerCmt2ToFIRRTLPass::getBodyResNames(Cmt2FunctionLike func) {
-  if (auto method = dyn_cast<MethodOp>(func.getOperation()))
-    return method.getBodyResNames();
-  if (auto value = dyn_cast<ValueOp>(func.getOperation()))
-    return value.getBodyResNames();
-  // Rules and bind operations don't have bodyResNames
-  return ArrayAttr();
-}
-
-std::string LowerCmt2ToFIRRTLPass::buildPortName(StringRef base, StringRef suffix) {
-  return base.str() + "_" + suffix.str();
-}
-
-std::string LowerCmt2ToFIRRTLPass::buildInterfacePortName(StringRef declName,
-                                                            StringRef methodName,
-                                                            StringRef suffix) {
-  return declName.str() + "_" + methodName.str() + "_" + suffix.str();
-}
-
 LogicalResult LowerCmt2ToFIRRTLPass::connectInterfaceBinding(
-    firrtl::InstanceOp childInst, firrtl::InstanceOp parentInst,
-    StringRef childDeclName, StringRef childMethodName, StringRef parentMethodName,
-    Cmt2FunctionLike ifaceFunc, Operation *parentBindOp, bool isExternalFirrtl,
-    ImplicitLocOpBuilder &builder, llvm::SmallDenseSet<size_t> &connectedPorts) {
+    firrtl::InstanceOp declInst,  // decl's instance
+    StringAttr defEntity,         // either an instance, or an decl
+    std::string declFuncName,     // used also as decl's default func name, same
+                                  // as the interface's func name
+    std::string defFuncName,      // def's func name
+    cmt2::InterfaceDeclOp declOp, // decl op
+    cmt2::InterfaceOp iface, cmt2::InstanceOp declCmt2Inst,
+    ModuleConversionContext &ctx, ImplicitLocOpBuilder &builder) {
 
-  auto funcType = cast<FunctionType>(ifaceFunc.getFunctionType());
-  Location loc = childInst.getLoc();
+  // Find the interface method/value definition
+  Cmt2FunctionLike ifaceFunc =
+      iface.getFunctionOfName(builder.getStringAttr(declFuncName));
 
-  // Determine if this is a method or value binding
-  auto parentBindMethod = dyn_cast_or_null<BindMethodOp>(parentBindOp);
-  auto parentBindValue = dyn_cast_or_null<BindValueOp>(parentBindOp);
-  bool isMethod = ifaceFunc.getFunctionKind() == FunctionKind::Method;
+  auto funcType = ifaceFunc.getFunctionType();
 
-  // Connect enable port (methods only, child out -> parent in)
-  if (isMethod) {
-    if (auto childIdx = getPortIndex(childInst, builder.getStringAttr(buildInterfacePortName(childDeclName, childMethodName, "enable")))) {
-      StringAttr parentName = isExternalFirrtl && parentBindMethod && parentBindMethod.getEnable()
-          ? builder.getStringAttr(parentBindMethod.getEnable()->str())
-          : builder.getStringAttr(buildPortName(parentMethodName, "enable"));
-      if (auto parentIdx = getPortIndex(parentInst, parentName)) {
-        builder.create<ConnectOp>(loc, parentInst.getResult(*parentIdx), childInst.getResult(*childIdx));
-        connectedPorts.insert(*childIdx);
-      }
-    }
-  }
+  Location loc = declInst.getLoc();
+  auto module = ctx.getCmt2Module();
+  auto firrtlMod = ctx.getFIRRTLModule();
+  auto defCmt2Inst = module.getInstanceOfName(defEntity.getValue());
+  auto defDecl = module.getItfcDeclOfName(defEntity.getValue());
 
-  // Connect ready port (parent out -> child in)
-  if (auto childIdx = getPortIndex(childInst, builder.getStringAttr(buildInterfacePortName(childDeclName, childMethodName, "ready")))) {
-    StringAttr parentName;
-    if (isExternalFirrtl) {
-      if (parentBindMethod && parentBindMethod.getReady())
-        parentName = builder.getStringAttr(parentBindMethod.getReady()->str());
-      else if (parentBindValue && parentBindValue.getReady())
-        parentName = builder.getStringAttr(parentBindValue.getReady()->str());
-    }
-    if (!parentName)
-      parentName = builder.getStringAttr(buildPortName(parentMethodName, "ready"));
-
-    if (auto parentIdx = getPortIndex(parentInst, parentName)) {
-      builder.create<ConnectOp>(loc, childInst.getResult(*childIdx), parentInst.getResult(*parentIdx));
-      connectedPorts.insert(*childIdx);
-    }
-  }
-
-  // Connect argument ports (methods only, child out -> parent in)
-  if (isMethod) {
-    auto ifaceArgNames = getArgNames(ifaceFunc);
-    auto inputsAttr = isExternalFirrtl && parentBindMethod ? parentBindMethod.getInputs() : ArrayAttr();
-
-    for (auto [idx, argType] : llvm::enumerate(funcType.getInputs())) {
-      StringRef argName = idx < ifaceArgNames.size()
-          ? cast<StringAttr>(ifaceArgNames[idx]).getValue()
-          : ("arg" + std::to_string(idx));
-
-      if (auto childIdx = getPortIndex(childInst, builder.getStringAttr(buildInterfacePortName(childDeclName, childMethodName, argName)))) {
-        StringAttr parentName;
-        if (isExternalFirrtl && inputsAttr && idx < inputsAttr.size()) {
-          auto portAttr = cast<FlatSymbolRefAttr>(inputsAttr[idx]);
-          parentName = builder.getStringAttr(portAttr.getValue().str());
-        } else {
-          parentName = builder.getStringAttr(buildPortName(parentMethodName, argName));
-        }
-
-        if (auto parentIdx = getPortIndex(parentInst, parentName)) {
-          builder.create<ConnectOp>(loc, parentInst.getResult(*parentIdx), childInst.getResult(*childIdx));
-          connectedPorts.insert(*childIdx);
+  firrtl::InstanceOp defInst;
+  Cmt2FunctionLike defFunc;
+  if (defCmt2Inst) {
+    defInst = ctx.getInstance(defEntity);
+    if (auto defMod = dyn_cast<Cmt2ModuleLike>(
+            defCmt2Inst.getReferencedModule().getOperation())) {
+      for (auto &op : defMod.body().front()) {
+        if (auto func = dyn_cast<Cmt2FunctionLike>(op)) {
+          if (func.functionName() == defFuncName)
+            defFunc = func;
         }
       }
     }
+  } else if (defDecl) {
+
+  } else {
+    return declCmt2Inst.emitError("Cannot find " + defEntity.getValue().str() +
+                                  " in " + module.getName());
   }
 
-  // Connect result ports (parent out -> child in)
-  auto ifaceBodyResNames = getBodyResNames(ifaceFunc);
-  ArrayAttr outputsAttr;
-  if (isExternalFirrtl) {
-    if (parentBindMethod)
-      outputsAttr = parentBindMethod.getOutputs();
-    else if (parentBindValue)
-      outputsAttr = parentBindValue.getData();
-  }
+  // Connect enable port (methods only, decl out -> def in)
+  if (ifaceFunc.getFunctionKind() == FunctionKind::Method) {
+    if (auto declIdx =
+            getPortIndex(declInst, getItfcDeclFunctionPortName(
+                                       declOp, ifaceFunc, PortKind::Help, 1))) {
 
-  for (auto [idx, resType] : llvm::enumerate(funcType.getResults())) {
-    StringRef resName = ifaceBodyResNames && idx < ifaceBodyResNames.size()
-        ? cast<StringAttr>(ifaceBodyResNames[idx]).getValue()
-        : ("result" + std::to_string(idx));
-
-    if (auto childIdx = getPortIndex(childInst, builder.getStringAttr(buildInterfacePortName(childDeclName, childMethodName, resName)))) {
-      StringAttr parentName;
-      if (isExternalFirrtl && outputsAttr && idx < outputsAttr.size()) {
-        auto portAttr = cast<FlatSymbolRefAttr>(outputsAttr[idx]);
-        parentName = builder.getStringAttr(portAttr.getValue().str());
+      Value defValue;
+      if (defInst) {
+        if (auto defIdx = getPortIndex(
+                defInst, getFunctionPortName(defFunc, PortKind::Help, 1)))
+          defValue = defInst.getResult(*defIdx);
       } else {
-        parentName = builder.getStringAttr(buildPortName(parentMethodName, resName));
+        if (auto defIdx = getPortIndex(
+                firrtlMod, getItfcDeclFunctionPortName(defDecl, ifaceFunc,
+                                                       PortKind::Help, 1)))
+          defValue = firrtlMod.getArgument(*defIdx);
       }
 
-      if (auto parentIdx = getPortIndex(parentInst, parentName)) {
-        builder.create<ConnectOp>(loc, childInst.getResult(*childIdx), parentInst.getResult(*parentIdx));
-        connectedPorts.insert(*childIdx);
+      builder.create<ConnectOp>(loc, defValue, declInst.getResult(*declIdx));
+    }
+  }
+
+  // Connect ready port (decl in <- def out)
+  if (auto declIdx = getPortIndex(
+          declInst,
+          getItfcDeclFunctionPortName(declOp, ifaceFunc, PortKind::Help, 0))) {
+
+    Value defValue;
+    if (defInst) {
+      if (auto defIdx = getPortIndex(
+              defInst, getFunctionPortName(defFunc, PortKind::Help, 0)))
+        defValue = defInst.getResult(*defIdx);
+      else {
+        return declCmt2Inst.emitError(
+            "cannot find " + getFunctionPortName(defFunc, PortKind::Help, 0) +
+            " port from def instance " + defInst.getName() + " of module " +
+            defInst.getModuleName() + "\n");
       }
+    } else {
+      if (auto defIdx = getPortIndex(
+              firrtlMod, getItfcDeclFunctionPortName(defDecl, ifaceFunc,
+                                                     PortKind::Help, 0)))
+        defValue = firrtlMod.getArgument(*defIdx);
+    }
+
+    // llvm::dbgs() << "declInst has " << declInst.getNumResults()
+    //              << " ports, and we will connect the " << *declIdx
+    //              << "-th one; and defValue is " << defValue << "\n";
+
+    builder.create<ConnectOp>(loc, declInst.getResult(*declIdx), defValue);
+  }
+
+  auto funcInputs = ifaceFunc.getArgumentTypes();
+  llvm::dbgs() << funcInputs;
+
+  // Connect Argument ports (decl out -> def in)
+  for (auto [idx, argType] : llvm::enumerate(funcType.getInputs())) {
+    if (auto declIdx = getPortIndex(
+            declInst, getItfcDeclFunctionPortName(declOp, ifaceFunc,
+                                                  PortKind::Argument, idx))) {
+
+      Value defValue;
+      if (defInst) {
+        if (auto defIdx = getPortIndex(
+                defInst, getFunctionPortName(defFunc, PortKind::Argument, idx)))
+          defValue = defInst.getResult(*defIdx);
+      } else {
+        if (auto defIdx = getPortIndex(
+                firrtlMod, getItfcDeclFunctionPortName(
+                               defDecl, ifaceFunc, PortKind::Argument, idx)))
+          defValue = firrtlMod.getArgument(*defIdx);
+      }
+
+      llvm::dbgs() << "connect with declInst's " << *declIdx << " result\n";
+      llvm::dbgs().flush();
+      builder.create<ConnectOp>(loc, defValue, declInst.getResult(*declIdx));
+    }
+  }
+
+  // Connect Result ports (decl in <- def out)
+  for (auto [idx, argType] : llvm::enumerate(funcType.getResults())) {
+    if (auto declIdx = getPortIndex(
+            declInst, getItfcDeclFunctionPortName(declOp, ifaceFunc,
+                                                  PortKind::Result, idx))) {
+      Value defValue;
+      if (defInst) {
+        if (auto defIdx = getPortIndex(
+                defInst, getFunctionPortName(defFunc, PortKind::Result, idx)))
+          defValue = defInst.getResult(*defIdx);
+      } else {
+        if (auto defIdx = getPortIndex(
+                firrtlMod, getItfcDeclFunctionPortName(defDecl, ifaceFunc,
+                                                       PortKind::Result, idx)))
+          defValue = firrtlMod.getArgument(*defIdx);
+      }
+
+      builder.create<ConnectOp>(loc, declInst.getResult(*declIdx), defValue);
     }
   }
 
@@ -1646,7 +1888,8 @@ LogicalResult LowerCmt2ToFIRRTLPass::connectInterfaceBinding(
 // Interface Helpers
 //===----------------------------------------------------------------------===//
 
-bool LowerCmt2ToFIRRTLPass::isInterfaceCall(CallOp callOp, cmt2::ModuleOp module) {
+bool LowerCmt2ToFIRRTLPass::isInterfaceCall(CallOp callOp,
+                                            cmt2::ModuleOp module) {
   StringAttr calleeName = callOp.getCallee().getRootReference();
 
   // Check if the callee is an InterfaceDeclOp in the module
@@ -1678,9 +1921,9 @@ InterfaceOp LowerCmt2ToFIRRTLPass::getInterfaceForDecl(InterfaceDeclOp decl) {
   return nullptr;
 }
 
-void LowerCmt2ToFIRRTLPass::createInterfacePorts(cmt2::ModuleOp module,
-                                                   OpBuilder &builder,
-                                                   SmallVectorImpl<PortInfo> &ports) {
+void LowerCmt2ToFIRRTLPass::createInterfacePorts(
+    cmt2::ModuleOp module, OpBuilder &builder,
+    SmallVectorImpl<PortInfo> &ports) {
   // For each InterfaceDeclOp in the module, create ports for all methods/values
   for (auto &op : module.getBodyRegion().front()) {
     auto decl = dyn_cast<InterfaceDeclOp>(op);
@@ -1689,70 +1932,103 @@ void LowerCmt2ToFIRRTLPass::createInterfacePorts(cmt2::ModuleOp module,
 
     InterfaceOp iface = getInterfaceForDecl(decl);
     if (!iface) {
-      module.emitWarning("Interface not found for declaration: ") << decl.getSymName();
+      module.emitWarning("Interface not found for declaration: ")
+          << decl.getSymName();
       continue;
     }
 
-    StringRef declName = decl.getSymName();
-
     // For each method/value in the interface, create corresponding ports
     for (auto &ifaceOp : iface.getBodyRegion().front()) {
-      if (auto method = dyn_cast<MethodOp>(ifaceOp)) {
-        auto funcType = cast<FunctionType>(method.getFunctionType());
-        StringRef methodName = method.getSymName();
-        auto argNames = method.getArgNames();
-        auto bodyResNames = method.getBodyResNames();
+      auto func = dyn_cast<cmt2::Cmt2FunctionLike>(ifaceOp);
+      auto funcType = func.getFunctionType();
+      // Arguments (out)
+      for (auto [idx, argType] : llvm::enumerate(funcType.getInputs())) {
+        std::string argName =
+            getItfcDeclFunctionPortName(decl, func, PortKind::Argument, idx);
+        ports.push_back(PortInfo(builder.getStringAttr(argName),
+                                 cast<FIRRTLBaseType>(argType), Direction::Out,
+                                 {}, func.getLoc()));
+      }
 
-        // Methods: enable (in), ready (out), args (in), results (out)
-        ports.push_back(PortInfo(
-            builder.getStringAttr(declName.str() + "_" + methodName.str() + "_enable"),
-            UIntType::get(builder.getContext(), 1),
-            Direction::Out, {}, method.getLoc()));
+      // Results (in)
+      for (auto [idx, resType] : llvm::enumerate(funcType.getResults())) {
+        std::string resName =
+            getItfcDeclFunctionPortName(decl, func, PortKind::Result, idx);
+        ports.push_back(PortInfo(builder.getStringAttr(resName),
+                                 cast<FIRRTLBaseType>(resType), Direction::In,
+                                 {}, func.getLoc()));
+      }
 
-        ports.push_back(PortInfo(
-            builder.getStringAttr(declName.str() + "_" + methodName.str() + "_ready"),
-            UIntType::get(builder.getContext(), 1),
-            Direction::In, {}, method.getLoc()));
+      // Ready (in) : method / value
+      if (func.getFunctionKind() == FunctionKind::Method ||
+          func.getFunctionKind() == FunctionKind::Value) {
+        ports.push_back(
+            PortInfo(builder.getStringAttr(getItfcDeclFunctionPortName(
+                         decl, func, PortKind::Help, 0)),
+                     UIntType::get(builder.getContext(), 1), Direction::In, {},
+                     func.getLoc()));
+      }
 
-        // Arguments
+      // Enable (out) : method
+      if (func.getFunctionKind() == FunctionKind::Method) {
+        ports.push_back(
+            PortInfo(builder.getStringAttr(getItfcDeclFunctionPortName(
+                         decl, func, PortKind::Help, 1)),
+                     UIntType::get(builder.getContext(), 1), Direction::Out, {},
+                     func.getLoc()));
+      }
+    }
+  }
+}
+
+void LowerCmt2ToFIRRTLPass::initializeInterfaceOutPorts(
+    cmt2::ModuleOp module, ModuleConversionContext &ctx, OpBuilder &builder) {
+
+  auto firrtlModule = ctx.getFIRRTLModule();
+  // Initialize interface output ports with default values
+  // Interface ports start after module arguments and function ports
+  for (auto &op : module.getBodyRegion().front()) {
+    auto decl = dyn_cast<InterfaceDeclOp>(op);
+    if (!decl)
+      continue;
+
+    InterfaceOp iface = getInterfaceForDecl(decl);
+    if (!iface)
+      continue;
+
+    // Initialize enable and data output ports for each method/value in the
+    // interface
+    for (auto &ifaceOp : iface.getBodyRegion().front()) {
+      if (auto function = dyn_cast<Cmt2FunctionLike>(ifaceOp)) {
+        auto funcType = function.getFunctionType();
+
+        // Argument (out)
         for (auto [idx, argType] : llvm::enumerate(funcType.getInputs())) {
-          StringRef argName = idx < argNames.size()
-                                  ? cast<StringAttr>(argNames[idx]).getValue()
-                                  : ("arg" + std::to_string(idx));
-          ports.push_back(PortInfo(
-              builder.getStringAttr(declName.str() + "_" + methodName.str() + "_" + argName.str()),
-              cast<FIRRTLBaseType>(argType), Direction::Out, {}, method.getLoc()));
+          auto argName = getItfcDeclFunctionPortName(decl, function,
+                                                     PortKind::Argument, idx);
+          for (size_t portIdx = 0; portIdx < firrtlModule.getNumPorts();
+               ++portIdx)
+            if (firrtlModule.getPortName(portIdx) == argName) {
+              Value argPort = firrtlModule.getArgument(portIdx);
+              auto firrtlType = cast<FIRRTLBaseType>(argType);
+              Value invalid =
+                  builder.create<InvalidValueOp>(module.getLoc(), firrtlType);
+              builder.create<ConnectOp>(module.getLoc(), argPort, invalid);
+            }
         }
 
-        // Results
-        for (auto [idx, resType] : llvm::enumerate(funcType.getResults())) {
-          StringRef resName = bodyResNames && idx < bodyResNames.size()
-                                  ? cast<StringAttr>(bodyResNames[idx]).getValue()
-                                  : ("result" + std::to_string(idx));
-          ports.push_back(PortInfo(
-              builder.getStringAttr(declName.str() + "_" + methodName.str() + "_" + resName.str()),
-              cast<FIRRTLBaseType>(resType), Direction::In, {}, method.getLoc()));
-        }
-
-      } else if (auto value = dyn_cast<ValueOp>(ifaceOp)) {
-        auto funcType = cast<FunctionType>(value.getFunctionType());
-        StringRef valueName = value.getSymName();
-        auto bodyResNames = value.getBodyResNames();
-
-        // Values: ready (out), results (out)
-        ports.push_back(PortInfo(
-            builder.getStringAttr(declName.str() + "_" + valueName.str() + "_ready"),
-            UIntType::get(builder.getContext(), 1),
-            Direction::In, {}, value.getLoc()));
-
-        // Results
-        for (auto [idx, resType] : llvm::enumerate(funcType.getResults())) {
-          StringRef resName = bodyResNames && idx < bodyResNames.size()
-                                  ? cast<StringAttr>(bodyResNames[idx]).getValue()
-                                  : ("result" + std::to_string(idx));
-          ports.push_back(PortInfo(
-              builder.getStringAttr(declName.str() + "_" + valueName.str() + "_" + resName.str()),
-              cast<FIRRTLBaseType>(resType), Direction::In, {}, value.getLoc()));
+        if (function.getFunctionKind() == FunctionKind::Method) {
+          auto enableName =
+              getItfcDeclFunctionPortName(decl, function, PortKind::Help, 1);
+          for (size_t portIdx = 0; portIdx < firrtlModule.getNumPorts();
+               ++portIdx)
+            if (firrtlModule.getPortName(portIdx) == enableName) {
+              Value enablePort = firrtlModule.getArgument(portIdx);
+              Value zero = builder.create<ConstantOp>(
+                  module.getLoc(), UIntType::get(builder.getContext(), 1),
+                  APInt(1, 0));
+              builder.create<ConnectOp>(module.getLoc(), enablePort, zero);
+            }
         }
       }
     }
@@ -1760,139 +2036,83 @@ void LowerCmt2ToFIRRTLPass::createInterfacePorts(cmt2::ModuleOp module,
 }
 
 LogicalResult LowerCmt2ToFIRRTLPass::connectInterfaceCall(
-    CallOp callOp, InterfaceDeclOp interfaceDecl,
-    ModuleConversionContext &ctx,
+    CallOp callOp, InterfaceDeclOp interfaceDecl, ModuleConversionContext &ctx,
     ImplicitLocOpBuilder &builder) {
 
   StringAttr declName = interfaceDecl.getSymNameAttr();
-  StringAttr methodName = callOp.getMethodOrValue().getLeafReference();
+  StringAttr funcName = callOp.getMethodOrValue().getLeafReference();
   FModuleOp firrtlModule = ctx.getFIRRTLModule();
 
   // Find the method/value in the interface to determine its kind
   InterfaceOp iface = getInterfaceForDecl(interfaceDecl);
   if (!iface) {
-    return callOp.emitError("Interface not found for declaration: ") << declName;
+    return callOp.emitError("Interface not found for declaration: ")
+           << declName;
   }
 
-  Cmt2FunctionLike targetFunc;
-  for (auto &op : iface.getBodyRegion().front()) {
-    if (auto func = dyn_cast<Cmt2FunctionLike>(op)) {
-      if (func.functionNameAttr() == methodName) {
-        targetFunc = func;
-        break;
-      }
-    }
-  }
+  Cmt2FunctionLike targetFunc = iface.getFunctionOfName(funcName);
 
   if (!targetFunc) {
-    return callOp.emitError("Method/value not found in interface: ") << methodName;
+    return callOp.emitError("Method/value not found in interface: ")
+           << funcName;
   }
-
-  auto targetArgNames = getArgNames(targetFunc);
-  auto targetBodyResNames = getBodyResNames(targetFunc);
 
   // Find the corresponding ports in the FIRRTL module
   SmallVector<Value> mappedResults;
 
   if (targetFunc.getFunctionKind() == FunctionKind::Method) {
-    // Drive enable signal
-    StringAttr enablePortName = builder.getStringAttr(
-        declName.str() + "_" + methodName.str() + "_enable");
+    // Drive enable signal for method func
+    std::string enablePortName = getItfcDeclFunctionPortName(
+        interfaceDecl, targetFunc, PortKind::Help, 1);
 
-    Value enablePort = nullptr;
-    for (size_t portIdx = 0; portIdx < firrtlModule.getNumPorts(); ++portIdx) {
-      if (firrtlModule.getPortName(portIdx) == enablePortName) {
-        enablePort = firrtlModule.getArgument(portIdx);
-        break;
-      }
+    if (auto enablePortIdx = getPortIndex(firrtlModule, enablePortName)) {
+      auto enablePort = firrtlModule.getArgument(*enablePortIdx);
+      Value one = builder.create<ConstantOp>(
+          callOp.getLoc(), UIntType::get(builder.getContext(), 1), APInt(1, 1));
+      builder.create<ConnectOp>(callOp.getLoc(), enablePort, one);
+    } else {
+      return callOp.emitError("Enable port not found for interface call: ")
+             << enablePortName;
     }
+  }
 
-    if (!enablePort) {
-      return callOp.emitError("Enable port not found for interface call: ") << enablePortName;
-    }
+  // Connect input arguments
+  for (auto [idx, operand] : llvm::enumerate(callOp.getOperands())) {
+    std::string argPortName = getItfcDeclFunctionPortName(
+        interfaceDecl, targetFunc, PortKind::Argument, idx);
 
-    Value one = builder.create<ConstantOp>(
-        callOp.getLoc(), UIntType::get(builder.getContext(), 1), APInt(1, 1));
-    builder.create<ConnectOp>(callOp.getLoc(), enablePort, one);
-
-    // Connect input arguments
-    for (auto [idx, operand] : llvm::enumerate(callOp.getOperands())) {
-      StringRef argName = idx < targetArgNames.size()
-                              ? cast<StringAttr>(targetArgNames[idx]).getValue()
-                              : ("arg" + std::to_string(idx));
-      StringAttr argPortName = builder.getStringAttr(
-          declName.str() + "_" + methodName.str() + "_" + argName.str());
-
-      Value argPort = nullptr;
-      for (size_t portIdx = 0; portIdx < firrtlModule.getNumPorts(); ++portIdx) {
-        if (firrtlModule.getPortName(portIdx) == argPortName) {
-          argPort = firrtlModule.getArgument(portIdx);
-          break;
-        }
-      }
-
-      if (!argPort) {
-        return callOp.emitError("Argument port not found for interface call: ") << argPortName;
-      }
-
+    if (auto argPortIdx = getPortIndex(firrtlModule, argPortName)) {
+      auto argPort = firrtlModule.getArgument(*argPortIdx);
       Value mappedOperand = ctx.getIRMapping().lookupOrDefault(operand);
       if (!mappedOperand) {
-        return callOp.emitError("Call operand was not properly mapped to FIRRTL context");
+        return callOp.emitError(
+            "Call operand was not properly mapped to FIRRTL context");
       }
 
       builder.create<ConnectOp>(callOp.getLoc(), argPort, mappedOperand);
+    } else {
+      return callOp.emitError("Argument port not found for interface call: ")
+             << argPortName;
     }
+  }
 
-    // Read output results
-    for (size_t idx = 0; idx < callOp.getNumResults(); ++idx) {
-      StringRef resName = targetBodyResNames && idx < targetBodyResNames.size()
-                              ? cast<StringAttr>(targetBodyResNames[idx]).getValue()
-                              : ("result" + std::to_string(idx));
-      StringAttr resultPortName = builder.getStringAttr(
-          declName.str() + "_" + methodName.str() + "_" + resName.str());
+  // Read output results
+  for (auto [idx, operand] : llvm::enumerate(callOp.getResults())) {
+    std::string resPortName = getItfcDeclFunctionPortName(
+        interfaceDecl, targetFunc, PortKind::Result, idx);
 
-      Value resultPort = nullptr;
-      for (size_t portIdx = 0; portIdx < firrtlModule.getNumPorts(); ++portIdx) {
-        if (firrtlModule.getPortName(portIdx) == resultPortName) {
-          resultPort = firrtlModule.getArgument(portIdx);
-          break;
-        }
-      }
-
-      if (!resultPort) {
-        return callOp.emitError("Result port not found for interface call: ") << resultPortName;
-      }
-
-      mappedResults.push_back(resultPort);
-    }
-
-  } else if (targetFunc.getFunctionKind() == FunctionKind::Value) {
-    // Read data results directly (values have no enable signal)
-    for (size_t idx = 0; idx < callOp.getNumResults(); ++idx) {
-      StringRef resName = targetBodyResNames && idx < targetBodyResNames.size()
-                              ? cast<StringAttr>(targetBodyResNames[idx]).getValue()
-                              : ("result" + std::to_string(idx));
-      StringAttr resultPortName = builder.getStringAttr(
-          declName.str() + "_" + methodName.str() + "_" + resName.str());
-
-      Value resultPort = nullptr;
-      for (size_t portIdx = 0; portIdx < firrtlModule.getNumPorts(); ++portIdx) {
-        if (firrtlModule.getPortName(portIdx) == resultPortName) {
-          resultPort = firrtlModule.getArgument(portIdx);
-          break;
-        }
-      }
-
-      if (!resultPort) {
-        return callOp.emitError("Result port not found for interface call: ") << resultPortName;
-      }
-
-      mappedResults.push_back(resultPort);
+    if (auto resPortIdx = getPortIndex(firrtlModule, resPortName)) {
+      auto resPort = firrtlModule.getArgument(*resPortIdx);
+      mappedResults.push_back(resPort);
+    } else {
+      return callOp.emitError("Result port not found for interface call: ")
+             << resPortName;
     }
   }
 
   // Map call results to interface ports
-  for (auto [callResult, portValue] : llvm::zip(callOp.getResults(), mappedResults)) {
+  for (auto [callResult, portValue] :
+       llvm::zip(callOp.getResults(), mappedResults)) {
     ctx.getIRMapping().map(callResult, portValue);
   }
 

@@ -1,0 +1,140 @@
+version: "1.0"
+
+modules:
+  - name: "FIRRTLReg"
+    type: "chisel"
+    path: "chisel/reg"
+    description: "Parametric register with configurable width"
+    parameters:
+      - name: "width"
+        type: "integer"
+        default: 32
+        required: false
+      - name: "init"
+        type: "integer"
+        default: 0
+        required: false
+    ports:
+      clock: "!firrtl.clock"
+      reset: "!firrtl.uint<1>"
+    methods:
+      - name: "read"
+        ready: false
+        enable: true
+        outputs: ["data: !firrtl.uint<${width}>"]
+      - name: "write"
+        ready: true
+        enable: false
+        inputs: ["data: !firrtl.uint<${width}>"]
+    conflict_matrix:
+      - [read, write, "SequentialBefore"]
+    build:
+      command: "./build.sh"
+      args: []
+      output_pattern: "Reg_width${width}_init${init}.mlir"
+      cache: true
+
+  - name: "Mem1r1w1c"
+    type: "chisel"
+    path: "firrtl/mem1r1w1c"
+    description: "1R1W synchronous memory (read and write latency = 1)"
+    parameters:
+      - name: "data_width"
+        type: "integer"
+        default: 32
+        required: false
+      - name: "addr_width"
+        type: "integer"
+        default: 10
+        required: false
+      - name: "depth"
+        type: "integer"
+        default: 1024
+        required: false
+    ports:
+      clock: "!firrtl.clock"
+      reset: "!firrtl.uint<1>"
+    methods:
+      - name: "rd0"
+        ready: false
+        enable: true
+        inputs: ["raddr: !firrtl.uint<${addr_width}>"]
+      - name: "rd1"
+        ready: true
+        enable: false
+        outputs: ["rdata: !firrtl.uint<${data_width}>"]
+      - name: "write"
+        ready: false
+        enable: true
+        inputs: ["wdata: !firrtl.uint<${data_width}>", "waddr: !firrtl.uint<${addr_width}>"]
+    conflict_matrix:
+      - [write, write, "Conflict"]
+      - [rd0, rd0, "Conflict"]
+    build:
+      command: "./build.sh"
+      args: []
+      output_pattern: "Mem1r1w1c_w${data_width}_a${addr_width}_d${depth}.mlir"
+      cache: true
+
+  - name: "Mem1r1w0c"
+    type: "chisel"
+    path: "firrtl/mem1r1w0c"
+    description: "1R1W asynchronous memory (write latency = 1, read latency = 0)"
+    parameters:
+      - name: "data_width"
+        type: "integer"
+        default: 32
+        required: false
+      - name: "addr_width"
+        type: "integer"
+        default: 10
+        required: false
+      - name: "depth"
+        type: "integer"
+        default: 1024
+        required: false
+    ports:
+      clock: "!firrtl.clock"
+      reset: "!firrtl.uint<1>"
+    methods:
+      - name: "read"
+        ready: false
+        enable: true
+        inputs: ["raddr: !firrtl.uint<${addr_width}>", "rdata: !firrtl.uint<${data_width}>"]
+      - name: "write"
+        ready: false
+        enable: true
+        inputs: ["wdata: !firrtl.uint<${data_width}>", "waddr: !firrtl.uint<${addr_width}>"]
+    conflict_matrix:
+      - [write, write, "Conflict"]
+      - [read, read, "Conflict"]
+    build:
+      command: "./build.sh"
+      args: []
+      output_pattern: "Mem1r1w0c_w${data_width}_a${addr_width}_d${depth}.mlir"
+      cache: true
+
+  - name: "Wire"
+    type: "firrtl"
+    path: "firrtl/wire"
+    description: "Combinational wire with write enable"
+    parameters:
+      - name: "width"
+        type: "integer"
+        default: 32
+        required: false
+    methods:
+      - name: "write"
+        ready: false
+        enable: true
+        inputs: ["write_data: !firrtl.uint<${width}>"]
+    values:
+      - name: "read"
+        ready: false
+        enable: false
+        outputs: ["read_data: !firrtl.uint<${width}>"]
+    build:
+      command: "./build.sh"
+      args: []
+      output_pattern: "Wire_w${width}.mlir"
+      cache: true
