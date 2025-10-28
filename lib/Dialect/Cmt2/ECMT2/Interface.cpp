@@ -201,6 +201,7 @@ Interface &Interface::addMethod(
   auto &bodyRegion = methodOp.getBody();
   auto *bodyBlock = builder_.createBlock(&bodyRegion);
   for (auto argType : argTypes) {
+    guardBlock->addArgument(argType, loc_);
     bodyBlock->addArgument(argType, loc_);
   }
   builder_.setInsertionPointToEnd(bodyBlock);
@@ -255,6 +256,7 @@ Interface &Interface::addValue(
   auto &bodyRegion = valueOp.getBody();
   auto *bodyBlock = builder_.createBlock(&bodyRegion);
   for (auto argType : argTypes) {
+    guardBlock->addArgument(argType, loc_);
     bodyBlock->addArgument(argType, loc_);
   }
   builder_.setInsertionPointToEnd(bodyBlock);

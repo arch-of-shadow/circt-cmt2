@@ -385,7 +385,11 @@ ExternalModule* STLLibrary::createMem1r1w1cModule( unsigned dataWidth, unsigned 
   params["addr_width"] = addrWidth;
   params["depth"] = depth;
 
-  auto* memMod = circuit.addExternalModule("Mem1r1w1c", params);
+  auto *memMod = circuit.hasExternalModule("Mem1r1w1c", params);
+  if (memMod) {
+    return memMod;
+  }
+  memMod = circuit.addExternalModule("Mem1r1w1c", params);
 
   // Bind memory interface
   memMod->bindClock("clk", "clock")
@@ -404,7 +408,11 @@ ExternalModule* STLLibrary::createMem1r1w0cModule( unsigned dataWidth, unsigned 
   params["addr_width"] = addrWidth;
   params["depth"] = depth;
 
-  auto* memMod = circuit.addExternalModule("Mem1r1w0c", params);
+  auto *memMod = circuit.hasExternalModule("Mem1r1w0c", params);
+  if (memMod) {
+    return memMod;
+  }
+  memMod = circuit.addExternalModule("Mem1r1w0c", params);
 
   // Bind memory interface
   memMod->bindClock("clk", "clock")

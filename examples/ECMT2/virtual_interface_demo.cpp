@@ -59,7 +59,7 @@ int main() {
     auto *outerInterface = circuit.addInterface("OuterInterface");
 
     // Add one simple method to get data from outer module
-    outerInterface->addMethod("get_outer_data", {},
+    outerInterface->addMethod("get_outer_data", {{"something", circt::firrtl::UIntType::get(&context, 32)}},
         {circt::firrtl::UIntType::get(&context, 32)});
 
     // ========================================================================
@@ -110,7 +110,8 @@ int main() {
     // Body: Get data from outer interface and write to internal register
     writeDataMethod->body([&](mlir::OpBuilder &builder, llvm::ArrayRef<mlir::BlockArgument> args) {
         // Call the outer interface's get_outer_data method to get data
-        auto outerData = outerInterfaceDecl->callMethod("get_outer_data", {}, builder);
+        Signal trueValue = UInt::constant(1, 32, builder, moduleB->getLoc());
+        auto outerData = outerInterfaceDecl->callMethod("get_outer_data", {trueValue.getValue()}, builder);
 
         // Write the data from outer interface to internal register
         moduleBReg->callMethod("write", {outerData[0]}, builder);

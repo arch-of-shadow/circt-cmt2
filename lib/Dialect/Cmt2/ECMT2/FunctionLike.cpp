@@ -41,7 +41,7 @@ Rule::Rule(llvm::StringRef name, Module *parent)
   llvm::SmallVector<mlir::Attribute> argNames;
   auto argNamesAttr = builder.getArrayAttr(argNames);
 
-  // Build result names (empty for now)
+  // Build result names (ok empty for now, rule does not return values)
   llvm::SmallVector<mlir::Attribute> resNames;
   auto resNamesAttr = builder.getArrayAttr(resNames);
 
@@ -91,8 +91,11 @@ Method::Method(llvm::StringRef name,
     argNames.push_back(builder.getStringAttr(arg.first));
   auto argNamesAttr = builder.getArrayAttr(argNames);
 
-  // Build result names (empty for now)
+  // Build result names
   llvm::SmallVector<mlir::Attribute> resNames;
+  for (size_t i = 0; i < results.size(); i++) {
+    resNames.push_back(builder.getStringAttr(""));
+  }
   auto resNamesAttr = builder.getArrayAttr(resNames);
 
   op_ = builder.create<MethodOp>(loc, builder.getStringAttr(name), funcTypeAttr,

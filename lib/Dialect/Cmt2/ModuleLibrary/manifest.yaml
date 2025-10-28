@@ -19,7 +19,7 @@ modules:
       reset: "!firrtl.uint<1>"
     methods:
       - name: "read"
-        ready: true
+        ready: false
         enable: true
         outputs: ["data: !firrtl.uint<${width}>"]
       - name: "write"
