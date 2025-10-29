@@ -64,6 +64,9 @@ public:
   /// Create a depth-1 FIFO module (actively pull)
   static Module* createFIFO1PullModule(unsigned dataWidth, Circuit& circuit);
 
+  /// Create a depth-2 FIFO module (independent enq/deq, double buffered)
+  static Module* createFIFO2IModule(unsigned dataWidth, Circuit& circuit);
+
   //===--------------------------------------------------------------------===//
   // Memory modules
   //===--------------------------------------------------------------------===//

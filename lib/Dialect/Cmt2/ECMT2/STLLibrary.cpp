@@ -16,6 +16,7 @@
 #include "circt/Dialect/Cmt2/ECMT2/FunctionLike.h"
 #include "circt/Dialect/Cmt2/ECMT2/Module.h"
 #include "circt/Dialect/Cmt2/ECMT2/Signal.h"
+#include "circt/Dialect/Cmt2/ECMT2/SignalHelpers.h"
 #include "circt/Dialect/Cmt2/ECMT2/Instance.h"
 #include "circt/Dialect/FIRRTL/FIRRTLDialect.h"
 #include "circt/Dialect/FIRRTL/FIRRTLTypes.h"
@@ -373,6 +374,202 @@ Module* STLLibrary::createFIFO1PullModule(unsigned dataWidth, Circuit& circuit) 
     {"dnq", "enqed_default"},
     {"enqed_default", "deqed_default"},
     {"deqed_default", "next"}
+  });
+
+  return fifoMod;
+}
+
+Module* STLLibrary::createFIFO2IModule(unsigned dataWidth, Circuit& circuit) {
+  std::string moduleName = "FIFO2_I_w" + std::to_string(dataWidth);
+  auto *fifoMod = circuit.addModule(moduleName);
+
+  Clock clk = fifoMod->addClockArgument("clk");
+  Reset rst = fifoMod->addResetArgument("rst");
+
+  auto &context = circuit.getContext();
+  auto dataType = circt::firrtl::UIntType::get(&context, dataWidth);
+  auto boolType = circt::firrtl::UIntType::get(&context, 1);
+  auto stateType = circt::firrtl::UIntType::get(&context, 2);
+
+  auto savedIP = circuit.getBuilder().saveInsertionPoint();
+  // Instances: two data registers, state register (0=empty, 1=one element, 2=full)
+  auto *regDataT = createRegModule(dataWidth, 0, circuit);
+  auto *regStateT = createRegModule(2, 0, circuit);
+  auto *wireDefaultBooleanT = createWireDefaultModule(1, 0, circuit);
+  circuit.getBuilder().restoreInsertionPoint(savedIP);
+  
+  auto *reg0 = fifoMod->addInstance("reg0", regDataT, {clk.getValue(), rst.getValue()});
+  auto *reg1 = fifoMod->addInstance("reg1", regDataT, {clk.getValue(), rst.getValue()});
+  auto *state = fifoMod->addInstance("state", regStateT, {clk.getValue(), rst.getValue()});
+  auto *deqed = fifoMod->addInstance("deqed", wireDefaultBooleanT, {});
+  auto *enqed = fifoMod->addInstance("enqed", wireDefaultBooleanT, {});
+  auto *enqValue = fifoMod->addInstance("enq_value", regDataT, {clk.getValue(), rst.getValue()});
+
+  // Value: full() -> bool (state == 2)
+  auto *fullVal = fifoMod->addValue("full", {boolType});
+  fullVal->guard([&](mlir::OpBuilder &b) {
+    auto trueVal = UInt::constant(1, 1, b, fifoMod->getLoc());
+    b.create<circt::cmt2::ReturnOp>(fifoMod->getLoc(), mlir::ValueRange{trueVal.getValue()});
+  });
+  fullVal->body([&](mlir::OpBuilder &b) {
+    auto stateVals = state->callValue("read", b);
+    Signal stateSig(stateVals[0], &b, fifoMod->getLoc());
+    auto c2 = UInt::constant(2, 2, b, fifoMod->getLoc());
+    auto isFull = stateSig == c2;
+    b.create<circt::cmt2::ReturnOp>(fifoMod->getLoc(), mlir::ValueRange{isFull.getValue()});
+  });
+  fullVal->finalize();
+
+  // Method: deq() -> data
+  // Guard: state != 0
+  auto *deqMethod = fifoMod->addMethod("deq", {}, {{dataType}});
+  deqMethod->guard([&](mlir::OpBuilder &b, llvm::ArrayRef<mlir::BlockArgument> args) {
+    auto stateVals = state->callValue("read", b);
+    Signal stateSig(stateVals[0], &b, fifoMod->getLoc());
+    auto c0 = UInt::constant(0, 2, b, fifoMod->getLoc());
+    auto canDeq = stateSig != c0;
+    b.create<circt::cmt2::ReturnOp>(fifoMod->getLoc(), mlir::ValueRange{canDeq.getValue()});
+  });
+  deqMethod->body([&](mlir::OpBuilder &b, llvm::ArrayRef<mlir::BlockArgument> args) {
+    auto c1 = UInt::constant(1, 1, b, fifoMod->getLoc());
+    deqed->callMethod("write", {c1.getValue()}, b);
+    auto dataVals = reg0->callValue("read", b);
+    b.create<circt::cmt2::ReturnOp>(fifoMod->getLoc(), mlir::ValueRange{dataVals[0]});
+  });
+  deqMethod->finalize();
+
+  // Method: enq(data)
+  // Guard: state != 2
+  auto *enqMethod = fifoMod->addMethod("enq", {{"data", dataType}}, {});
+  enqMethod->guard([&](mlir::OpBuilder &b, llvm::ArrayRef<mlir::BlockArgument> args) {
+    auto stateVals = state->callValue("read", b);
+    Signal stateSig(stateVals[0], &b, fifoMod->getLoc());
+    auto c2 = UInt::constant(2, 2, b, fifoMod->getLoc());
+    auto canEnq = stateSig != c2;
+    b.create<circt::cmt2::ReturnOp>(fifoMod->getLoc(), mlir::ValueRange{canEnq.getValue()});
+  });
+  enqMethod->body([&](mlir::OpBuilder &b, llvm::ArrayRef<mlir::BlockArgument> args) {
+    auto c1 = UInt::constant(1, 1, b, fifoMod->getLoc());
+    enqed->callMethod("write", {c1.getValue()}, b);
+    enqValue->callMethod("write", {args[0]}, b);
+    b.create<circt::cmt2::ReturnOp>(fifoMod->getLoc(), mlir::ValueRange{});
+  });
+  enqMethod->finalize();
+
+  // State update rule: state0 (when state == 0)
+  // if enqed: reg0 = enq_value, state = 1
+  auto *state0Update = fifoMod->addRule("state0_update");
+  state0Update->guard([&](mlir::OpBuilder &b) {
+    auto stateVals = state->callValue("read", b);
+    Signal stateSig(stateVals[0], &b, fifoMod->getLoc());
+    auto c0 = UInt::constant(0, 2, b, fifoMod->getLoc());
+    auto isState0 = stateSig == c0;
+
+    auto enqedVals = enqed->callValue("read", b);
+    Signal enqedSig(enqedVals[0], &b, fifoMod->getLoc());
+    auto c0Bool = UInt::constant(0, 1, b, fifoMod->getLoc());
+    auto isEnqed = enqedSig != c0Bool;
+
+    auto guard = isState0 & isEnqed;
+    b.create<circt::cmt2::ReturnOp>(fifoMod->getLoc(), mlir::ValueRange{guard.getValue()});
+  });
+  state0Update->body([&](mlir::OpBuilder &b) {
+    auto valVals = enqValue->callValue("read", b);
+    reg0->callMethod("write", {valVals[0]}, b);
+    auto c1State = UInt::constant(1, 2, b, fifoMod->getLoc());
+    state->callMethod("write", {c1State.getValue()}, b);
+    b.create<circt::cmt2::ReturnOp>(fifoMod->getLoc(), mlir::ValueRange{});
+  });
+  state0Update->finalize();
+
+  // State update rule: state1 (when state == 1)
+  // Match (enqed, deqed): (0,0) -> stay 1, (0,1) -> 0, (1,0) -> 2, (1,1) -> 1 (replace reg0)
+  auto *state1Update = fifoMod->addRule("state1_update");
+  state1Update->guard([&](mlir::OpBuilder &b) {
+    auto stateVals = state->callValue("read", b);
+    Signal stateSig(stateVals[0], &b, fifoMod->getLoc());
+    auto c1 = UInt::constant(1, 2, b, fifoMod->getLoc());
+    auto isState1 = stateSig == c1;
+    b.create<circt::cmt2::ReturnOp>(fifoMod->getLoc(), mlir::ValueRange{isState1.getValue()});
+  });
+  state1Update->body([&](mlir::OpBuilder &b) {
+    auto enqedVals = enqed->callValue("read", b);
+    Signal enqedSig(enqedVals[0], &b, fifoMod->getLoc());
+
+    // if (enqed)
+    IfBuilder(enqedSig, b, fifoMod->getLoc())
+      .Then([&](mlir::OpBuilder &b) {
+        auto deqedVals = deqed->callValue("read", b);
+        Signal deqedSig(deqedVals[0], &b, fifoMod->getLoc());
+
+        // if (deqed) { reg0.write(enq_value) }
+        // else { reg1.write(enq_value); state = 2 }
+        IfBuilder(deqedSig, b, fifoMod->getLoc())
+          .Then([&](mlir::OpBuilder &b) {
+            auto valVals = enqValue->callValue("read", b);
+            reg0->callMethod("write", {valVals[0]}, b);
+          })
+          .Else([&](mlir::OpBuilder &b) {
+            auto valVals = enqValue->callValue("read", b);
+            auto reg0Vals = reg0->callValue("read", b);
+            reg1->callMethod("write", {reg0Vals[0]}, b);
+            reg0->callMethod("write", {valVals[0]}, b);
+            auto c2State = UInt::constant(2, 2, b, fifoMod->getLoc());
+            state->callMethod("write", {c2State.getValue()}, b);
+          })
+          .build();
+      })
+      .Else([&](mlir::OpBuilder &b) {
+        auto deqedVals = deqed->callValue("read", b);
+        Signal deqedSig(deqedVals[0], &b, fifoMod->getLoc());
+
+        // if (deqed) { state = 0 }
+        IfBuilder(deqedSig, b, fifoMod->getLoc())
+          .Then([&](mlir::OpBuilder &b) {
+            auto c0State = UInt::constant(0, 2, b, fifoMod->getLoc());
+            state->callMethod("write", {c0State.getValue()}, b);
+          })
+          .build();
+      })
+      .build();
+
+    b.create<circt::cmt2::ReturnOp>(fifoMod->getLoc(), mlir::ValueRange{});
+  });
+  state1Update->finalize();
+
+  // State update rule: state2 (when state == 2)
+  // if deqed: reg0 = reg1, state = 1
+  auto *state2Update = fifoMod->addRule("state2_update");
+  state2Update->guard([&](mlir::OpBuilder &b) {
+    auto stateVals = state->callValue("read", b);
+    Signal stateSig(stateVals[0], &b, fifoMod->getLoc());
+    auto c2 = UInt::constant(2, 2, b, fifoMod->getLoc());
+    auto isState2 = stateSig == c2;
+
+    auto deqedVals = deqed->callValue("read", b);
+    Signal deqedSig(deqedVals[0], &b, fifoMod->getLoc());
+    auto c0 = UInt::constant(0, 1, b, fifoMod->getLoc());
+    auto isDeqed = deqedSig != c0;
+
+    auto guard = isState2 & isDeqed;
+    b.create<circt::cmt2::ReturnOp>(fifoMod->getLoc(), mlir::ValueRange{guard.getValue()});
+  });
+  state2Update->body([&](mlir::OpBuilder &b) {
+    auto valVals = reg1->callValue("read", b);
+    reg0->callMethod("write", {valVals[0]}, b);
+    auto c1State = UInt::constant(1, 2, b, fifoMod->getLoc());
+    state->callMethod("write", {c1State.getValue()}, b);
+    b.create<circt::cmt2::ReturnOp>(fifoMod->getLoc(), mlir::ValueRange{});
+  });
+  state2Update->finalize();
+
+  // Set scheduling precedence
+  fifoMod->setPrecedence({
+    {"full", "deq"},
+    {"deq", "enq"},
+    {"enq", "state0_update"},
+    {"state0_update", "state1_update"},
+    {"state1_update", "state2_update"}
   });
 
   return fifoMod;

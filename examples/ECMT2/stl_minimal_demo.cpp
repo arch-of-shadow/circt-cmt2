@@ -61,7 +61,10 @@ int main() {
   // llvm::outs() << "✓ Instantiated register: my_reg\n";
 
   // 2. Create a depth-1 FIFO for 32-bit data (push-based)
-  auto *fifo32Module = STLLibrary::createFIFO1PushModule(32, circuit);
+  // auto *fifo32Module = STLLibrary::createFIFO1PushModule(32, circuit);
+  // llvm::outs() << "✓ Created depth-1 FIFO module (32-bit data)\n";
+
+  auto *fifo32Module = STLLibrary::createFIFO2IModule(32, circuit);
   llvm::outs() << "✓ Created depth-1 FIFO module (32-bit data)\n";
   // auto *fifo32Inst = mainMod->addInstance("my_fifo", fifo32Module, {} /* {clk.getValue(), rst.getValue()} */);
   // llvm::outs() << "✓ Instantiated FIFO: my_fifo\n";
