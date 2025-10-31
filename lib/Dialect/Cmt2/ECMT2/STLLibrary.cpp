@@ -389,11 +389,12 @@ Module* STLLibrary::createFIFO2IModule(unsigned dataWidth, Circuit& circuit) {
   auto &context = circuit.getContext();
   auto dataType = circt::firrtl::UIntType::get(&context, dataWidth);
   auto boolType = circt::firrtl::UIntType::get(&context, 1);
-  auto stateType = circt::firrtl::UIntType::get(&context, 2);
+  // auto stateType = circt::firrtl::UIntType::get(&context, 2);
 
   auto savedIP = circuit.getBuilder().saveInsertionPoint();
   // Instances: two data registers, state register (0=empty, 1=one element, 2=full)
   auto *regDataT = createRegModule(dataWidth, 0, circuit);
+  auto *wireDataT = createWireModule(dataWidth, circuit);
   auto *regStateT = createRegModule(2, 0, circuit);
   auto *wireDefaultBooleanT = createWireDefaultModule(1, 0, circuit);
   circuit.getBuilder().restoreInsertionPoint(savedIP);
@@ -403,7 +404,7 @@ Module* STLLibrary::createFIFO2IModule(unsigned dataWidth, Circuit& circuit) {
   auto *state = fifoMod->addInstance("state", regStateT, {clk.getValue(), rst.getValue()});
   auto *deqed = fifoMod->addInstance("deqed", wireDefaultBooleanT, {});
   auto *enqed = fifoMod->addInstance("enqed", wireDefaultBooleanT, {});
-  auto *enqValue = fifoMod->addInstance("enq_value", regDataT, {clk.getValue(), rst.getValue()});
+  auto *enqValue = fifoMod->addInstance("enq_value", wireDataT, {clk.getValue(), rst.getValue()});
 
   // Value: full() -> bool (state == 2)
   auto *fullVal = fifoMod->addValue("full", {boolType});
