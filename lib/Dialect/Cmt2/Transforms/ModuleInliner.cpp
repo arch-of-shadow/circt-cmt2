@@ -65,8 +65,9 @@ private:
 
 bool ModuleInlinerPass::shouldNotInline(Cmt2ModuleLike module) {
   // Don't inline external modules
-  if (isa<ExtModuleFirrtlOp>(module.getOperation()))
-    return true;
+  if (auto modOp = dyn_cast<cmt2::ModuleOp>(module.getOperation()))
+    if (modOp.isExternalModule())
+      return true;
 
   // Don't inline modules with synthesis=true
   if (auto synthesisAttr = module->getAttrOfType<BoolAttr>("synthesis"))

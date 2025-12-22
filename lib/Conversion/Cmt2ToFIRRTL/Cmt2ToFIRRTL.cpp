@@ -232,7 +232,7 @@ private:
                                  ImplicitLocOpBuilder &builder);
 
   // Helper utilities
-  FModuleOp findFIRRTLModule(StringRef moduleName, Operation *searchRoot);
+  FModuleLike findFIRRTLModule(StringRef moduleName, Operation *searchRoot);
   std::optional<size_t> getPortIndex(firrtl::InstanceOp &inst,
                                      std::string portName);
   std::optional<size_t> getPortIndex(firrtl::FModuleOp &fMod,
@@ -395,6 +395,17 @@ LogicalResult LowerCmt2ToFIRRTLPass::convertModule(
     const ConflictMatrixAnalysis &conflictAnalysis,
     const DenseMap<StringAttr, FModuleOp> &convertedModules,
     FModuleOp &outFirrtlModule) {
+
+  // Skip external modules - they reference existing FIRRTL modules from library
+  if (module.isExternalModule()) {
+    // External module doesn't need conversion, just find the existing FIRRTL module
+    auto firrtlMod = findFIRRTLModule(module.getExternalModuleName(),
+                                       firrtlCircuit->getParentOp());
+    if (auto fmod = dyn_cast_or_null<FModuleOp>(firrtlMod.getOperation())) {
+      outFirrtlModule = fmod;
+    }
+    return success();
+  }
 
   OpBuilder builder(firrtlCircuit.getBodyBlock(),
                     firrtlCircuit.getBodyBlock()->end());
@@ -569,24 +580,27 @@ LogicalResult LowerCmt2ToFIRRTLPass::createInstances(
              << instOp.getModuleName();
 
     // Determine target FIRRTL module (external or converted cmt2 module)
-    FModuleOp firrtlMod;
+    FModuleLike firrtlMod;
     StringRef targetModuleName;
-    if (auto extModOp =
-            dyn_cast<ExtModuleFirrtlOp>(referencedModule.getOperation())) {
-      targetModuleName = extModOp.getExtModuleName();
-      firrtlMod = findFIRRTLModule(targetModuleName,
-                                   module->getParentOfType<mlir::ModuleOp>());
-      if (!firrtlMod)
-        return instOp.emitError("FIRRTL module not found: ")
-               << targetModuleName;
-    } else if (auto cmt2Mod =
-                   dyn_cast<cmt2::ModuleOp>(referencedModule.getOperation())) {
-      targetModuleName = cmt2Mod.getSymName();
-      auto it = convertedModules.find(cmt2Mod.getSymNameAttr());
-      if (it == convertedModules.end())
-        return instOp.emitError("Cmt2 module not yet converted: ")
-               << targetModuleName;
-      firrtlMod = it->second;
+    if (auto cmt2Mod =
+            dyn_cast<cmt2::ModuleOp>(referencedModule.getOperation())) {
+      if (cmt2Mod.isExternalModule()) {
+        // External module - look up the FIRRTL module by name
+        targetModuleName = cmt2Mod.getExternalModuleName();
+        firrtlMod = findFIRRTLModule(targetModuleName,
+                                     module->getParentOfType<mlir::ModuleOp>());
+        if (!firrtlMod)
+          return instOp.emitError("FIRRTL module not found: ")
+                 << targetModuleName;
+      } else {
+        // Regular module - look up in converted modules
+        targetModuleName = cmt2Mod.getSymName();
+        auto it = convertedModules.find(cmt2Mod.getSymNameAttr());
+        if (it == convertedModules.end())
+          return instOp.emitError("Cmt2 module not yet converted: ")
+                 << targetModuleName;
+        firrtlMod = it->second;
+      }
     } else {
       return instOp.emitError("Unsupported module type for instantiation");
     }
@@ -647,32 +661,34 @@ void LowerCmt2ToFIRRTLPass::connectInstanceModuleArguments(
     llvm::SmallDenseSet<size_t> &connectedPorts) {
 
   auto instanceArgs = instOp.getArgs();
-  if (auto extModOp = dyn_cast<ExtModuleFirrtlOp>(referencedModule)) {
-    // External FIRRTL module - use bind bare operations to get port names
-    size_t barePortIdx = 0;
-    for (auto &bodyOp : extModOp.getBodyRegion().front()) {
-      auto bindBare = dyn_cast<BindBareOp>(bodyOp);
-      if (!bindBare || barePortIdx >= instanceArgs.size())
-        continue;
-      Value firrtlArg =
-          ctx.getIRMapping().lookupOrDefault(instanceArgs[barePortIdx]);
-      if (auto portIdx = getPortIndex(
-              firrtlInst, bindBare.getPortAttr().getAttr().getValue().str())) {
-        builder.create<ConnectOp>(instOp.getLoc(),
-                                  firrtlInst.getResult(*portIdx), firrtlArg);
-        connectedPorts.insert(*portIdx);
+  if (auto cmt2Mod = dyn_cast<cmt2::ModuleOp>(referencedModule)) {
+    if (cmt2Mod.isExternalModule()) {
+      // External FIRRTL module - use bind bare operations to get port names
+      size_t barePortIdx = 0;
+      for (auto &bodyOp : cmt2Mod.getBodyRegion().front()) {
+        auto bindBare = dyn_cast<BindBareOp>(bodyOp);
+        if (!bindBare || barePortIdx >= instanceArgs.size())
+          continue;
+        Value firrtlArg =
+            ctx.getIRMapping().lookupOrDefault(instanceArgs[barePortIdx]);
+        if (auto portIdx = getPortIndex(
+                firrtlInst, bindBare.getPortAttr().getAttr().getValue().str())) {
+          builder.create<ConnectOp>(instOp.getLoc(),
+                                    firrtlInst.getResult(*portIdx), firrtlArg);
+          connectedPorts.insert(*portIdx);
+        }
+        barePortIdx++;
       }
-      barePortIdx++;
-    }
-  } else if (auto cmt2Mod = dyn_cast<cmt2::ModuleOp>(referencedModule)) {
-    // Regular cmt2 module - connect arguments directly (first N ports)
-    size_t numModuleArgs = cmt2Mod.getBodyRegion().front().getNumArguments();
-    for (size_t i = 0; i < instanceArgs.size() && i < numModuleArgs; ++i) {
-      if (Value firrtlArg =
-              ctx.getIRMapping().lookupOrDefault(instanceArgs[i])) {
-        builder.create<ConnectOp>(instOp.getLoc(), firrtlInst.getResult(i),
-                                  firrtlArg);
-        connectedPorts.insert(i);
+    } else {
+      // Regular cmt2 module - connect arguments directly (first N ports)
+      size_t numModuleArgs = cmt2Mod.getBodyRegion().front().getNumArguments();
+      for (size_t i = 0; i < instanceArgs.size() && i < numModuleArgs; ++i) {
+        if (Value firrtlArg =
+                ctx.getIRMapping().lookupOrDefault(instanceArgs[i])) {
+          builder.create<ConnectOp>(instOp.getLoc(), firrtlInst.getResult(i),
+                                    firrtlArg);
+          connectedPorts.insert(i);
+        }
       }
     }
   }
@@ -1069,62 +1085,64 @@ Value LowerCmt2ToFIRRTLPass::generateReadySignal(
 
       auto referencedModule = cmt2Inst.getReferencedModule();
 
-      if (auto extModOp =
-              dyn_cast<ExtModuleFirrtlOp>(referencedModule.getOperation())) {
-        // External FIRRTL module - use bind operations
-        Cmt2FunctionLike bindFunc;
-        for (auto &bodyOp : extModOp.getBodyRegion().front()) {
-          if (auto bindMethod = dyn_cast<BindMethodOp>(bodyOp)) {
-            if (bindMethod.getSymNameAttr() == methodName) {
-              bindFunc = bindMethod;
-              break;
-            }
-          } else if (auto bindValue = dyn_cast<BindValueOp>(bodyOp)) {
-            if (bindValue.getSymNameAttr() == methodName) {
-              bindFunc = bindValue;
-              break;
+      if (auto cmt2Mod = dyn_cast<cmt2::ModuleOp>(
+                     referencedModule.getOperation())) {
+        if (cmt2Mod.isExternalModule()) {
+          // External FIRRTL module - use bind operations
+          Cmt2FunctionLike bindFunc;
+          for (auto &bodyOp : cmt2Mod.getBodyRegion().front()) {
+            if (auto bindMethod = dyn_cast<BindMethodOp>(bodyOp)) {
+              if (bindMethod.getSymNameAttr() == methodName) {
+                bindFunc = bindMethod;
+                break;
+              }
+            } else if (auto bindValue = dyn_cast<BindValueOp>(bodyOp)) {
+              if (bindValue.getSymNameAttr() == methodName) {
+                bindFunc = bindValue;
+                break;
+              }
             }
           }
-        }
 
-        std::optional<std::string> readyName;
-        if (auto bindMethod = dyn_cast<BindMethodOp>(bindFunc.getOperation())) {
-          readyName = bindMethod.getReadyName();
-        } else if (auto bindValue =
-                       dyn_cast<BindValueOp>(bindFunc.getOperation())) {
-          readyName = bindValue.getReadyName();
-        }
+          std::optional<std::string> readyName;
+          if (auto bindMethod = dyn_cast<BindMethodOp>(bindFunc.getOperation())) {
+            readyName = bindMethod.getReadyName();
+          } else if (auto bindValue =
+                         dyn_cast<BindValueOp>(bindFunc.getOperation())) {
+            readyName = bindValue.getReadyName();
+          }
 
-        if (readyName) {
-          auto readyPortName = builder.getStringAttr(readyName.value());
-          if (auto readyPortIdx =
-                  getPortIndex(firrtlInst, readyPortName.getValue().str())) {
-            LLVM_DEBUG(llvm::dbgs() << "ready port found from external: "
-                                    << readyPortName << "\n");
+          if (readyName) {
+            auto readyPortName = builder.getStringAttr(readyName.value());
+            if (auto readyPortIdx =
+                    getPortIndex(firrtlInst, readyPortName.getValue().str())) {
+              LLVM_DEBUG(llvm::dbgs() << "ready port found from external: "
+                                      << readyPortName << "\n");
+              ready = builder.create<AndPrimOp>(
+                  call.getLoc(), ready, firrtlInst.getResult(*readyPortIdx));
+            }
+          }
+        } else {
+          // Regular cmt2 module
+          Cmt2FunctionLike targetFunc;
+          for (auto &op : cmt2Mod.getBodyRegion().front()) {
+            if (auto func = dyn_cast<Cmt2FunctionLike>(op)) {
+              if (func.functionNameAttr() == methodName) {
+                targetFunc = func;
+                break;
+              }
+            }
+          }
+
+          std::string readyPortName =
+              getFunctionPortName(targetFunc, PortKind::Help, 0);
+          if (auto readyPortIdx = getPortIndex(firrtlInst, readyPortName)) {
+            LLVM_DEBUG(llvm::dbgs()
+                       << "ready port found for " << referencedModule.moduleName()
+                       << " : " << readyPortName << "\n");
             ready = builder.create<AndPrimOp>(
                 call.getLoc(), ready, firrtlInst.getResult(*readyPortIdx));
           }
-        }
-      } else if (auto cmt2Mod = dyn_cast<cmt2::ModuleOp>(
-                     referencedModule.getOperation())) {
-        Cmt2FunctionLike targetFunc;
-        for (auto &op : cmt2Mod.getBodyRegion().front()) {
-          if (auto func = dyn_cast<Cmt2FunctionLike>(op)) {
-            if (func.functionNameAttr() == methodName) {
-              targetFunc = func;
-              break;
-            }
-          }
-        }
-
-        std::string readyPortName =
-            getFunctionPortName(targetFunc, PortKind::Help, 0);
-        if (auto readyPortIdx = getPortIndex(firrtlInst, readyPortName)) {
-          LLVM_DEBUG(llvm::dbgs()
-                     << "ready port found for " << referencedModule.moduleName()
-                     << " : " << readyPortName << "\n");
-          ready = builder.create<AndPrimOp>(
-              call.getLoc(), ready, firrtlInst.getResult(*readyPortIdx));
         }
       }
     }
@@ -1362,12 +1380,16 @@ LowerCmt2ToFIRRTLPass::convertCallOp(CallOp callOp,
            << instanceName;
   }
 
-  // Check if it's an external FIRRTL module or a regular cmt2 module
-  if (auto extModOp =
-          dyn_cast<ExtModuleFirrtlOp>(referencedModule.getOperation())) {
+  // Check if it's a cmt2 module (either external or regular)
+  auto cmt2Mod = dyn_cast<cmt2::ModuleOp>(referencedModule.getOperation());
+  if (!cmt2Mod) {
+    return callOp.emitError("Unsupported module type for call");
+  }
+
+  if (cmt2Mod.isExternalModule()) {
     // External FIRRTL module - use bind operations
     Cmt2FunctionLike bindFunc;
-    for (auto &bodyOp : extModOp.getBodyRegion().front()) {
+    for (auto &bodyOp : cmt2Mod.getBodyRegion().front()) {
       if (auto bindMethod = dyn_cast<BindMethodOp>(bodyOp)) {
         if (bindMethod.getSymNameAttr() == methodName) {
           bindFunc = bindMethod;
@@ -1388,12 +1410,11 @@ LowerCmt2ToFIRRTLPass::convertCallOp(CallOp callOp,
     // Dispatch to method or value conversion
     if (auto bindMethod = dyn_cast<BindMethodOp>(bindFunc.getOperation())) {
       return connectMethodCall(callOp, bindMethod, firrtlInst, ctx, builder);
-    } else if (auto bindValue =
-                   dyn_cast<BindValueOp>(bindFunc.getOperation())) {
+    }
+    if (auto bindValue = dyn_cast<BindValueOp>(bindFunc.getOperation())) {
       return connectValueCall(callOp, bindValue, firrtlInst, ctx, builder);
     }
-  } else if (auto cmt2Mod =
-                 dyn_cast<cmt2::ModuleOp>(referencedModule.getOperation())) {
+  } else {
     // Regular cmt2 module - directly access method/value ports
     // Find the function in the module to determine if it's a method or value
     Cmt2FunctionLike targetFunc;
@@ -1460,9 +1481,6 @@ LowerCmt2ToFIRRTLPass::convertCallOp(CallOp callOp,
          llvm::zip(callOp.getResults(), mappedResults)) {
       ctx.getIRMapping().map(callResult, portValue);
     }
-
-  } else {
-    return callOp.emitError("Unsupported module type for call");
   }
 
   return success();
@@ -1662,13 +1680,24 @@ std::string LowerCmt2ToFIRRTLPass::getItfcDeclFunctionPortName(
   return declName + portName;
 }
 
-FModuleOp LowerCmt2ToFIRRTLPass::findFIRRTLModule(StringRef moduleName,
-                                                  Operation *searchRoot) {
-  FModuleOp result;
+FModuleLike LowerCmt2ToFIRRTLPass::findFIRRTLModule(StringRef moduleName,
+                                                   Operation *searchRoot) {
+  FModuleLike result;
 
-  // Search for FIRRTL module in circuits
+  // Search for FIRRTL module in circuits (both FModuleOp and FExtModuleOp)
   searchRoot->walk([&](firrtl::CircuitOp circuit) {
+    // Search for FModuleOp
     circuit.walk([&](FModuleOp mod) {
+      if (mod.getModuleName() == moduleName) {
+        result = mod;
+        return WalkResult::interrupt();
+      }
+      return WalkResult::advance();
+    });
+    if (result)
+      return WalkResult::interrupt();
+    // Search for FExtModuleOp
+    circuit.walk([&](FExtModuleOp mod) {
       if (mod.getModuleName() == moduleName) {
         result = mod;
         return WalkResult::interrupt();
@@ -1681,6 +1710,15 @@ FModuleOp LowerCmt2ToFIRRTLPass::findFIRRTLModule(StringRef moduleName,
   // If not found in circuits, search directly
   if (!result) {
     searchRoot->walk([&](FModuleOp mod) {
+      if (mod.getModuleName() == moduleName) {
+        result = mod;
+        return WalkResult::interrupt();
+      }
+      return WalkResult::advance();
+    });
+  }
+  if (!result) {
+    searchRoot->walk([&](FExtModuleOp mod) {
       if (mod.getModuleName() == moduleName) {
         result = mod;
         return WalkResult::interrupt();

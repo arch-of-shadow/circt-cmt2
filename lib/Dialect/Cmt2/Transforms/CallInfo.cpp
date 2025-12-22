@@ -116,15 +116,10 @@ CallType CallInfoView::determineCalleeType(CallOp callOp, ModuleOp currentModule
     if (instance) {
       // Get the module being instantiated
       auto moduleNameAttr = instance.getModuleNameAttr().getAttr();
-      // Try ModuleOp first
+      // Lookup ModuleOp (which now handles both regular and external modules)
       if (auto module = mlir::SymbolTable::lookupNearestSymbolFrom<ModuleOp>(
               circuit, moduleNameAttr)) {
         targetModule = module;
-      }
-      // Then try ExtModuleFirrtlOp
-      else if (auto extModule = mlir::SymbolTable::lookupNearestSymbolFrom<ExtModuleFirrtlOp>(
-              circuit, moduleNameAttr)) {
-        targetModule = extModule;
       }
     }
   }

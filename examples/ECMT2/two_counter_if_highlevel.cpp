@@ -28,8 +28,8 @@ public:
   // ✨ Declarative members
   ClockInput clk;
   ResetInput rst;
-  highlevel::Instance<ExternalModule> counter1;
-  highlevel::Instance<ExternalModule> counter2;
+  highlevel::Instance<Module> counter1;
+  highlevel::Instance<Module> counter2;
 
   // ✨ Declarative method using If
   highlevel::Method<UInt32, UInt1> selectAndIncrement;
@@ -37,7 +37,7 @@ public:
   // ✨ Declarative rule with If
   highlevel::Rule conditionalIncrement;
 
-  TwoCounterIfExample(ExternalModule *regMod) : Cmt2Module("TwoCounterIfExample") {
+  TwoCounterIfExample(Module *regMod) : Cmt2Module("TwoCounterIfExample") {
     // Register inputs
     CMT2_ARG_CLOCK(clk);
     CMT2_ARG_RESET(rst);

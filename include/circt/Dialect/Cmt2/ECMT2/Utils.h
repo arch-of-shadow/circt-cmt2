@@ -26,7 +26,8 @@ namespace cmt2 {
 namespace ecmt2 {
 
 mlir::FunctionType getFunctionTypeFromBinding(
-  cmt2::ExtModuleFirrtlOp extMod, 
+  mlir::ModuleOp topModule,
+  llvm::StringRef firrtlModuleName,
   llvm::ArrayRef<std::string> argPorts,
   llvm::ArrayRef<std::string> resPorts,
   OpBuilder &builder

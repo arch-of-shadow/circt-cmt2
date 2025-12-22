@@ -155,6 +155,29 @@ mlir::LogicalResult ModuleLibrary::loadManifest(llvm::StringRef path) {
         size_t cmdEnd = content.find("\"", cmdStart);
         buildInfo.command = content.substr(cmdStart, cmdEnd - cmdStart);
 
+        // Parse args array: args: ["op=add", "width=${width}", ...]
+        size_t argsPos = content.find("args:", buildPos);
+        if (argsPos != std::string::npos) {
+          size_t argsStart = content.find("[", argsPos);
+          size_t argsEnd = content.find("]", argsStart);
+          if (argsStart != std::string::npos && argsEnd != std::string::npos) {
+            std::string argsStr = content.substr(argsStart + 1, argsEnd - argsStart - 1);
+            // Parse each arg in the array
+            size_t argStart = 0;
+            while (argStart < argsStr.size()) {
+              size_t qStart = argsStr.find("\"", argStart);
+              if (qStart == std::string::npos) break;
+              size_t qEnd = argsStr.find("\"", qStart + 1);
+              if (qEnd == std::string::npos) break;
+              std::string arg = argsStr.substr(qStart + 1, qEnd - qStart - 1);
+              if (!arg.empty()) {
+                buildInfo.args.push_back(arg);
+              }
+              argStart = qEnd + 1;
+            }
+          }
+        }
+
         size_t outPos = content.find("output_pattern:", buildPos);
         size_t outStart = content.find("\"", outPos) + 1;
         size_t outEnd = content.find("\"", outStart);
@@ -219,6 +242,18 @@ std::string ModuleLibrary::getCachePath(
   for (const auto &param : params) {
     filename += "_" + param.getKey().str() + std::to_string(param.getValue());
   }
+
+  // Include module path in cache key to invalidate cache when path changes
+  auto infoOpt = getModuleInfo(moduleName);
+  if (infoOpt && !infoOpt->path.empty()) {
+    // Use last component of path (e.g., "flopoco_ip" or "float_ip")
+    llvm::StringRef pathRef(infoOpt->path);
+    llvm::StringRef lastComponent = llvm::sys::path::filename(pathRef);
+    if (!lastComponent.empty()) {
+      filename += "_" + lastComponent.str();
+    }
+  }
+
   filename += ".mlir";
 
   llvm::sys::path::append(cachePath, filename);
@@ -293,33 +328,24 @@ mlir::LogicalResult ModuleLibrary::buildChiselModule(
     llvm::errs() << "DEBUG: Provided param: " << p.getKey() << " = " << p.getValue() << "\n";
   }
 
-  // Add parameters as named arguments (key=value style)
+  // Create complete parameter map (merge provided params with defaults)
+  llvm::StringMap<int64_t> completeParams = params;
   for (const auto &paramInfo : info.parameters) {
-    llvm::errs() << "DEBUG: Processing manifest param: " << paramInfo.name << "\n";
-
-    auto it = params.find(paramInfo.name);
-    int64_t value;
-
-    if (it != params.end()) {
-      // Use provided value
-      value = it->getValue();
-      llvm::errs() << "DEBUG: Using provided value: " << value << "\n";
-    } else if (paramInfo.defaultValue) {
-      // Use default value
-      value = *paramInfo.defaultValue;
-      llvm::errs() << "DEBUG: Using default value: " << value << "\n";
-    } else if (paramInfo.required) {
-      // Required parameter not provided
-      llvm::errs() << "Required parameter " << paramInfo.name << " not provided\n";
-      return mlir::failure();
-    } else {
-      // No value and not required - skip
-      llvm::errs() << "DEBUG: Skipping optional param with no value\n";
-      continue;
+    if (completeParams.find(paramInfo.name) == completeParams.end()) {
+      if (paramInfo.defaultValue) {
+        completeParams[paramInfo.name] = *paramInfo.defaultValue;
+      } else if (paramInfo.required) {
+        llvm::errs() << "Required parameter " << paramInfo.name << " not provided\n";
+        return mlir::failure();
+      }
     }
+  }
 
-    bashCmd += " " + paramInfo.name + "=" + std::to_string(value);
-    llvm::errs() << "DEBUG: Added to command: " << paramInfo.name << "=" << value << "\n";
+  // Use build.args from manifest (substituting parameter values)
+  for (const auto &arg : info.buildInfo->args) {
+    std::string substitutedArg = substituteParams(arg, completeParams);
+    bashCmd += " " + substitutedArg;
+    llvm::errs() << "DEBUG: Added arg: " << substitutedArg << "\n";
   }
 
   llvm::errs() << "DEBUG: Full command: " << bashCmd << "\n";
@@ -339,15 +365,7 @@ mlir::LogicalResult ModuleLibrary::buildChiselModule(
     return mlir::failure();
   }
 
-  // Determine output file path
-  // Create complete parameter map (merge provided params with defaults)
-  llvm::StringMap<int64_t> completeParams = params;
-  for (const auto &paramInfo : info.parameters) {
-    if (completeParams.find(paramInfo.name) == completeParams.end() && paramInfo.defaultValue) {
-      completeParams[paramInfo.name] = *paramInfo.defaultValue;
-    }
-  }
-
+  // Determine output file path (reuse completeParams from above)
   std::string outputPattern = substituteParams(info.buildInfo->outputPattern, completeParams);
   llvm::SmallString<256> outputFile(buildDir);
   llvm::sys::path::append(outputFile, outputPattern);
@@ -479,6 +497,9 @@ mlir::LogicalResult ModuleLibrary::insertModuleIntoCircuit(
     if (auto firrtlMod = mlir::dyn_cast<circt::firrtl::FModuleOp>(op)) {
       actualModuleName = firrtlMod.getModuleName().str();
       break;
+    } else if (auto firrtlExtMod = mlir::dyn_cast<circt::firrtl::FExtModuleOp>(op)) {
+      actualModuleName = firrtlExtMod.getModuleName().str();
+      break;
     }
   }
 
@@ -527,6 +548,14 @@ mlir::LogicalResult ModuleLibrary::insertModuleIntoCircuit(
         continue;
       } else {
         firrtlModules_.insert_or_assign(firrtlMod.getName(), true);
+      }
+      builder.clone(op);
+    } else if (auto firrtlExtMod = mlir::dyn_cast<circt::firrtl::FExtModuleOp>(op)) {
+      // Clone the external module and insert it into the firrtl.circuit
+      if (firrtlModules_.contains(firrtlExtMod.getName())) {
+        continue;
+      } else {
+        firrtlModules_.insert_or_assign(firrtlExtMod.getName(), true);
       }
       builder.clone(op);
     }

@@ -56,66 +56,18 @@ def CircuitOp : Cmt2Op<
   }];
 }
 
-def ExtModuleFirrtlOp : Cmt2Op<
-  "module.extern.firrtl", [
-    HasParent<"CircuitOp">,
-    IsolatedFromAbove,
-    SingleBlock,
-    Symbol,
-    SymbolTable,
-    NoTerminator,
-    OpAsmOpInterface,
-    DeclareOpInterfaceMethods<InstanceGraphModuleOpInterface>,
-    Cmt2ModuleLike
-  ]> {
-  let summary = "Binding a `firrtl.module` to Cmt2 ExtModule.";
-  let description = [{
-    The `cmt2.module.extern.firrtl` binds a `firrtl.module` to a Cmt2 external module.
-
-    Attributes:
-    - `sequenceBefore` ('<'): A list of 2-tuples.
-    - `conflict` ('<>'): A list of 2-tuples.
-    - `conflictFree` ('/'): A list of 2-tuples.
-
-    Arguments:
-    - `ext_module_name`: The symbol name of the `firrtl.module` to bind to.
-    - Input ports (as block arguments): clock, reset, and other signals
-
-    Results: None
-
-    Regions:
-    - `body`: This region holds the `cmt2.bind.*` operations
-
-    Assembly format:
-    ```mlir
-    cmt2.module.extern.firrtl @extmod1 : @firrtlmod1(in %clk: !firrtl.clock, in %rst: !firrtl.uint<1>) {
-      cmt2.bind.bare %clk, @clock : !firrtl.clock
-      cmt2.bind.value ...
-      cmt2.bind.method ...
-    } {sequenceBefore = [...], conflict = [...], conflictFree = [...]}
-    ```
-  }];
-  let regions = (region SizedRegion<1>:$body);
-  let arguments = (ins
-    SymbolNameAttr:$sym_name,
-    FlatSymbolRefAttr:$ext_module_name,
-    StrArrayAttr:$argNames
-  );
-
-  let hasCustomAssemblyFormat = 1;
-
-  let extraClassDeclaration = [{
-    // Provide getNameAttr for ModuleOpInterface default implementation
-    mlir::StringAttr getNameAttr() { return getSymNameAttr(); }
-
-    void getAsmBlockArgumentNames(mlir::Region &region,
-                                  mlir::OpAsmSetValueNameFn setNameFn);
-  }];
-}
+// ExtModuleFirrtlOp has been removed and unified into ModuleOp.
+// Use ModuleOp with external attribute and ext_module_name attribute instead.
+// Example:
+//   cmt2.module @extmod(in %clk: !firrtl.clock, in %rst: !firrtl.uint<1>) {
+//     cmt2.bind.bare %clk, @clock : !firrtl.clock
+//     cmt2.bind.method @start ...
+//     cmt2.bind.value @result ...
+//   } {external, ext_module_name = @FirrtlModuleName}
 
 def BindBareOp : Cmt2Op<
   "bind.bare", [
-    HasParent<"ExtModuleFirrtlOp">
+    HasParent<"ModuleOp">
   ]> {
   let summary = "Binding a signal to a port";
   let description = [{
@@ -143,7 +95,7 @@ def BindBareOp : Cmt2Op<
 
 def BindValueOp : Cmt2Op<
   "bind.value", [
-    HasParent<"ExtModuleFirrtlOp">,
+    HasParent<"ModuleOp">,
     DeclareOpInterfaceMethods<Cmt2FunctionLike, ["getCallableRegion", "getArgumentTypes", "getResultTypes", "isExternal", "getFunctionBody"]>,
     Symbol
   ]> {
@@ -199,7 +151,7 @@ def BindValueOp : Cmt2Op<
 
 def BindMethodOp : Cmt2Op<
   "bind.method", [
-    HasParent<"ExtModuleFirrtlOp">,
+    HasParent<"ModuleOp">,
     DeclareOpInterfaceMethods<Cmt2FunctionLike, ["getCallableRegion", "getArgumentTypes", "getResultTypes", "isExternal", "getFunctionBody"]>,
     Symbol,
     NoTerminator,
@@ -307,7 +259,9 @@ def ModuleOp : Cmt2Op<
   let regions = (region SizedRegion<1>:$body);
   let arguments = (ins
     SymbolNameAttr:$sym_name,
-    StrArrayAttr:$argNames
+    StrArrayAttr:$argNames,
+    OptionalAttr<UnitAttr>:$external,
+    OptionalAttr<FlatSymbolRefAttr>:$ext_module_name
   );
 
   let hasCustomAssemblyFormat = 1;
@@ -318,7 +272,17 @@ def ModuleOp : Cmt2Op<
 
     void getAsmBlockArgumentNames(mlir::Region &region,
                                   mlir::OpAsmSetValueNameFn setNameFn);
-    
+
+    /// Check if this is an external module
+    bool isExternalModule() { return getExternal().has_value(); }
+
+    /// Get the FIRRTL module name for external modules
+    llvm::StringRef getExternalModuleName() {
+      if (auto ref = getExtModuleNameAttr())
+        return ref.getValue();
+      return "";
+    }
+
     cmt2::InstanceOp getInstanceOfName(llvm::StringRef instName) {
       for (auto &op : getBodyRegion().front()) {
         if (auto inst = dyn_cast<cmt2::InstanceOp>(op)) {
@@ -330,7 +294,7 @@ def ModuleOp : Cmt2Op<
       return nullptr;
     }
 
-        
+
     cmt2::InterfaceDeclOp getItfcDeclOfName(llvm::StringRef declName) {
       for (auto &op : getBodyRegion().front()) {
         if (auto decl = dyn_cast<cmt2::InterfaceDeclOp>(op)) {

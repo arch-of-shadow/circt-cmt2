@@ -18,49 +18,131 @@ using namespace circt;
 using namespace cmt2;
 using namespace cmt2::ecmt2;
 
+// ExternalModule class has been removed and unified into Module class.
+// Use Module with external constructor instead.
+
+namespace circt {
+namespace cmt2 {
+namespace ecmt2 {
+    
+
+mlir::FunctionType getFunctionTypeFromBinding(
+  mlir::ModuleOp topModule,
+  llvm::StringRef firrtlModuleName,
+  llvm::ArrayRef<std::string> argPorts,
+  llvm::ArrayRef<std::string> resPorts,
+  OpBuilder &builder
+) {
+  llvm::SmallVector<mlir::Type> argumentTypes;
+  llvm::SmallVector<mlir::Type> resultTypes;
+
+  // Walk both FModuleOp and FExtModuleOp to find the FIRRTL module
+  topModule->walk([&](circt::firrtl::FModuleOp firrtlMod) {
+    if (firrtlMod.getModuleName() == firrtlModuleName) {
+      // For each argument port, find its type in the FIRRTL module
+      for (auto portName: argPorts) {
+        for (size_t i = 0; i < firrtlMod.getNumPorts(); ++i) {
+          if (firrtlMod.getPortName(i) == portName) {
+            argumentTypes.push_back(firrtlMod.getPortType(i));
+            break;
+          }
+        }
+      }
+      // Also for each result port
+      for (auto portName: resPorts) {
+        for (size_t i = 0; i < firrtlMod.getNumPorts(); ++i) {
+          if (firrtlMod.getPortName(i) == portName) {
+            resultTypes.push_back(firrtlMod.getPortType(i));
+            break;
+          }
+        }
+      }
+      return mlir::WalkResult::interrupt();
+    }
+    return mlir::WalkResult::advance();
+  });
+
+  // If not found in FModuleOp, try FExtModuleOp
+  if (argumentTypes.empty() && resultTypes.empty()) {
+    topModule->walk([&](circt::firrtl::FExtModuleOp firrtlMod) {
+      if (firrtlMod.getModuleName() == firrtlModuleName) {
+        for (auto portName: argPorts) {
+          for (size_t i = 0; i < firrtlMod.getNumPorts(); ++i) {
+            if (firrtlMod.getPortName(i) == portName) {
+              argumentTypes.push_back(firrtlMod.getPortType(i));
+              break;
+            }
+          }
+        }
+        for (auto portName: resPorts) {
+          for (size_t i = 0; i < firrtlMod.getNumPorts(); ++i) {
+            if (firrtlMod.getPortName(i) == portName) {
+              resultTypes.push_back(firrtlMod.getPortType(i));
+              break;
+            }
+          }
+        }
+        return mlir::WalkResult::interrupt();
+      }
+      return mlir::WalkResult::advance();
+    });
+  }
+
+  return builder.getFunctionType(argumentTypes, resultTypes);
+}
+
+} // namespace ecmt2
+} // namespace cmt2
+} // namespace circt
+
 //===----------------------------------------------------------------------===//
-// ExternalModule
+// Module
 //===----------------------------------------------------------------------===//
 
-ExternalModule::ExternalModule(llvm::StringRef name,
-                               llvm::StringRef firrtlModule,
-                               mlir::OpBuilder &builder, mlir::Location loc)
-    : name_(name.str()), builder_(builder), loc_(loc) {
+Module::Module(llvm::StringRef name, mlir::OpBuilder &builder,
+               mlir::Location loc)
+    : name_(name.str()), builder_(builder), loc_(loc), isExternal_(false) {
 
-  // Create ExtModuleFirrtlOp
+  // Create ModuleOp
   auto nameAttr = builder.getStringAttr(name);
-  auto firrtlModuleRef = mlir::FlatSymbolRefAttr::get(builder.getContext(), firrtlModule);
-
-  // Create empty argNames array
   auto argNamesAttr = builder.getArrayAttr({});
 
-  op_ = builder.create<cmt2::ExtModuleFirrtlOp>(loc, nameAttr, firrtlModuleRef,
-                                                 argNamesAttr);
+  op_ = builder.create<cmt2::ModuleOp>(loc, nameAttr, argNamesAttr,
+                                        /*external=*/nullptr,
+                                        /*ext_module_name=*/nullptr);
 
-  // ExtModuleFirrtlOp has SingleBlock trait, so we need to create a block
+  // Set insertion point inside the module
   auto *block = new mlir::Block();
   op_.getBody().push_back(block);
+  builder_.setInsertionPointToEnd(block);
 }
 
-mlir::BlockArgument ExternalModule::addArgument(llvm::StringRef name,
-                                                mlir::Type type) {
-  // Add block argument to the module body
-  auto *block = &op_.getBody().front();
-  auto arg = block->addArgument(type, loc_);
+Module::Module(llvm::StringRef name, llvm::StringRef firrtlModuleName,
+               mlir::OpBuilder &builder, mlir::Location loc)
+    : name_(name.str()), builder_(builder), loc_(loc), isExternal_(true) {
 
-  // Update argNames attribute
-  llvm::SmallVector<mlir::Attribute> argNames;
-  if (auto existingNames = op_.getArgNames()) {
-    argNames.append(existingNames.begin(), existingNames.end());
-  }
-  argNames.push_back(builder_.getStringAttr(name));
-  op_.setArgNamesAttr(builder_.getArrayAttr(argNames));
+  // Create ModuleOp with external attribute
+  auto nameAttr = builder.getStringAttr(name);
+  auto argNamesAttr = builder.getArrayAttr({});
+  auto externalAttr = builder.getUnitAttr();
+  auto extModuleNameAttr = mlir::FlatSymbolRefAttr::get(builder.getContext(), firrtlModuleName);
 
-  return arg;
+  op_ = builder.create<cmt2::ModuleOp>(loc, nameAttr, argNamesAttr,
+                                        externalAttr, extModuleNameAttr);
+
+  // Set insertion point inside the module
+  auto *block = new mlir::Block();
+  op_.getBody().push_back(block);
+  builder_.setInsertionPointToEnd(block);
 }
 
-ExternalModule &ExternalModule::bindClock(llvm::StringRef argName,
-                                          llvm::StringRef port) {
+Module::~Module() = default;
+
+//===----------------------------------------------------------------------===//
+// Module - External binding methods
+//===----------------------------------------------------------------------===//
+
+Module &Module::bindClock(llvm::StringRef argName, llvm::StringRef port) {
   // Add clock argument
   auto clockType = firrtl::ClockType::get(builder_.getContext());
   auto arg = addArgument(argName, clockType);
@@ -76,8 +158,7 @@ ExternalModule &ExternalModule::bindClock(llvm::StringRef argName,
   return *this;
 }
 
-ExternalModule &ExternalModule::bindReset(llvm::StringRef argName,
-                                          llvm::StringRef port) {
+Module &Module::bindReset(llvm::StringRef argName, llvm::StringRef port) {
   // Add reset argument
   auto resetType = firrtl::UIntType::get(builder_.getContext(), 1);
   auto arg = addArgument(argName, resetType);
@@ -93,68 +174,11 @@ ExternalModule &ExternalModule::bindReset(llvm::StringRef argName,
   return *this;
 }
 
-namespace circt {
-namespace cmt2 {
-namespace ecmt2 {
-    
-
-mlir::FunctionType getFunctionTypeFromBinding(
-  cmt2::ExtModuleFirrtlOp extMod, 
-  llvm::ArrayRef<std::string> argPorts,
-  llvm::ArrayRef<std::string> resPorts,
-  OpBuilder &builder
-) {
-  // Get the FIRRTL module name to look up port types
-  
-  llvm::SmallVector<mlir::Type> argumentTypes;
-  llvm::SmallVector<mlir::Type> resultTypes;
-
-  llvm::StringRef firrtlModuleName = extMod.getExtModuleName();
-  
-  mlir::Operation *topModule = extMod->template getParentOfType<mlir::ModuleOp>();
-
-  topModule->walk([&](circt::firrtl::FModuleOp firrtlMod) {
-    if (firrtlMod.getModuleName() == firrtlModuleName) {
-      // For each argument port, find its type in the FIRRTL module
-      for (auto portName: argPorts) {
-        // Find the port in the FIRRTL module
-        for (size_t i = 0; i < firrtlMod.getNumPorts(); ++i) {
-          if (firrtlMod.getPortName(i) == portName) {
-            argumentTypes.push_back(firrtlMod.getPortType(i));
-            break;
-          }
-        }
-      }
-      // Also for each result port
-      for (auto portName: resPorts) {
-        // Find the port in the FIRRTL module
-        for (size_t i = 0; i < firrtlMod.getNumPorts(); ++i) {
-          if (firrtlMod.getPortName(i) == portName) {
-            resultTypes.push_back(firrtlMod.getPortType(i));
-            break;
-          }
-        }
-      }
-      return mlir::WalkResult::interrupt();
-    }
-    return mlir::WalkResult::advance();
-  });
-
-  return builder.getFunctionType(argumentTypes, resultTypes);
-}
-
-} // namespace ecmt2
-} // namespace cmt2
-} // namespace circt
-
-
-
-ExternalModule &
-ExternalModule::bindMethod(llvm::StringRef name, llvm::StringRef enablePort,
+Module &Module::bindMethod(llvm::StringRef name, llvm::StringRef enablePort,
                            llvm::StringRef readyPort,
                            llvm::ArrayRef<std::string> argPorts,
                            llvm::ArrayRef<std::string> resPorts) {
-    // Create actual BindMethodOp in the body
+  // Create actual BindMethodOp in the body
   auto savedIP = builder_.saveInsertionPoint();
   builder_.setInsertionPointToEnd(&op_.getBody().front());
 
@@ -173,7 +197,9 @@ ExternalModule::bindMethod(llvm::StringRef name, llvm::StringRef enablePort,
     bodyResNames.push_back(builder_.getStringAttr(res));
 
   // Create function type (inputs -> outputs)
-  auto functionType = getFunctionTypeFromBinding(getInnerOp(), argPorts, resPorts, builder_);
+  auto topModule = op_->getParentOfType<mlir::ModuleOp>();
+  auto firrtlModuleName = op_.getExternalModuleName();
+  auto functionType = getFunctionTypeFromBinding(topModule, firrtlModuleName, argPorts, resPorts, builder_);
 
   // Create empty arg_attrs and res_attrs
   auto emptyArrayAttr = builder_.getArrayAttr({});
@@ -194,10 +220,9 @@ ExternalModule::bindMethod(llvm::StringRef name, llvm::StringRef enablePort,
   return *this;
 }
 
-ExternalModule &
-ExternalModule::bindValue(llvm::StringRef name, llvm::StringRef readyPort,
-                          llvm::ArrayRef<std::string> argPorts, llvm::ArrayRef<std::string> resPorts) {
-
+Module &Module::bindValue(llvm::StringRef name, llvm::StringRef readyPort,
+                          llvm::ArrayRef<std::string> argPorts,
+                          llvm::ArrayRef<std::string> resPorts) {
   // Create actual BindValueOp in the body
   auto savedIP = builder_.saveInsertionPoint();
   builder_.setInsertionPointToEnd(&op_.getBody().front());
@@ -206,7 +231,6 @@ ExternalModule::bindValue(llvm::StringRef name, llvm::StringRef readyPort,
   auto readyAttr = readyPort.empty() ? mlir::StringAttr() :
                    mlir::StringAttr::get(builder_.getContext(), readyPort);
 
-    
   // Update argNames attribute
   llvm::SmallVector<mlir::Attribute> argNames;
   for (auto &arg : argPorts)
@@ -216,9 +240,10 @@ ExternalModule::bindValue(llvm::StringRef name, llvm::StringRef readyPort,
   for (auto &res : resPorts)
     bodyResNames.push_back(builder_.getStringAttr(res));
 
-
   // Create function type (no inputs -> outputs)
-  auto functionType = getFunctionTypeFromBinding(getInnerOp(), argPorts, resPorts, builder_);
+  auto topModule = op_->getParentOfType<mlir::ModuleOp>();
+  auto firrtlModuleName = op_.getExternalModuleName();
+  auto functionType = getFunctionTypeFromBinding(topModule, firrtlModuleName, argPorts, resPorts, builder_);
 
   // Create empty arg_attrs and res_attrs
   auto emptyArrayAttr = builder_.getArrayAttr({});
@@ -232,16 +257,13 @@ ExternalModule::bindValue(llvm::StringRef name, llvm::StringRef readyPort,
       builder_.getArrayAttr(bodyResNames),
       emptyArrayAttr,
       emptyArrayAttr);
-    
-  // llvm::dbgs() << "bind_value's bodyResNames: " << bind_value.getBodyResNames() << "\n";
 
   builder_.restoreInsertionPoint(savedIP);
 
   return *this;
 }
 
-ExternalModule &ExternalModule::addConflict(llvm::StringRef a,
-                                            llvm::StringRef b) {
+Module &Module::addConflict(llvm::StringRef a, llvm::StringRef b) {
   // Format: conflict = [[@a, @b], ...]
   auto pairArray = builder_.getArrayAttr({
       mlir::FlatSymbolRefAttr::get(builder_.getContext(), a),
@@ -260,8 +282,7 @@ ExternalModule &ExternalModule::addConflict(llvm::StringRef a,
   return *this;
 }
 
-ExternalModule &ExternalModule::addConflictFree(llvm::StringRef a,
-                                                llvm::StringRef b) {
+Module &Module::addConflictFree(llvm::StringRef a, llvm::StringRef b) {
   // Format: conflictFree = [[@a, @b], ...]
   auto pairArray = builder_.getArrayAttr({
       mlir::FlatSymbolRefAttr::get(builder_.getContext(), a),
@@ -280,8 +301,7 @@ ExternalModule &ExternalModule::addConflictFree(llvm::StringRef a,
   return *this;
 }
 
-ExternalModule &ExternalModule::addSequenceBefore(llvm::StringRef before,
-                                                  llvm::StringRef after) {
+Module &Module::addSequenceBefore(llvm::StringRef before, llvm::StringRef after) {
   // Format: sequenceBefore = [[@before, @after], ...]
   // Meaning: before < after (before must be scheduled before after)
   auto pairArray = builder_.getArrayAttr({
@@ -300,28 +320,6 @@ ExternalModule &ExternalModule::addSequenceBefore(llvm::StringRef before,
 
   return *this;
 }
-
-//===----------------------------------------------------------------------===//
-// Module
-//===----------------------------------------------------------------------===//
-
-Module::Module(llvm::StringRef name, mlir::OpBuilder &builder,
-               mlir::Location loc)
-    : name_(name.str()), builder_(builder), loc_(loc) {
-
-  // Create ModuleOp
-  auto nameAttr = builder.getStringAttr(name);
-  auto argNamesAttr = builder.getArrayAttr({});
-
-  op_ = builder.create<cmt2::ModuleOp>(loc, nameAttr, argNamesAttr);
-
-  // Set insertion point inside the module
-  auto *block = new mlir::Block();
-  op_.getBody().push_back(block);
-  builder_.setInsertionPointToEnd(block);
-}
-
-Module::~Module() = default;
 
 mlir::BlockArgument Module::addArgument(llvm::StringRef name, mlir::Type type) {
   // Add block argument to the module body

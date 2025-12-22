@@ -41,7 +41,7 @@ using ::circt::cmt2::ecmt2::ModuleBase;
 ///   class MyModule : public Cmt2Module {
 ///     Instance<Reg32> x;
 ///
-///     MyModule(ExternalModule *regMod) : Cmt2Module("my") {
+///     MyModule(Module *regMod) : Cmt2Module("my") {
 ///       x.setModuleType(regMod);
 ///       x.setArgs(clk, rst);
 ///       CMT2_REGISTER(x);

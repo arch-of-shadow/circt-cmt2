@@ -133,16 +133,16 @@ public:
   /// Add an external module to the circuit
   /// @param firrtlModule - Module name from library manifest (e.g., "FIRRTLReg")
   /// @param name - Optional CMT2 module name. If empty, uses actual FIRRTL module name
-  ecmt2::ExternalModule *addExternalModule(llvm::StringRef firrtlModule,
-                                           llvm::StringRef name = "");
+  ecmt2::Module *addExternalModule(llvm::StringRef firrtlModule,
+                                   llvm::StringRef name = "");
 
   /// Add an external module with parameters to the circuit
   /// @param firrtlModule - Module name from library manifest
   /// @param params - Parameters for parameterized modules
   /// @param name - Optional CMT2 module name. If empty, uses actual FIRRTL module name
-  ecmt2::ExternalModule *addExternalModule(llvm::StringRef firrtlModule,
-                                           const llvm::StringMap<int64_t> &params,
-                                           llvm::StringRef name = "");
+  ecmt2::Module *addExternalModule(llvm::StringRef firrtlModule,
+                                   const llvm::StringMap<int64_t> &params,
+                                   llvm::StringRef name = "");
 
   /// Generate MLIR output
   std::string emitMLIRString();

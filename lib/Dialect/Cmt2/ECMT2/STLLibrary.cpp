@@ -33,7 +33,7 @@ using namespace circt::cmt2::ecmt2::stl;
 //===----------------------------------------------------------------------===//
 // STLLibrary Implementation
 //===----------------------------------------------------------------------===//
-ExternalModule* STLLibrary::createWireModule(unsigned width, Circuit& circuit) {
+Module* STLLibrary::createWireModule(unsigned width, Circuit& circuit) {
   llvm::StringMap<int64_t> params;
   params["width"] = width;
 
@@ -106,7 +106,7 @@ Module* STLLibrary::createWireDefaultModule(unsigned width, unsigned init, Circu
   return wireDefaultMod;
 }
 
-ExternalModule* STLLibrary::createRegModule(unsigned width, unsigned init, Circuit& circuit) {
+Module* STLLibrary::createRegModule(unsigned width, unsigned init, Circuit& circuit) {
   // Create external module directly - no wrapper needed
   llvm::StringMap<int64_t> params;
   params["width"] = width;
@@ -576,7 +576,7 @@ Module* STLLibrary::createFIFO2IModule(unsigned dataWidth, Circuit& circuit) {
   return fifoMod;
 }
 
-ExternalModule* STLLibrary::createMem1r1w1cModule( unsigned dataWidth, unsigned addrWidth, unsigned depth, Circuit& circuit) {
+Module* STLLibrary::createMem1r1w1cModule( unsigned dataWidth, unsigned addrWidth, unsigned depth, Circuit& circuit) {
   // Create external memory module with Mem1r1w binding
   llvm::StringMap<int64_t> params;
   params["data_width"] = dataWidth;
@@ -599,7 +599,7 @@ ExternalModule* STLLibrary::createMem1r1w1cModule( unsigned dataWidth, unsigned 
   return memMod;
 }
 
-ExternalModule* STLLibrary::createMem1r1w0cModule( unsigned dataWidth, unsigned addrWidth, unsigned depth, Circuit& circuit) {
+Module* STLLibrary::createMem1r1w0cModule( unsigned dataWidth, unsigned addrWidth, unsigned depth, Circuit& circuit) {
   // Create external memory module with Mem1r1w binding
   llvm::StringMap<int64_t> params;
   params["data_width"] = dataWidth;
@@ -619,4 +619,134 @@ ExternalModule* STLLibrary::createMem1r1w0cModule( unsigned dataWidth, unsigned 
         .bindMethod("write", "wen", "", {"wdata", "waddr"}, {});
 
   return memMod;
+}
+
+//===----------------------------------------------------------------------===//
+// Floating-point IP modules (external Verilog via firrtl.extmodule)
+//===----------------------------------------------------------------------===//
+
+Module* STLLibrary::createFloatAddModule(unsigned width, unsigned latency, Circuit& circuit) {
+  llvm::StringMap<int64_t> params;
+  params["width"] = width;
+  params["latency"] = latency;
+
+  auto *mod = circuit.hasExternalModule("FloatAdd", params);
+  if (mod) return mod;
+
+  mod = circuit.addExternalModule("FloatAdd", params);
+
+  // Two-phase interface: start (request) + result (response)
+  // start: ce=enable, input_ready=ready, inputs operands, no return
+  // result: valid=ready, outputs result
+  mod->bindClock("clk", "clock")
+     .bindReset("rst", "reset")
+     .bindMethod("start", "ce", "input_ready",
+                {"operand0", "operand1"}, {})
+     .bindValue("result", "valid",
+                {}, {"result"});
+
+  return mod;
+}
+
+Module* STLLibrary::createFloatSubModule(unsigned width, unsigned latency , Circuit& circuit) {
+  llvm::StringMap<int64_t> params;
+  params["width"] = width;
+  params["latency"] = latency;
+
+  auto *mod = circuit.hasExternalModule("FloatSub", params);
+  if (mod) return mod;
+
+  mod = circuit.addExternalModule("FloatSub", params);
+  // Two-phase interface: start (request) + result (response)
+  mod->bindClock("clk", "clock")
+     .bindReset("rst", "reset")
+     .bindMethod("start", "ce", "input_ready",
+                {"operand0", "operand1"}, {})
+     .bindValue("result", "valid",
+                {}, {"result"});
+
+  return mod;
+}
+
+Module* STLLibrary::createFloatMulModule(unsigned width, unsigned latency, Circuit& circuit) {
+  llvm::StringMap<int64_t> params;
+  params["width"] = width;
+  params["latency"] = latency;
+
+  auto *mod = circuit.hasExternalModule("FloatMul", params);
+  if (mod) return mod;
+
+  mod = circuit.addExternalModule("FloatMul", params);
+  // Two-phase interface: start (request) + result (response)
+  mod->bindClock("clk", "clock")
+     .bindReset("rst", "reset")
+     .bindMethod("start", "ce", "input_ready",
+                {"operand0", "operand1"}, {})
+     .bindValue("result", "valid",
+                {}, {"result"});
+
+  return mod;
+}
+
+Module* STLLibrary::createFloatDivModule(unsigned width, unsigned latency, Circuit& circuit) {
+  llvm::StringMap<int64_t> params;
+  params["width"] = width;
+  params["latency"] = latency;
+
+  auto *mod = circuit.hasExternalModule("FloatDiv", params);
+  if (mod) return mod;
+
+  mod = circuit.addExternalModule("FloatDiv", params);
+  // Two-phase interface: start (request) + result (response)
+  mod->bindClock("clk", "clock")
+     .bindReset("rst", "reset")
+     .bindMethod("start", "ce", "input_ready",
+                {"operand0", "operand1"}, {})
+     .bindValue("result", "valid",
+                {}, {"result"});
+
+  return mod;
+}
+
+Module* STLLibrary::createFloatSqrtModule(unsigned width, unsigned latency, Circuit& circuit) {
+  llvm::StringMap<int64_t> params;
+  params["width"] = width;
+  params["latency"] = latency;
+
+  auto *mod = circuit.hasExternalModule("FloatSqrt", params);
+  if (mod) return mod;
+
+  mod = circuit.addExternalModule("FloatSqrt", params);
+  // Two-phase interface: start (request) + result (response)
+  // Unary operation: single operand
+  mod->bindClock("clk", "clock")
+     .bindReset("rst", "reset")
+     .bindMethod("start", "ce", "input_ready",
+                {"operand0"}, {})
+     .bindValue("result", "valid",
+                {}, {"result"});
+
+  return mod;
+}
+
+Module* STLLibrary::createFloatCmpModule(unsigned width, unsigned predicate, unsigned latency,
+                                                  Circuit& circuit) {
+  llvm::StringMap<int64_t> params;
+  params["width"] = width;
+  params["predicate"] = predicate;
+  params["latency"] = latency;
+
+  auto *mod = circuit.hasExternalModule("FloatCmp", params);
+  if (mod) return mod;
+
+  mod = circuit.addExternalModule("FloatCmp", params);
+  // Two-phase interface: start (request) + result (response)
+  mod->bindClock("clk", "clock")
+     .bindReset("rst", "reset")
+     .bindMethod("start", "ce", "input_ready",
+                {"operand0", "operand1"}, {})
+     .bindValue("result", "valid",
+                {}, {"result"});
+
+  return mod;
 }

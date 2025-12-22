@@ -42,7 +42,7 @@ public:
   //===--------------------------------------------------------------------===//
 
   /// Create a wire module with specified width
-  static ExternalModule* createWireModule(unsigned width, Circuit& circuit);
+  static Module* createWireModule(unsigned width, Circuit& circuit);
 
   /// Create a wire module with specified width and default init value
   static Module* createWireDefaultModule(unsigned width, unsigned init, Circuit& circuit);
@@ -52,7 +52,7 @@ public:
   //===--------------------------------------------------------------------===//
 
   /// Create a register module with specified width and init value
-  static ExternalModule* createRegModule(unsigned width, unsigned init, Circuit& circuit);
+  static Module* createRegModule(unsigned width, unsigned init, Circuit& circuit);
 
   //===--------------------------------------------------------------------===//
   // FIFO modules
@@ -72,12 +72,36 @@ public:
   //===--------------------------------------------------------------------===//
 
   /// Create a 1-read 1-write memory module, read latency and write latency are both 1
-  static ExternalModule* createMem1r1w1cModule(unsigned dataWidth, unsigned addrWidth, 
+  static Module* createMem1r1w1cModule(unsigned dataWidth, unsigned addrWidth,
     unsigned depth, Circuit& circuit);
 
   /// Create a 1-read 1-write memory module, write latency is 1, read latency is 0
-  static ExternalModule* createMem1r1w0cModule(unsigned dataWidth, unsigned addrWidth, 
+  static Module* createMem1r1w0cModule(unsigned dataWidth, unsigned addrWidth,
     unsigned depth, Circuit& circuit);
+
+  //===--------------------------------------------------------------------===//
+  // Floating-point IP modules (external Verilog)
+  //===--------------------------------------------------------------------===//
+
+  /// Create a floating-point adder module (references external Verilog)
+  static Module* createFloatAddModule(unsigned width, unsigned latency, Circuit& circuit);
+
+  /// Create a floating-point subtractor module
+  static Module* createFloatSubModule(unsigned width, unsigned latency, Circuit& circuit);
+
+  /// Create a floating-point multiplier module
+  static Module* createFloatMulModule(unsigned width, unsigned latency, Circuit& circuit);
+
+  /// Create a floating-point divider module
+  static Module* createFloatDivModule(unsigned width, unsigned latency, Circuit& circuit);
+
+  /// Create a floating-point square root module
+  static Module* createFloatSqrtModule(unsigned width, unsigned latency, Circuit& circuit);
+
+  /// Create a floating-point comparator module
+  /// @param predicate - 0=eq, 1=lt, 2=le, 3=gt, 4=ge, 5=ne, 6=ord, 7=uno
+  static Module* createFloatCmpModule(unsigned width, unsigned predicate,
+                                      unsigned latency, Circuit& circuit);
 };
 
 } // namespace circt::cmt2::ecmt2::stl

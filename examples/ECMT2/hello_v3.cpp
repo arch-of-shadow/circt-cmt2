@@ -37,7 +37,7 @@ public:
   // ✨ All declarative members!
   ClockInput clk;
   ResetInput rst;
-  highlevel::Instance<ExternalModule> r;
+  highlevel::Instance<Module> r;
 
   // ✨ Declarative interface
   highlevel::InterfaceDecl<Reader> reader;
@@ -45,7 +45,7 @@ public:
   // ✨ Declarative method with proper types!
   highlevel::Method<highlevel::UInt<32>, highlevel::UInt<32>> setMethod;
 
-  ChildTrulyDeclarative(ExternalModule *regMod)
+  ChildTrulyDeclarative(Module *regMod)
       : Cmt2Module("child_truly_decl"), regMod_(regMod) {
 
     CMT2_ARG_CLOCK(clk);
@@ -91,7 +91,7 @@ public:
   }
 
 private:
-  ExternalModule *regMod_;
+  Module *regMod_;
 };
 
 // ============================================================================
@@ -102,7 +102,7 @@ public:
   // ✨ All declarative members!
   ClockInput clk;
   ResetInput rst;
-  highlevel::Instance<ExternalModule> x;
+  highlevel::Instance<Module> x;
 
   // ✨ Declarative interfaces
   highlevel::InterfaceDecl<Writer> writer;
@@ -116,7 +116,7 @@ public:
   highlevel::Method<void, highlevel::UInt<32>> writeMethod;
   highlevel::Rule incr;
 
-  HelloTrulyDeclarative(ExternalModule *regMod, Module *childMod)
+  HelloTrulyDeclarative(Module *regMod, Module *childMod)
       : Cmt2Module("hello_truly_decl"), regMod_(regMod), childMod_(childMod) {
 
     CMT2_ARG_CLOCK(clk);
@@ -197,7 +197,7 @@ public:
   }
 
 private:
-  ExternalModule *regMod_;
+  Module *regMod_;
   Module *childMod_;
 };
 

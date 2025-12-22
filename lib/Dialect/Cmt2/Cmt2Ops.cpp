@@ -27,12 +27,11 @@ namespace circt {
 namespace cmt2 {
 
 //===----------------------------------------------------------------------===//
-// Module-like Operations (ModuleOp, ExtModuleFirrtlOp)
+// Module-like Operations (ModuleOp)
 //===----------------------------------------------------------------------===//
 
 static ParseResult parseModuleLikeOp(OpAsmParser &parser,
-                                      OperationState &result,
-                                      bool isExtModule = false) {
+                                      OperationState &result) {
   auto builder = parser.getBuilder();
 
   // Parse the symbol name
@@ -40,14 +39,6 @@ static ParseResult parseModuleLikeOp(OpAsmParser &parser,
   if (parser.parseSymbolName(nameAttr, SymbolTable::getSymbolAttrName(),
                              result.attributes))
     return failure();
-
-  // For ext module, parse : @extModuleName
-  if (isExtModule) {
-    FlatSymbolRefAttr extModNameAttr;
-    if (parser.parseColon() ||
-        parser.parseAttribute(extModNameAttr, "ext_module_name", result.attributes))
-      return failure();
-  }
 
   // Parse the argument list using MLIR's built-in parser
   SmallVector<OpAsmParser::Argument> args;
@@ -121,7 +112,7 @@ static void getAsmBlockArgumentNamesImpl(ArrayAttr argNames, Region &region,
 //===----------------------------------------------------------------------===//
 
 ParseResult ModuleOp::parse(OpAsmParser &parser, OperationState &result) {
-  return parseModuleLikeOp(parser, result, false);
+  return parseModuleLikeOp(parser, result);
 }
 
 void ModuleOp::print(OpAsmPrinter &p) {
@@ -137,28 +128,8 @@ void ModuleOp::getAsmBlockArgumentNames(Region &region,
   getAsmBlockArgumentNamesImpl(getArgNames(), region, setNameFn);
 }
 
-//===----------------------------------------------------------------------===//
-// ExtModuleFirrtlOp
-//===----------------------------------------------------------------------===//
-
-ParseResult ExtModuleFirrtlOp::parse(OpAsmParser &parser, OperationState &result) {
-  return parseModuleLikeOp(parser, result, true);
-}
-
-void ExtModuleFirrtlOp::print(OpAsmPrinter &p) {
-  p << ' ';
-  p.printSymbolName(getSymName());
-  p << " : ";
-  p.printSymbolName(getExtModuleName());
-
-  SmallVector<StringRef> elidedAttrs = {"sym_name", "ext_module_name", "argNames", "methods", "values"};
-  printModuleLikeOp(p, *this, getArgNames(), getBody(), elidedAttrs);
-}
-
-void ExtModuleFirrtlOp::getAsmBlockArgumentNames(Region &region,
-                                               OpAsmSetValueNameFn setNameFn) {
-  getAsmBlockArgumentNamesImpl(getArgNames(), region, setNameFn);
-}
+// ExtModuleFirrtlOp has been removed and unified into ModuleOp.
+// Use ModuleOp with external attribute instead.
 
 //===----------------------------------------------------------------------===//
 // Function-like Operations (RuleOp, MethodOp, ValueOp)

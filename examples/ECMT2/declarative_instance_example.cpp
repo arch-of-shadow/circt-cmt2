@@ -30,10 +30,10 @@ public:
   // Declarative members!
   ClockInput clk;
   ResetInput rst;
-  highlevel::Instance<ExternalModule> countReg;  // Declarative instance!
+  highlevel::Instance<Module> countReg;  // Declarative instance!
   highlevel::Rule increment;  // Declarative rule!
 
-  DeclarativeCounter(ExternalModule *regMod) : Cmt2Module("DeclarativeCounter") {
+  DeclarativeCounter(Module *regMod) : Cmt2Module("DeclarativeCounter") {
     // Register inputs
     CMT2_ARG_CLOCK(clk);
     CMT2_ARG_RESET(rst);

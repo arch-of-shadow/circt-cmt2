@@ -46,13 +46,14 @@ public:
   /// @param firrtlModule - Module name from library manifest (e.g., "FIRRTLReg")
   /// @param name - Optional CMT2 module name. If empty, uses actual FIRRTL module name
   /// @param params - Optional parameters for parameterized modules
-  ExternalModule *addExternalModule(llvm::StringRef firrtlModule,
-                                   llvm::StringRef name = "");
-  ExternalModule *addExternalModule(llvm::StringRef firrtlModule,
-                                   const llvm::StringMap<int64_t> &params,
-                                   llvm::StringRef name = "");
-  ExternalModule *hasExternalModule(llvm::StringRef firrtlModule,
-                                   const llvm::StringMap<int64_t> &params);
+  /// Note: Returns Module* with isExternal()=true
+  Module *addExternalModule(llvm::StringRef firrtlModule,
+                           llvm::StringRef name = "");
+  Module *addExternalModule(llvm::StringRef firrtlModule,
+                           const llvm::StringMap<int64_t> &params,
+                           llvm::StringRef name = "");
+  Module *hasExternalModule(llvm::StringRef firrtlModule,
+                           const llvm::StringMap<int64_t> &params);
 
   /// Interface management
   Interface *addInterface(llvm::StringRef name);
@@ -87,7 +88,7 @@ private:
   CircuitOp circuitOp_;
 
   std::vector<std::unique_ptr<Module>> modules_;
-  std::vector<std::unique_ptr<ExternalModule>> externalModules_;
+  std::vector<std::unique_ptr<Module>> externalModules_;  // Modules with isExternal()=true
   std::vector<std::unique_ptr<Interface>> interfaces_;
 
   llvm::StringMap<size_t> modulesMap_;

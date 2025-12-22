@@ -138,3 +138,196 @@ modules:
       args: []
       output_pattern: "Wire_w${width}.mlir"
       cache: true
+
+  # ============================================================================
+  # FloPoCo-based Floating Point IP Modules (Fully Pipelined, II=1)
+  # ============================================================================
+
+  - name: "FloatAdd"
+    type: "firrtl"
+    path: "firrtl/flopoco_ip"
+    description: "IEEE 754 floating-point addition using FloPoCo IEEEFMA (II=1)"
+    parameters:
+      - name: "width"
+        type: "integer"
+        default: 32
+        values: [16, 32]
+        required: false
+      - name: "latency"
+        type: "integer"
+        default: 4
+        values: [1, 2, 3, 4, 6]
+        required: false
+    ports:
+      clock: "!firrtl.clock"
+      reset: "!firrtl.uint<1>"
+    methods:
+      - name: "compute"
+        ready: true
+        enable: true
+        inputs: ["operand0: !firrtl.uint<${width}>", "operand1: !firrtl.uint<${width}>"]
+        outputs: ["result: !firrtl.uint<${width}>"]
+    build:
+      command: "./build.sh"
+      args: ["op=add", "width=${width}", "latency=${latency}"]
+      output_pattern: "FloatAdd_w${width}_l${latency}.mlir"
+      cache: true
+
+  - name: "FloatSub"
+    type: "firrtl"
+    path: "firrtl/flopoco_ip"
+    description: "IEEE 754 floating-point subtraction using FloPoCo IEEEFMA (II=1)"
+    parameters:
+      - name: "width"
+        type: "integer"
+        default: 32
+        values: [16, 32]
+        required: false
+      - name: "latency"
+        type: "integer"
+        default: 4
+        values: [1, 2, 3, 4, 6]
+        required: false
+    ports:
+      clock: "!firrtl.clock"
+      reset: "!firrtl.uint<1>"
+    methods:
+      - name: "compute"
+        ready: true
+        enable: true
+        inputs: ["operand0: !firrtl.uint<${width}>", "operand1: !firrtl.uint<${width}>"]
+        outputs: ["result: !firrtl.uint<${width}>"]
+    build:
+      command: "./build.sh"
+      args: ["op=sub", "width=${width}", "latency=${latency}"]
+      output_pattern: "FloatSub_w${width}_l${latency}.mlir"
+      cache: true
+
+  - name: "FloatMul"
+    type: "firrtl"
+    path: "firrtl/flopoco_ip"
+    description: "IEEE 754 floating-point multiplication using FloPoCo IEEEFMA (II=1)"
+    parameters:
+      - name: "width"
+        type: "integer"
+        default: 32
+        values: [16, 32]
+        required: false
+      - name: "latency"
+        type: "integer"
+        default: 4
+        values: [1, 2, 3, 4, 6]
+        required: false
+    ports:
+      clock: "!firrtl.clock"
+      reset: "!firrtl.uint<1>"
+    methods:
+      - name: "compute"
+        ready: true
+        enable: true
+        inputs: ["operand0: !firrtl.uint<${width}>", "operand1: !firrtl.uint<${width}>"]
+        outputs: ["result: !firrtl.uint<${width}>"]
+    build:
+      command: "./build.sh"
+      args: ["op=mul", "width=${width}", "latency=${latency}"]
+      output_pattern: "FloatMul_w${width}_l${latency}.mlir"
+      cache: true
+
+  - name: "FloatDiv"
+    type: "firrtl"
+    path: "firrtl/flopoco_ip"
+    description: "IEEE 754 floating-point division using FloPoCo (II=1)"
+    parameters:
+      - name: "width"
+        type: "integer"
+        default: 32
+        values: [16, 32]
+        required: false
+      - name: "latency"
+        type: "integer"
+        default: 12
+        values: [2, 4, 5, 7, 8, 12]
+        required: false
+    ports:
+      clock: "!firrtl.clock"
+      reset: "!firrtl.uint<1>"
+    methods:
+      - name: "compute"
+        ready: true
+        enable: true
+        inputs: ["operand0: !firrtl.uint<${width}>", "operand1: !firrtl.uint<${width}>"]
+        outputs: ["result: !firrtl.uint<${width}>"]
+    build:
+      command: "./build.sh"
+      args: ["op=div", "width=${width}", "latency=${latency}"]
+      output_pattern: "FloatDiv_w${width}_l${latency}.mlir"
+      cache: true
+
+  - name: "FloatSqrt"
+    type: "firrtl"
+    path: "firrtl/flopoco_ip"
+    description: "IEEE 754 floating-point square root using FloPoCo (II=1)"
+    parameters:
+      - name: "width"
+        type: "integer"
+        default: 32
+        values: [16, 32]
+        required: false
+      - name: "latency"
+        type: "integer"
+        default: 12
+        values: [2, 4, 5, 7, 9, 12]
+        required: false
+    ports:
+      clock: "!firrtl.clock"
+      reset: "!firrtl.uint<1>"
+    methods:
+      - name: "compute"
+        ready: true
+        enable: true
+        inputs: ["operand0: !firrtl.uint<${width}>"]
+        outputs: ["result: !firrtl.uint<${width}>"]
+    build:
+      command: "./build.sh"
+      args: ["op=sqrt", "width=${width}", "latency=${latency}"]
+      output_pattern: "FloatSqrt_w${width}_l${latency}.mlir"
+      cache: true
+
+  # ============================================================================
+  # HardFloat-based Floating Point Comparison (FloPoCo doesn't have this)
+  # ============================================================================
+
+  - name: "FloatCmp"
+    type: "firrtl"
+    path: "firrtl/float_ip"
+    description: "IEEE 754 floating-point comparison using HardFloat compareRecFN"
+    parameters:
+      - name: "width"
+        type: "integer"
+        default: 32
+        values: [16, 32, 64]
+        required: false
+      - name: "predicate"
+        type: "integer"
+        default: 0
+        values: [0, 1, 2, 3, 4, 5, 6, 7]
+        required: false
+        description: "0=eq, 1=lt, 2=le, 3=gt, 4=ge, 5=ne, 6=ord, 7=uno"
+      - name: "latency"
+        type: "integer"
+        default: 2
+        required: false
+    ports:
+      clock: "!firrtl.clock"
+      reset: "!firrtl.uint<1>"
+    methods:
+      - name: "compute"
+        ready: true
+        enable: true
+        inputs: ["operand0: !firrtl.uint<${width}>", "operand1: !firrtl.uint<${width}>"]
+        outputs: ["result: !firrtl.uint<1>"]
+    build:
+      command: "./build.sh"
+      args: ["op=cmp", "width=${width}", "predicate=${predicate}", "latency=${latency}"]
+      output_pattern: "FloatCmp_w${width}_p${predicate}_l${latency}.mlir"
+      cache: true

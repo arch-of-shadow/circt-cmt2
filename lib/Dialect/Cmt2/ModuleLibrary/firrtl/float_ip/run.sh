@@ -1,0 +1,1 @@
+./build.sh op=cmp width=32 predicate=3 latency=2

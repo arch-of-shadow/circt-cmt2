@@ -42,10 +42,10 @@ public:
   // Declarative members!
   ClockInput clk;
   ResetInput rst;
-  highlevel::Instance<ExternalModule> r;  // Register instance
+  highlevel::Instance<Module> r;  // Register instance
   highlevel::Method<void, void> setMethod;  // Using void for now (will hold UInt32)
 
-  Child(ExternalModule *regMod) : Cmt2Module("child"), regMod_(regMod) {
+  Child(Module *regMod) : Cmt2Module("child"), regMod_(regMod) {
     // Register inputs
     CMT2_ARG_CLOCK(clk);
     CMT2_ARG_RESET(rst);
@@ -115,7 +115,7 @@ public:
   }
 
 private:
-  ExternalModule *regMod_;
+  Module *regMod_;
 };
 
 // ============================================================================
@@ -126,10 +126,10 @@ public:
   // Declarative members!
   ClockInput clk;
   ResetInput rst;
-  highlevel::Instance<ExternalModule> x;  // Register instance
+  highlevel::Instance<Module> x;  // Register instance
   highlevel::Rule incr;  // Increment rule
 
-  Hello(ExternalModule *regMod, Module *childMod)
+  Hello(Module *regMod, Module *childMod)
       : Cmt2Module("hello"), regMod_(regMod), childMod_(childMod) {
     // Register inputs
     CMT2_ARG_CLOCK(clk);
@@ -238,7 +238,7 @@ public:
   }
 
 private:
-  ExternalModule *regMod_;
+  Module *regMod_;
   Module *childMod_;
 };
 
