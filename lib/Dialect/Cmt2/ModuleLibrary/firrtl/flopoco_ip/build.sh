@@ -59,6 +59,10 @@ COMMON_DEPS=(
   "${FLOPOCO_SV_LIB}/rtl/wrappers/FP2IEEE.sv"
 )
 
+# FIFO module dependency
+FIFO_DIR="$(cd "${SCRIPT_DIR}/../fifo" 2>/dev/null && pwd)"
+FIFO_DEP="${FIFO_DIR}/fifo.sv"
+
 # Function to generate BlackBoxPathAnno array
 generate_annotations() {
   local wrapper_file="$1"
@@ -111,87 +115,48 @@ case $OP in
     MODULE_NAME="FloatAdd_w${WIDTH}_l${LATENCY}"
     WRAPPER_FILE="${SCRIPT_DIR}/FloatAdd.v"
     OP_DEPS=(
-      "${FLOPOCO_SV_LIB}/flopoco/IEEEFMA/IEEEFMA_${PREC}${LATENCY}.v"
+      "${FLOPOCO_SV_LIB}/flopoco/IEEEFMA/IEEEFMA_${PREC}$((LATENCY-1)).v"
       "${FLOPOCO_SV_LIB}/rtl/wrappers/IEEEFMA.sv"
+      "${FIFO_DEP}"
     )
-    PORTS='
-    .addPort("clock", clock, Input)
-    .addPort("reset", reset, Input)
-    .addPort("ce", UInt<1>, Input)
-    .addPort("operand0", UInt<'${WIDTH}'>, Input)
-    .addPort("operand1", UInt<'${WIDTH}'>, Input)
-    .addPort("result", UInt<'${WIDTH}'>, Output)
-    .addPort("valid", UInt<1>, Output)
-    .addPort("input_ready", UInt<1>, Output)'
     ;;
   sub)
     MODULE_NAME="FloatSub_w${WIDTH}_l${LATENCY}"
     WRAPPER_FILE="${SCRIPT_DIR}/FloatSub.v"
     OP_DEPS=(
-      "${FLOPOCO_SV_LIB}/flopoco/IEEEFMA/IEEEFMA_${PREC}${LATENCY}.v"
+      "${FLOPOCO_SV_LIB}/flopoco/IEEEFMA/IEEEFMA_${PREC}$((LATENCY-1)).v"
       "${FLOPOCO_SV_LIB}/rtl/wrappers/IEEEFMA.sv"
+      "${FIFO_DEP}"
     )
-    PORTS='
-    .addPort("clock", clock, Input)
-    .addPort("reset", reset, Input)
-    .addPort("ce", UInt<1>, Input)
-    .addPort("operand0", UInt<'${WIDTH}'>, Input)
-    .addPort("operand1", UInt<'${WIDTH}'>, Input)
-    .addPort("result", UInt<'${WIDTH}'>, Output)
-    .addPort("valid", UInt<1>, Output)
-    .addPort("input_ready", UInt<1>, Output)'
     ;;
   mul)
     MODULE_NAME="FloatMul_w${WIDTH}_l${LATENCY}"
     WRAPPER_FILE="${SCRIPT_DIR}/FloatMul.v"
     OP_DEPS=(
-      "${FLOPOCO_SV_LIB}/flopoco/IEEEFMA/IEEEFMA_${PREC}${LATENCY}.v"
+      "${FLOPOCO_SV_LIB}/flopoco/IEEEFMA/IEEEFMA_${PREC}$((LATENCY-1)).v"
       "${FLOPOCO_SV_LIB}/rtl/wrappers/IEEEFMA.sv"
+      "${FIFO_DEP}"
     )
-    PORTS='
-    .addPort("clock", clock, Input)
-    .addPort("reset", reset, Input)
-    .addPort("ce", UInt<1>, Input)
-    .addPort("operand0", UInt<'${WIDTH}'>, Input)
-    .addPort("operand1", UInt<'${WIDTH}'>, Input)
-    .addPort("result", UInt<'${WIDTH}'>, Output)
-    .addPort("valid", UInt<1>, Output)
-    .addPort("input_ready", UInt<1>, Output)'
     ;;
   div)
     MODULE_NAME="FloatDiv_w${WIDTH}_l${LATENCY}"
     WRAPPER_FILE="${SCRIPT_DIR}/FloatDiv.v"
     OP_DEPS=(
-      "${FLOPOCO_SV_LIB}/flopoco/FPDiv/FPDiv_${PREC}${LATENCY}.v"
+      "${FLOPOCO_SV_LIB}/flopoco/FPDiv/FPDiv_${PREC}$((LATENCY-1)).v"
       "${FLOPOCO_SV_LIB}/rtl/wrappers/FPDiv.sv"
       "${FLOPOCO_SV_LIB}/rtl/IEEEDiv.sv"
+      "${FIFO_DEP}"
     )
-    PORTS='
-    .addPort("clock", clock, Input)
-    .addPort("reset", reset, Input)
-    .addPort("ce", UInt<1>, Input)
-    .addPort("operand0", UInt<'${WIDTH}'>, Input)
-    .addPort("operand1", UInt<'${WIDTH}'>, Input)
-    .addPort("result", UInt<'${WIDTH}'>, Output)
-    .addPort("valid", UInt<1>, Output)
-    .addPort("input_ready", UInt<1>, Output)'
     ;;
   sqrt)
     MODULE_NAME="FloatSqrt_w${WIDTH}_l${LATENCY}"
     WRAPPER_FILE="${SCRIPT_DIR}/FloatSqrt.v"
     OP_DEPS=(
-      "${FLOPOCO_SV_LIB}/flopoco/FPSqrt/FPSqrt_${PREC}${LATENCY}.v"
+      "${FLOPOCO_SV_LIB}/flopoco/FPSqrt/FPSqrt_${PREC}$((LATENCY-1)).v"
       "${FLOPOCO_SV_LIB}/rtl/wrappers/FPSqrt.sv"
       "${FLOPOCO_SV_LIB}/rtl/IEEESqrt.sv"
+      "${FIFO_DEP}"
     )
-    PORTS='
-    .addPort("clock", clock, Input)
-    .addPort("reset", reset, Input)
-    .addPort("ce", UInt<1>, Input)
-    .addPort("operand0", UInt<'${WIDTH}'>, Input)
-    .addPort("result", UInt<'${WIDTH}'>, Output)
-    .addPort("valid", UInt<1>, Output)
-    .addPort("input_ready", UInt<1>, Output)'
     ;;
   *)
     echo "Unknown operation: $OP" >&2
@@ -232,8 +197,9 @@ if [ "$OP" = "sqrt" ]; then
       in reset: !firrtl.uint<1>,
       in ce: !firrtl.uint<1>,
       in operand0: !firrtl.uint<${WIDTH}>,
-      out result: !firrtl.uint<${WIDTH}>,
-      out valid: !firrtl.uint<1>,
+      in rd_en: !firrtl.uint<1>,
+      out rd_data: !firrtl.uint<${WIDTH}>,
+      out rd_ready: !firrtl.uint<1>,
       out input_ready: !firrtl.uint<1>
     ) attributes {defname = "${BASE_NAME}", annotations = ${ANNOTATIONS}}
 EOF
@@ -245,8 +211,9 @@ else
       in ce: !firrtl.uint<1>,
       in operand0: !firrtl.uint<${WIDTH}>,
       in operand1: !firrtl.uint<${WIDTH}>,
-      out result: !firrtl.uint<${WIDTH}>,
-      out valid: !firrtl.uint<1>,
+      in rd_en: !firrtl.uint<1>,
+      out rd_data: !firrtl.uint<${WIDTH}>,
+      out rd_ready: !firrtl.uint<1>,
       out input_ready: !firrtl.uint<1>
     ) attributes {defname = "${BASE_NAME}", annotations = ${ANNOTATIONS}}
 EOF

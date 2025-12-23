@@ -102,6 +102,19 @@ public:
   /// @param predicate - 0=eq, 1=lt, 2=le, 3=gt, 4=ge, 5=ne, 6=ord, 7=uno
   static Module* createFloatCmpModule(unsigned width, unsigned predicate,
                                       unsigned latency, Circuit& circuit);
+
+  /// Create a synchronous FIFO module (external Verilog)
+  static Module* createFifoModule(unsigned width, unsigned depth, Circuit& circuit);
+
+  //===--------------------------------------------------------------------===//
+  // Floating-point comparison + FIFO combined module
+  // Note: FloatAdd/Sub/Mul/Div/Sqrt now have FIFO integrated at Verilog level.
+  //===--------------------------------------------------------------------===//
+
+  /// Create a floating-point comparator with FIFO buffer
+  /// @param predicate - 0=eq, 1=lt, 2=le, 3=gt, 4=ge, 5=ne, 6=ord, 7=uno
+  static Module* createFloatCmpFifoModule(unsigned width, unsigned predicate,
+                                          unsigned latency, Circuit& circuit);
 };
 
 } // namespace circt::cmt2::ecmt2::stl

@@ -1,29 +1,35 @@
-// FloatMul - IEEE 754 Floating-Point Multiplication using FloPoCo IEEEFMA
+// FloatMul - IEEE 754 Floating-Point Multiplication using FloPoCo IEEEFMA + FIFO
 // Implements: result = operand0 * operand1 = operand0 * operand1 + 0.0
-// Fully pipelined design with II=1
+// Fully pipelined design with II=1, result buffered in FIFO
 
 module FloatMul #(
     parameter WIDTH = 32,
-    parameter LATENCY = 4  // FloPoCo FMA supports: 1, 2, 3, 4, 6 for float32
+    parameter LATENCY = 5  // Total latency including FIFO (must be >= 2)
 )(
     input  wire             clock,
     input  wire             reset,
     input  wire             ce,
     input  wire [WIDTH-1:0] operand0,
     input  wire [WIDTH-1:0] operand1,
-    output wire [WIDTH-1:0] result,
-    output wire             valid,
-    output wire             input_ready  // Always ready (fully pipelined, II=1)
+    input  wire             rd_en,       // FIFO read enable
+    output wire [WIDTH-1:0] rd_data,     // FIFO read data (result)
+    output wire             rd_ready,    // FIFO has data
+    output wire             input_ready  // Always ready (static scheduling)
 );
+
+    localparam FLOAT_LATENCY = LATENCY - 1;
+    localparam FIFO_DEPTH = LATENCY;
 
     // IEEE 754 constant: 0.0
     localparam [WIDTH-1:0] ZERO = {WIDTH{1'b0}};
 
+    wire [WIDTH-1:0] fma_result;
+
     // FloPoCo IEEEFMA: (A * B) + C
     // Mul: result = operand0 * operand1 + 0.0
     IEEEFMA #(
-        .DataWidth( WIDTH   ),
-        .Latency  ( LATENCY )
+        .DataWidth( WIDTH         ),
+        .Latency  ( FLOAT_LATENCY )
     ) i_fma (
         .clk_i      ( clock    ),
         .rst_ni     ( !reset   ),
@@ -32,21 +38,37 @@ module FloatMul #(
         .operand_c_i( ZERO     ),      // C = 0.0
         .negate_a_i ( 1'b0     ),      // No negation
         .negate_c_i ( 1'b0     ),      // No negation
-        .result_o   ( result   )
+        .result_o   ( fma_result )
     );
 
-    // Valid signal pipeline only
-    reg [LATENCY-1:0] valid_pipeline;
+    // Valid signal pipeline
+    reg [FLOAT_LATENCY-1:0] valid_pipeline;
 
     always @(posedge clock) begin
         if (reset) begin
-            valid_pipeline <= {LATENCY{1'b0}};
+            valid_pipeline <= {FLOAT_LATENCY{1'b0}};
         end else begin
-            valid_pipeline <= {valid_pipeline[LATENCY-2:0], ce};
+            valid_pipeline <= {valid_pipeline[FLOAT_LATENCY-2:0], ce};
         end
     end
 
-    assign valid = valid_pipeline[LATENCY-1];
-    assign input_ready = 1'b1;  // Always ready (II=1)
+    wire float_valid = valid_pipeline[FLOAT_LATENCY-1];
+
+    // Instantiate FIFO for result buffering
+    fifo #(
+        .WIDTH(WIDTH),
+        .DEPTH(FIFO_DEPTH)
+    ) result_fifo (
+        .clk(clock),
+        .reset(reset),
+        .wr_en(float_valid),
+        .wr_data(fma_result),
+        .wr_ready(),  // Not used (static scheduling)
+        .rd_en(rd_en),
+        .rd_data(rd_data),
+        .rd_ready(rd_ready)
+    );
+
+    assign input_ready = 1'b1;  // Always ready (static scheduling)
 
 endmodule

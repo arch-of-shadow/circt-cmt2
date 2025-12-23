@@ -155,8 +155,8 @@ modules:
         required: false
       - name: "latency"
         type: "integer"
-        default: 4
-        values: [1, 2, 3, 4, 6]
+        default: 5
+        values: [2, 3, 4, 5, 7]
         required: false
     ports:
       clock: "!firrtl.clock"
@@ -166,7 +166,7 @@ modules:
         ready: true
         enable: true
         inputs: ["operand0: !firrtl.uint<${width}>", "operand1: !firrtl.uint<${width}>"]
-        outputs: ["result: !firrtl.uint<${width}>"]
+        outputs: ["rd_data: !firrtl.uint<${width}>"]
     build:
       command: "./build.sh"
       args: ["op=add", "width=${width}", "latency=${latency}"]
@@ -185,8 +185,8 @@ modules:
         required: false
       - name: "latency"
         type: "integer"
-        default: 4
-        values: [1, 2, 3, 4, 6]
+        default: 5
+        values: [2, 3, 4, 5, 7]
         required: false
     ports:
       clock: "!firrtl.clock"
@@ -196,7 +196,7 @@ modules:
         ready: true
         enable: true
         inputs: ["operand0: !firrtl.uint<${width}>", "operand1: !firrtl.uint<${width}>"]
-        outputs: ["result: !firrtl.uint<${width}>"]
+        outputs: ["rd_data: !firrtl.uint<${width}>"]
     build:
       command: "./build.sh"
       args: ["op=sub", "width=${width}", "latency=${latency}"]
@@ -215,8 +215,8 @@ modules:
         required: false
       - name: "latency"
         type: "integer"
-        default: 4
-        values: [1, 2, 3, 4, 6]
+        default: 5
+        values: [2, 3, 4, 5, 7]
         required: false
     ports:
       clock: "!firrtl.clock"
@@ -226,7 +226,7 @@ modules:
         ready: true
         enable: true
         inputs: ["operand0: !firrtl.uint<${width}>", "operand1: !firrtl.uint<${width}>"]
-        outputs: ["result: !firrtl.uint<${width}>"]
+        outputs: ["rd_data: !firrtl.uint<${width}>"]
     build:
       command: "./build.sh"
       args: ["op=mul", "width=${width}", "latency=${latency}"]
@@ -245,8 +245,8 @@ modules:
         required: false
       - name: "latency"
         type: "integer"
-        default: 12
-        values: [2, 4, 5, 7, 8, 12]
+        default: 13
+        values: [3, 5, 6, 8, 9, 13]
         required: false
     ports:
       clock: "!firrtl.clock"
@@ -256,7 +256,7 @@ modules:
         ready: true
         enable: true
         inputs: ["operand0: !firrtl.uint<${width}>", "operand1: !firrtl.uint<${width}>"]
-        outputs: ["result: !firrtl.uint<${width}>"]
+        outputs: ["rd_data: !firrtl.uint<${width}>"]
     build:
       command: "./build.sh"
       args: ["op=div", "width=${width}", "latency=${latency}"]
@@ -275,8 +275,8 @@ modules:
         required: false
       - name: "latency"
         type: "integer"
-        default: 12
-        values: [2, 4, 5, 7, 9, 12]
+        default: 13
+        values: [3, 5, 6, 8, 10, 13]
         required: false
     ports:
       clock: "!firrtl.clock"
@@ -286,7 +286,7 @@ modules:
         ready: true
         enable: true
         inputs: ["operand0: !firrtl.uint<${width}>"]
-        outputs: ["result: !firrtl.uint<${width}>"]
+        outputs: ["rd_data: !firrtl.uint<${width}>"]
     build:
       command: "./build.sh"
       args: ["op=sqrt", "width=${width}", "latency=${latency}"]
@@ -330,4 +330,42 @@ modules:
       command: "./build.sh"
       args: ["op=cmp", "width=${width}", "predicate=${predicate}", "latency=${latency}"]
       output_pattern: "FloatCmp_w${width}_p${predicate}_l${latency}.mlir"
+      cache: true
+
+  # ============================================================================
+  # Synchronous FIFO (Arbitrary Width and Depth)
+  # ============================================================================
+
+  - name: "Fifo"
+    type: "firrtl"
+    path: "firrtl/fifo"
+    description: "Synchronous FIFO with configurable width and depth"
+    parameters:
+      - name: "width"
+        type: "integer"
+        default: 8
+        required: false
+      - name: "depth"
+        type: "integer"
+        default: 16
+        required: false
+    ports:
+      clock: "!firrtl.clock"
+      reset: "!firrtl.uint<1>"
+    methods:
+      - name: "write"
+        ready: true
+        enable: true
+        inputs: ["wr_data: !firrtl.uint<${width}>"]
+      - name: "read"
+        ready: true
+        enable: true
+        outputs: ["rd_data: !firrtl.uint<${width}>"]
+    conflict_matrix:
+      - [write, write, "Conflict"]
+      - [read, read, "Conflict"]
+    build:
+      command: "./build.sh"
+      args: ["width=${width}", "depth=${depth}"]
+      output_pattern: "Fifo_w${width}_d${depth}.mlir"
       cache: true
