@@ -98,6 +98,18 @@ public:
   /// Create a floating-point square root module
   static Module* createFloatSqrtModule(unsigned width, unsigned latency, Circuit& circuit);
 
+  /// Create a floating-point exponential (e^x) module
+  static Module* createFloatExpModule(unsigned width, unsigned latency, Circuit& circuit);
+
+  /// Create a floating-point natural logarithm (ln) module
+  static Module* createFloatLogModule(unsigned width, unsigned latency, Circuit& circuit);
+
+  /// Create an integer to floating-point conversion module
+  static Module* createInt2FloatModule(unsigned width, unsigned latency, Circuit& circuit);
+
+  /// Create a floating-point to integer conversion module
+  static Module* createFloat2IntModule(unsigned width, unsigned latency, Circuit& circuit);
+
   /// Create a floating-point comparator module
   /// @param predicate - 0=eq, 1=lt, 2=le, 3=gt, 4=ge, 5=ne, 6=ord, 7=uno
   static Module* createFloatCmpModule(unsigned width, unsigned predicate,

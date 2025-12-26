@@ -729,6 +729,90 @@ Module* STLLibrary::createFloatSqrtModule(unsigned width, unsigned latency, Circ
   return mod;
 }
 
+Module* STLLibrary::createFloatExpModule(unsigned width, unsigned latency, Circuit& circuit) {
+  llvm::StringMap<int64_t> params;
+  params["width"] = width;
+  params["latency"] = latency;
+
+  auto *mod = circuit.hasExternalModule("FloatExp", params);
+  if (mod) return mod;
+
+  mod = circuit.addExternalModule("FloatExp", params);
+  // Two-phase interface: start (request) + result (response via FIFO)
+  // Unary operation: single operand
+  mod->bindClock("clk", "clock")
+     .bindReset("rst", "reset")
+     .bindMethod("start", "ce", "input_ready",
+                {"operand0"}, {})
+     .bindMethod("result", "rd_en", "rd_ready",
+                {}, {"rd_data"});
+
+  return mod;
+}
+
+Module* STLLibrary::createFloatLogModule(unsigned width, unsigned latency, Circuit& circuit) {
+  llvm::StringMap<int64_t> params;
+  params["width"] = width;
+  params["latency"] = latency;
+
+  auto *mod = circuit.hasExternalModule("FloatLog", params);
+  if (mod) return mod;
+
+  mod = circuit.addExternalModule("FloatLog", params);
+  // Two-phase interface: start (request) + result (response via FIFO)
+  // Unary operation: single operand
+  mod->bindClock("clk", "clock")
+     .bindReset("rst", "reset")
+     .bindMethod("start", "ce", "input_ready",
+                {"operand0"}, {})
+     .bindMethod("result", "rd_en", "rd_ready",
+                {}, {"rd_data"});
+
+  return mod;
+}
+
+Module* STLLibrary::createInt2FloatModule(unsigned width, unsigned latency, Circuit& circuit) {
+  llvm::StringMap<int64_t> params;
+  params["width"] = width;
+  params["latency"] = latency;
+
+  auto *mod = circuit.hasExternalModule("Int2Float", params);
+  if (mod) return mod;
+
+  mod = circuit.addExternalModule("Int2Float", params);
+  // Two-phase interface: start (request) + result (response via FIFO)
+  // Unary operation: single operand (integer input, float output)
+  mod->bindClock("clk", "clock")
+     .bindReset("rst", "reset")
+     .bindMethod("start", "ce", "input_ready",
+                {"operand0"}, {})
+     .bindMethod("result", "rd_en", "rd_ready",
+                {}, {"rd_data"});
+
+  return mod;
+}
+
+Module* STLLibrary::createFloat2IntModule(unsigned width, unsigned latency, Circuit& circuit) {
+  llvm::StringMap<int64_t> params;
+  params["width"] = width;
+  params["latency"] = latency;
+
+  auto *mod = circuit.hasExternalModule("Float2Int", params);
+  if (mod) return mod;
+
+  mod = circuit.addExternalModule("Float2Int", params);
+  // Two-phase interface: start (request) + result (response via FIFO)
+  // Unary operation: single operand (float input, integer output)
+  mod->bindClock("clk", "clock")
+     .bindReset("rst", "reset")
+     .bindMethod("start", "ce", "input_ready",
+                {"operand0"}, {})
+     .bindMethod("result", "rd_en", "rd_ready",
+                {}, {"rd_data"});
+
+  return mod;
+}
+
 Module* STLLibrary::createFloatCmpModule(unsigned width, unsigned predicate, unsigned latency,
                                                   Circuit& circuit) {
   llvm::StringMap<int64_t> params;
@@ -814,17 +898,17 @@ Module* STLLibrary::createFloatCmpFifoModule(unsigned width, unsigned predicate,
   });
   startMethod->finalize();
 
-  // Result is 1-bit
-  auto *readMethod = mod->addMethod("read", {}, {{boolType}});
-  readMethod->guard([&](mlir::OpBuilder &b, llvm::ArrayRef<mlir::BlockArgument> args) {
+  // Result is 1-bit (method name "result" for consistency with other float ops)
+  auto *resultMethod = mod->addMethod("result", {}, {{boolType}});
+  resultMethod->guard([&](mlir::OpBuilder &b, llvm::ArrayRef<mlir::BlockArgument> args) {
     auto trueVal = UInt::constant(1, 1, b, loc);
     b.create<circt::cmt2::ReturnOp>(loc, trueVal.getValue());
   });
-  readMethod->body([&](mlir::OpBuilder &b, llvm::ArrayRef<mlir::BlockArgument> args) {
+  resultMethod->body([&](mlir::OpBuilder &b, llvm::ArrayRef<mlir::BlockArgument> args) {
     auto resultVals = fifoInst->callMethod("read", {}, b);
     b.create<circt::cmt2::ReturnOp>(loc, resultVals[0]);
   });
-  readMethod->finalize();
+  resultMethod->finalize();
 
   auto *writeRule = mod->addRule("write_result");
   writeRule->guard([&](mlir::OpBuilder &b) {
@@ -838,7 +922,7 @@ Module* STLLibrary::createFloatCmpFifoModule(unsigned width, unsigned predicate,
   });
   writeRule->finalize();
 
-  mod->setPrecedence({{"read", "write_result"}, {"write_result", "start"}});
+  mod->setPrecedence({{"result", "write_result"}, {"write_result", "start"}});
 
   return mod;
 }

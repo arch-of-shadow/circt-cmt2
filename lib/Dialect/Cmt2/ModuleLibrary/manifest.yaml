@@ -293,19 +293,79 @@ modules:
       output_pattern: "FloatSqrt_w${width}_l${latency}.mlir"
       cache: true
 
-  # ============================================================================
-  # HardFloat-based Floating Point Comparison (FloPoCo doesn't have this)
-  # ============================================================================
-
-  - name: "FloatCmp"
+  - name: "FloatExp"
     type: "firrtl"
-    path: "firrtl/float_ip"
-    description: "IEEE 754 floating-point comparison using HardFloat compareRecFN"
+    path: "firrtl/flopoco_ip"
+    description: "IEEE 754 floating-point exponential (e^x) using FloPoCo IEEEExp (II=1)"
     parameters:
       - name: "width"
         type: "integer"
         default: 32
-        values: [16, 32, 64]
+        values: [16, 32]
+        required: false
+      - name: "latency"
+        type: "integer"
+        default: 5
+        values: [4, 5, 6, 7, 8, 10]
+        required: false
+    ports:
+      clock: "!firrtl.clock"
+      reset: "!firrtl.uint<1>"
+    methods:
+      - name: "compute"
+        ready: true
+        enable: true
+        inputs: ["operand0: !firrtl.uint<${width}>"]
+        outputs: ["rd_data: !firrtl.uint<${width}>"]
+    build:
+      command: "./build.sh"
+      args: ["op=exp", "width=${width}", "latency=${latency}"]
+      output_pattern: "FloatExp_w${width}_l${latency}.mlir"
+      cache: true
+
+  - name: "FloatLog"
+    type: "firrtl"
+    path: "firrtl/flopoco_ip"
+    description: "IEEE 754 floating-point natural logarithm (ln) using FloPoCo FPLog (II=1)"
+    parameters:
+      - name: "width"
+        type: "integer"
+        default: 32
+        values: [16, 32]
+        required: false
+      - name: "latency"
+        type: "integer"
+        default: 5
+        values: [3, 4, 5, 6, 7, 10]
+        required: false
+    ports:
+      clock: "!firrtl.clock"
+      reset: "!firrtl.uint<1>"
+    methods:
+      - name: "compute"
+        ready: true
+        enable: true
+        inputs: ["operand0: !firrtl.uint<${width}>"]
+        outputs: ["rd_data: !firrtl.uint<${width}>"]
+    build:
+      command: "./build.sh"
+      args: ["op=log", "width=${width}", "latency=${latency}"]
+      output_pattern: "FloatLog_w${width}_l${latency}.mlir"
+      cache: true
+
+  # ============================================================================
+  # FloPoCo-based Floating Point Comparison
+  # ============================================================================
+
+  - name: "FloatCmp"
+    type: "firrtl"
+    path: "firrtl/flopoco_ip"
+    description: "IEEE 754 floating-point comparison using FloPoCo IEEEComp (II=1)"
+    parameters:
+      - name: "width"
+        type: "integer"
+        default: 32
+        values: [16, 32]
         required: false
       - name: "predicate"
         type: "integer"
@@ -316,6 +376,7 @@ modules:
       - name: "latency"
         type: "integer"
         default: 2
+        values: [1, 2, 3]
         required: false
     ports:
       clock: "!firrtl.clock"
@@ -325,11 +386,111 @@ modules:
         ready: true
         enable: true
         inputs: ["operand0: !firrtl.uint<${width}>", "operand1: !firrtl.uint<${width}>"]
-        outputs: ["result: !firrtl.uint<1>"]
+        outputs: ["rd_data: !firrtl.uint<1>"]
     build:
       command: "./build.sh"
       args: ["op=cmp", "width=${width}", "predicate=${predicate}", "latency=${latency}"]
       output_pattern: "FloatCmp_w${width}_p${predicate}_l${latency}.mlir"
+      cache: true
+
+  # ============================================================================
+  # Integer/Float Conversion
+  # ============================================================================
+
+  - name: "Int2Float"
+    type: "firrtl"
+    path: "firrtl/flopoco_ip"
+    description: "Signed integer to IEEE 754 floating-point conversion using FloPoCo Fix2FP (II=1)"
+    parameters:
+      - name: "width"
+        type: "integer"
+        default: 32
+        values: [16, 32]
+        required: false
+      - name: "latency"
+        type: "integer"
+        default: 2
+        values: [1, 2, 3]
+        required: false
+    ports:
+      clock: "!firrtl.clock"
+      reset: "!firrtl.uint<1>"
+    methods:
+      - name: "compute"
+        ready: true
+        enable: true
+        inputs: ["operand0: !firrtl.uint<${width}>"]
+        outputs: ["rd_data: !firrtl.uint<${width}>"]
+    build:
+      command: "./build.sh"
+      args: ["op=i2f", "width=${width}", "latency=${latency}"]
+      output_pattern: "Int2Float_w${width}_l${latency}.mlir"
+      cache: true
+
+  - name: "Float2Int"
+    type: "firrtl"
+    path: "firrtl/flopoco_ip"
+    description: "IEEE 754 floating-point to signed integer conversion using FloPoCo FP2Fix (II=1)"
+    parameters:
+      - name: "width"
+        type: "integer"
+        default: 32
+        values: [16, 32]
+        required: false
+      - name: "latency"
+        type: "integer"
+        default: 2
+        values: [1, 2]
+        required: false
+    ports:
+      clock: "!firrtl.clock"
+      reset: "!firrtl.uint<1>"
+    methods:
+      - name: "compute"
+        ready: true
+        enable: true
+        inputs: ["operand0: !firrtl.uint<${width}>"]
+        outputs: ["rd_data: !firrtl.uint<${width}>"]
+    build:
+      command: "./build.sh"
+      args: ["op=f2i", "width=${width}", "latency=${latency}"]
+      output_pattern: "Float2Int_w${width}_l${latency}.mlir"
+      cache: true
+
+  # ============================================================================
+  # Fixed-Point Trigonometric Functions
+  # ============================================================================
+
+  - name: "FixSinCos"
+    type: "firrtl"
+    path: "firrtl/flopoco_ip"
+    description: "Fixed-point sin(π*x) and cos(π*x) for x in [-1,1) using FloPoCo FixSinCos (II=1)"
+    parameters:
+      - name: "precision"
+        type: "integer"
+        default: 24
+        values: [11, 24]
+        required: false
+        description: "Fractional bits: 24 for single-precision, 11 for half-precision"
+      - name: "latency"
+        type: "integer"
+        default: 3
+        values: [2, 3, 4, 5]
+        required: false
+    ports:
+      clock: "!firrtl.clock"
+      reset: "!firrtl.uint<1>"
+    methods:
+      - name: "compute"
+        ready: true
+        enable: true
+        inputs: ["operand0: !firrtl.uint<25>"]
+        outputs: ["sin_data: !firrtl.uint<25>", "cos_data: !firrtl.uint<25>"]
+        # Note: Port width is precision+1 (25 for precision=24, 12 for precision=11)
+    build:
+      command: "./build.sh"
+      args: ["op=sincos", "precision=${precision}", "latency=${latency}"]
+      output_pattern: "FixSinCos_p${precision}_l${latency}.mlir"
       cache: true
 
   # ============================================================================

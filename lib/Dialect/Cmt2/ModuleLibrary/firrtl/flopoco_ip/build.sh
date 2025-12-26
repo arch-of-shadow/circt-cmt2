@@ -5,18 +5,23 @@
 # Also generates filelist.f for synthesis tools
 #
 # Parameters:
-#   op       - Operation type: add, sub, mul, div, sqrt
-#   width    - Data width (16, 32, 64)
-#   latency  - Pipeline latency
+#   op        - Operation type: add, sub, mul, div, sqrt, exp, log, cmp, i2f, f2i
+#   width     - Data width (16, 32, 64)
+#   latency   - Pipeline latency
+#   predicate - For cmp: 0=eq, 1=lt, 2=le, 3=gt, 4=ge, 5=ne, 6=ord, 7=uno
 #
 # Outputs:
 #   <module_name>.mlir  - FIRRTL extmodule with BlackBoxPathAnno
 #   <module_name>.f     - Filelist for synthesis tools
 #
 # Supported latencies:
-#   FMA (add/sub/mul) float32: 1, 2, 3, 4, 6
-#   Div float32: 2, 4, 5, 7, 8, 12
-#   Sqrt float32: 2, 4, 5, 7, 9, 12
+#   FMA (add/sub/mul) float32: 2, 3, 4, 5, 7
+#   Div float32: 3, 5, 6, 8, 9, 13
+#   Sqrt float32: 3, 5, 6, 8, 10, 13
+#   Exp float32: 4, 5, 6, 7, 8, 10
+#   Log float32: 3, 4, 5, 6, 7, 10
+#   Cmp: 1, 2, 3 (combinational + pipeline)
+#   I2F/F2I float32: 1, 2, 3
 #
 #===------------------------------------------------------------------------===#
 
@@ -26,6 +31,8 @@ set -e
 OP="add"
 WIDTH=32
 LATENCY=4
+PREDICATE=0
+PRECISION=0  # For sincos only (0 means auto-detect from width)
 
 # Parse named parameters
 for arg in "$@"; do
@@ -38,6 +45,12 @@ for arg in "$@"; do
       ;;
     latency=*)
       LATENCY="${arg#*=}"
+      ;;
+    predicate=*)
+      PREDICATE="${arg#*=}"
+      ;;
+    precision=*)
+      PRECISION="${arg#*=}"
       ;;
     *)
       echo "Unknown parameter: $arg" >&2
@@ -158,9 +171,87 @@ case $OP in
       "${FIFO_DEP}"
     )
     ;;
+  exp)
+    MODULE_NAME="FloatExp_w${WIDTH}_l${LATENCY}"
+    WRAPPER_FILE="${SCRIPT_DIR}/FloatExp.v"
+    OP_DEPS=(
+      "${FLOPOCO_SV_LIB}/flopoco/IEEEExp/IEEEExp_${PREC}$((LATENCY-1)).v"
+      "${FLOPOCO_SV_LIB}/rtl/wrappers/IEEEExp.sv"
+      "${FIFO_DEP}"
+    )
+    # IEEEExp uses IEEE format directly, no need for format converters
+    COMMON_DEPS=()
+    ;;
+  log)
+    MODULE_NAME="FloatLog_w${WIDTH}_l${LATENCY}"
+    WRAPPER_FILE="${SCRIPT_DIR}/FloatLog.v"
+    OP_DEPS=(
+      "${FLOPOCO_SV_LIB}/flopoco/FPLog/FPLog_${PREC}$((LATENCY-1)).v"
+      "${FLOPOCO_SV_LIB}/rtl/wrappers/FPLog.sv"
+      "${FIFO_DEP}"
+    )
+    ;;
+  cmp)
+    MODULE_NAME="FloatCmp_w${WIDTH}_p${PREDICATE}_l${LATENCY}"
+    WRAPPER_FILE="${SCRIPT_DIR}/FloatCmp.v"
+    OP_DEPS=(
+      "${FLOPOCO_SV_LIB}/flopoco/FPComp/FPComp_${PREC}0.v"
+      "${FLOPOCO_SV_LIB}/rtl/wrappers/FPComp.sv"
+      "${FLOPOCO_SV_LIB}/rtl/IEEEComp.sv"
+      "${FIFO_DEP}"
+    )
+    ;;
+  i2f)
+    MODULE_NAME="Int2Float_w${WIDTH}_l${LATENCY}"
+    WRAPPER_FILE="${SCRIPT_DIR}/Int2Float.v"
+    OP_DEPS=(
+      "${FLOPOCO_SV_LIB}/flopoco/Fix2FP/Fix2FP_${PREC}$((LATENCY-1)).v"
+      "${FLOPOCO_SV_LIB}/rtl/wrappers/INT2FP.sv"
+      "${FIFO_DEP}"
+    )
+    ;;
+  f2i)
+    MODULE_NAME="Float2Int_w${WIDTH}_l${LATENCY}"
+    WRAPPER_FILE="${SCRIPT_DIR}/Float2Int.v"
+    OP_DEPS=(
+      "${FLOPOCO_SV_LIB}/flopoco/FP2Fix/FP2Fix_${PREC}$((LATENCY-1)).v"
+      "${FLOPOCO_SV_LIB}/rtl/wrappers/FP2INT.sv"
+      "${FIFO_DEP}"
+    )
+    ;;
+  sincos)
+    # FixSinCos uses precision (fractional bits) instead of width
+    # precision=24 for float32, precision=11 for float16
+    # Can be specified directly via precision= or mapped from width=
+    if [ "$PRECISION" -ne 0 ]; then
+      # Precision specified directly
+      SINCOS_PREC=$PRECISION
+    elif [ "$WIDTH" -eq 16 ]; then
+      SINCOS_PREC=11
+    elif [ "$WIDTH" -eq 32 ]; then
+      SINCOS_PREC=24
+    else
+      echo "Unsupported width for sincos: $WIDTH (use 16 or 32, or specify precision=11/24)" >&2
+      exit 1
+    fi
+    # Validate precision
+    if [ "$SINCOS_PREC" -ne 11 ] && [ "$SINCOS_PREC" -ne 24 ]; then
+      echo "Unsupported precision for sincos: $SINCOS_PREC (use 11 or 24)" >&2
+      exit 1
+    fi
+    MODULE_NAME="FixSinCos_p${SINCOS_PREC}_l${LATENCY}"
+    WRAPPER_FILE="${SCRIPT_DIR}/FixSinCos.v"
+    OP_DEPS=(
+      "${FLOPOCO_SV_LIB}/flopoco/FixSinCos/FixSinCos_${SINCOS_PREC}_S$((LATENCY-1)).v"
+      "${FLOPOCO_SV_LIB}/rtl/wrappers/FixSinCos.sv"
+      "${FIFO_DEP}"
+    )
+    # FixSinCos doesn't need IEEE format converters
+    COMMON_DEPS=()
+    ;;
   *)
     echo "Unknown operation: $OP" >&2
-    echo "Supported operations: add, sub, mul, div, sqrt" >&2
+    echo "Supported operations: add, sub, mul, div, sqrt, exp, log, cmp, i2f, f2i, sincos" >&2
     exit 1
     ;;
 esac
@@ -181,6 +272,12 @@ case $OP in
   mul) BASE_NAME="FloatMul" ;;
   div) BASE_NAME="FloatDiv" ;;
   sqrt) BASE_NAME="FloatSqrt" ;;
+  exp) BASE_NAME="FloatExp" ;;
+  log) BASE_NAME="FloatLog" ;;
+  cmp) BASE_NAME="FloatCmp" ;;
+  i2f) BASE_NAME="Int2Float" ;;
+  f2i) BASE_NAME="Float2Int" ;;
+  sincos) BASE_NAME="FixSinCos" ;;
 esac
 
 # Generate MLIR file with correct syntax
@@ -189,9 +286,11 @@ module {
   firrtl.circuit "${MODULE_NAME}" {
 EOF
 
-# Add operand ports based on operation
-if [ "$OP" = "sqrt" ]; then
-  cat >> "${MLIR_FILE}" << EOF
+# Add operand ports based on operation type
+case $OP in
+  # Single operand operations (unary)
+  sqrt|exp|log|i2f|f2i)
+    cat >> "${MLIR_FILE}" << EOF
     firrtl.extmodule @${MODULE_NAME}<WIDTH: i64 = ${WIDTH}, LATENCY: i64 = ${LATENCY}>(
       in clock: !firrtl.clock,
       in reset: !firrtl.uint<1>,
@@ -203,8 +302,44 @@ if [ "$OP" = "sqrt" ]; then
       out input_ready: !firrtl.uint<1>
     ) attributes {defname = "${BASE_NAME}", annotations = ${ANNOTATIONS}}
 EOF
-else
-  cat >> "${MLIR_FILE}" << EOF
+    ;;
+  # Comparison operation (two operands, 1-bit output)
+  cmp)
+    cat >> "${MLIR_FILE}" << EOF
+    firrtl.extmodule @${MODULE_NAME}<WIDTH: i64 = ${WIDTH}, PREDICATE: i64 = ${PREDICATE}, LATENCY: i64 = ${LATENCY}>(
+      in clock: !firrtl.clock,
+      in reset: !firrtl.uint<1>,
+      in ce: !firrtl.uint<1>,
+      in operand0: !firrtl.uint<${WIDTH}>,
+      in operand1: !firrtl.uint<${WIDTH}>,
+      in rd_en: !firrtl.uint<1>,
+      out rd_data: !firrtl.uint<1>,
+      out rd_ready: !firrtl.uint<1>,
+      out input_ready: !firrtl.uint<1>
+    ) attributes {defname = "${BASE_NAME}", annotations = ${ANNOTATIONS}}
+EOF
+    ;;
+  # Sincos operation (single operand, two outputs: sin and cos)
+  sincos)
+    # FixSinCos uses PRECISION parameter, port width is PRECISION+1
+    SINCOS_WIDTH=$((SINCOS_PREC + 1))
+    cat >> "${MLIR_FILE}" << EOF
+    firrtl.extmodule @${MODULE_NAME}<PRECISION: i64 = ${SINCOS_PREC}, LATENCY: i64 = ${LATENCY}>(
+      in clock: !firrtl.clock,
+      in reset: !firrtl.uint<1>,
+      in ce: !firrtl.uint<1>,
+      in operand0: !firrtl.uint<${SINCOS_WIDTH}>,
+      in rd_en: !firrtl.uint<1>,
+      out sin_data: !firrtl.uint<${SINCOS_WIDTH}>,
+      out cos_data: !firrtl.uint<${SINCOS_WIDTH}>,
+      out rd_ready: !firrtl.uint<1>,
+      out input_ready: !firrtl.uint<1>
+    ) attributes {defname = "${BASE_NAME}", annotations = ${ANNOTATIONS}}
+EOF
+    ;;
+  # Binary operations (two operands, same width output)
+  *)
+    cat >> "${MLIR_FILE}" << EOF
     firrtl.extmodule @${MODULE_NAME}<WIDTH: i64 = ${WIDTH}, LATENCY: i64 = ${LATENCY}>(
       in clock: !firrtl.clock,
       in reset: !firrtl.uint<1>,
@@ -217,7 +352,8 @@ else
       out input_ready: !firrtl.uint<1>
     ) attributes {defname = "${BASE_NAME}", annotations = ${ANNOTATIONS}}
 EOF
-fi
+    ;;
+esac
 
 cat >> "${MLIR_FILE}" << EOF
   }
