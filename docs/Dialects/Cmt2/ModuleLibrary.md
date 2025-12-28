@@ -1,8 +1,72 @@
-# FIRRTL Module Library System
+# Module Library System
 
 ## Overview
 
-The FIRRTL Module Library System provides a centralized library of reusable FIRRTL modules (registers, FIFOs, memories, etc.) that can be automatically instantiated when ECMT2 ExternalModule operations are created.
+The Module Library System provides reusable hardware components for ECMT2 designs through two complementary approaches:
+
+1. **STL Library** (`stl::STLLibrary`) - High-level factory methods for common hardware building blocks
+2. **FIRRTL Module Library** (`ModuleLibrary`) - External FIRRTL module catalog with caching
+
+## STL Library (Standard Template Library)
+
+The STL Library provides factory methods that create Module instances for common hardware components.
+
+### Usage
+
+```cpp
+#include "circt/Dialect/Cmt2/ECMT2/STLLibrary.h"
+using namespace circt::cmt2::ecmt2::stl;
+
+// Create modules using factory methods
+auto* wireModule = STLLibrary::createWireModule(32, circuit);
+auto* regModule = STLLibrary::createRegModule(32, 0, circuit);
+auto* fifoModule = STLLibrary::createFIFO1PushModule(32, circuit);
+```
+
+### Available Components
+
+#### Wire Modules
+- `createWireModule(width, circuit)` - Wire with specified width
+- `createWireDefaultModule(width, init, circuit)` - Wire with default init value
+
+#### Register Modules
+- `createRegModule(width, init, circuit)` - Register with specified width and init value
+
+#### FIFO Modules
+- `createFIFO1PushModule(dataWidth, circuit)` - Depth-1 FIFO (actively push)
+- `createFIFO1PullModule(dataWidth, circuit)` - Depth-1 FIFO (actively pull)
+- `createFIFO2IModule(dataWidth, circuit)` - Depth-2 FIFO (independent enq/deq, double buffered)
+
+#### Memory Modules
+- `createMem1r1w1cModule(dataWidth, addrWidth, depth, circuit)` - 1R1W memory with read/write latency of 1
+- `createMem1r1w0cModule(dataWidth, addrWidth, depth, circuit)` - 1R1W memory with write latency 1, read latency 0
+
+### Example
+
+```cpp
+Circuit circuit("Counter", context);
+
+// Create 32-bit register initialized to 0
+auto* regMod = STLLibrary::createRegModule(32, 0, circuit);
+
+// Create counter module
+auto* counter = circuit.addModule("Counter");
+auto clk = counter->addClockArgument("clk");
+auto rst = counter->addResetArgument("rst");
+
+// Instantiate register
+auto* r = counter->addInstance("r", regMod, {clk.getValue(), rst.getValue()});
+
+// Add increment rule
+auto* incr = counter->addRule("incr");
+// ... define guard and body
+```
+
+---
+
+## FIRRTL Module Library
+
+The FIRRTL Module Library provides a centralized catalog of external FIRRTL modules that can be automatically loaded and instantiated.
 
 ## Library Directory Structure
 

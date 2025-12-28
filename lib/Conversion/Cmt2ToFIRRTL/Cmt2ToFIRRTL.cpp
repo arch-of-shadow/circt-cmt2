@@ -65,6 +65,7 @@
 #include "llvm/ADT/PostOrderIterator.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/Debug.h"
+#include "llvm/Support/ErrorHandling.h"
 
 #define DEBUG_TYPE "cmt2-to-firrtl"
 
@@ -1602,8 +1603,7 @@ LowerCmt2ToFIRRTLPass::getFunctionPortName(cmt2::Cmt2FunctionLike function,
   std::string prefix;
 
   if (!function) {
-    llvm::dbgs() << "Function is nullptr in getFunctionPortName!\n";
-    llvm::dbgs().flush();
+    llvm::report_fatal_error("Function is nullptr in getFunctionPortName!\n");
   }
 
   if (auto p = ::llvm::dyn_cast_or_null<::mlir::StringAttr>(

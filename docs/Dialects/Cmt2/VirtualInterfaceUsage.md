@@ -1,8 +1,81 @@
-# Virtual Interface Usage in ECMT2
+# Interface Patterns in ECMT2
 
 ## Overview
 
-The virtual interface mechanism in ECMT2 enables hierarchical module composition with upward communication, allowing submodules to access methods and values from their parent modules through well-defined interfaces. This pattern facilitates clean module abstraction and reusable hardware designs.
+The interface mechanism in ECMT2 enables clean module composition and communication through well-defined interfaces. This document covers both peer-to-peer communication (modules at the same level) and hierarchical communication (parent-child module communication).
+
+## Interface Fundamentals
+
+### Interface Declaration vs Definition
+
+- **Interface Declaration (`InterfaceDecl`)**: Declares that a module *needs* an interface (consumer side)
+- **Interface Definition (`InterfaceDef`)**: Defines how a module *implements* an interface (provider side binding)
+
+### Core Concepts
+
+```cpp
+// 1. Define interface at circuit level
+auto *readerInterface = circuit.addInterface("Reader");
+readerInterface->addValue("getData", {}, {u32Type});
+
+// 2. Consumer module declares interface usage
+auto *consumer = circuit.addModule("Consumer");
+auto *readerDecl = consumer->defineInterfaceDecl("reader", "Reader");
+
+// 3. Provider module or parent binds the interface
+auto *provider = circuit.addModule("Provider");
+auto *readerDef = provider->defineInterfaceDef("ReaderImpl", "Reader");
+readerDef->bind("storage", "read", "getData");  // instance.method -> interface.method
+readerDef->finalize();
+```
+
+---
+
+## Pattern 1: Peer-to-Peer Communication
+
+Modules at the same hierarchical level communicate through a parent that binds their interfaces.
+
+```
+TopModule
+├── ModuleA (Consumer) - declares @calc interface
+└── ModuleB (Provider) - implements Calculator methods
+    └── TopModule binds ModuleB's methods to ModuleA's interface
+```
+
+### Example
+
+```cpp
+// Define interface
+auto *calcInterface = circuit.addInterface("Calculator");
+calcInterface->addMethod("add", {{"a", u32Type}, {"b", u32Type}}, {u32Type});
+
+// ModuleA consumes the interface
+auto *moduleA = circuit.addModule("ModuleA");
+auto *calcDecl = moduleA->defineInterfaceDecl("calc", "Calculator");
+
+// In ModuleA's method:
+auto results = calcDecl->callMethod("add", {argA, argB}, builder);
+
+// ModuleB provides the implementation
+auto *moduleB = circuit.addModule("ModuleB");
+auto *addMethod = moduleB->addMethod("add", ...);
+// ... implement the method
+
+// TopModule binds them together
+auto *top = circuit.addModule("Top");
+auto *calcDef = top->defineInterfaceDef("ModuleBCalc", "Calculator");
+calcDef->bind("moduleB", "add", "add");
+calcDef->finalize();
+
+// Instantiate with binding
+auto *moduleAInst = top->addInstance("a", moduleA, {clk, rst},
+    {{"ModuleBCalc", "calc"}});  // bind interface
+auto *moduleBInst = top->addInstance("b", moduleB, {clk, rst});
+```
+
+---
+
+## Pattern 2: Virtual Interface (Upward Communication)
 
 ## Architecture Pattern
 

@@ -409,12 +409,40 @@ void Module::setPrecedence(
   // Build precedence array attribute
   // Format: [[@first, @second], [@third, @fourth], ...]
   llvm::SmallVector<mlir::Attribute> precedenceAttrs;
+
+  // First, get existing precedence pairs if any
+  if (auto existingPrecedence = op_->getAttrOfType<mlir::ArrayAttr>("precedence")) {
+    for (auto attr : existingPrecedence) {
+      precedenceAttrs.push_back(attr);
+    }
+  }
+
+  // Add new pairs, checking if they already exist
   for (auto &pair : pairs) {
-    auto pairArray = builder_.getArrayAttr({
-        mlir::FlatSymbolRefAttr::get(builder_.getContext(), pair.first),
-        mlir::FlatSymbolRefAttr::get(builder_.getContext(), pair.second),
-    });
-    precedenceAttrs.push_back(pairArray);
+    bool alreadyExists = false;
+
+    // Check if this pair already exists in precedenceAttrs
+    for (auto attr : precedenceAttrs) {
+      if (auto pairArray = dyn_cast<mlir::ArrayAttr>(attr)) {
+        if (pairArray.size() == 2) {
+          auto first = cast<mlir::FlatSymbolRefAttr>(pairArray[0]).getValue().str();
+          auto second = cast<mlir::FlatSymbolRefAttr>(pairArray[1]).getValue().str();
+          if (first == pair.first && second == pair.second) {
+            alreadyExists = true;
+            break;
+          }
+        }
+      }
+    }
+
+    // Only add if it doesn't already exist
+    if (!alreadyExists) {
+      auto pairArray = builder_.getArrayAttr({
+          mlir::FlatSymbolRefAttr::get(builder_.getContext(), pair.first),
+          mlir::FlatSymbolRefAttr::get(builder_.getContext(), pair.second),
+      });
+      precedenceAttrs.push_back(pairArray);
+    }
   }
 
   // Set the precedence attribute on the ModuleOp

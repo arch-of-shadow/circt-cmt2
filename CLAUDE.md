@@ -6,25 +6,69 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 CIRCT (Circuit IR Compilers and Tools) is an experimental project applying MLIR and LLVM development methodology to hardware design tools. The project provides various dialects for representing and transforming hardware designs, from high-level abstractions down to Verilog generation.
 
-## Cmt2 Architecture
+## Cmt2 Dialect
 
-### Document (`docs/Dialects/Cmt2`)
+Cmt2 implements Guarded Atomic Actions (GAA) with One-Rule-At-A-Time (ORAAT) semantics for hardware design. See `docs/Dialects/Cmt2/RationaleCmt2.md` for design philosophy.
 
-ecmt2-Class-API.md  ecmt2-EDSL.md  _index.md  INTERFACE_HELPERS_SUMMARY.md  ModuleLibrary.md  RationaleCmt2.md
+### Documentation (`docs/Dialects/Cmt2`)
 
-### Include (`include/circt/Dialect/Cmt2`)
+- `_index.md` - Overview and quick start
+- `RationaleCmt2.md` - Design rationale and GAA semantics
+- `ecmt2-EDSL.md` - Low-level C++ embedded DSL API
+- `ecmt2-Class-API.md` - High-level declarative class-based API
+- `ModuleLibrary.md` - STL and FIRRTL module library
+- `VirtualInterfaceUsage.md` - Interface patterns for module composition
 
-CMakeLists.txt    Cmt2Attributes.td  Cmt2Dialect.td      Cmt2OpInterfaces.td  Cmt2Ops.td    Cmt2Passes.td  Cmt2Types.h   ECMT2
-Cmt2Attributes.h  Cmt2Dialect.h      Cmt2OpInterfaces.h  Cmt2Ops.h            Cmt2Passes.h  Cmt2.td        Cmt2Types.td  Transforms
+### Core Operations
 
-### Lib (`lib/Dialect/Cmt2`)
+- `cmt2.circuit` - Top-level circuit container
+- `cmt2.module` - CMT2 module with rules, methods, values
+- `cmt2.module.extern.firrtl` - External FIRRTL module binding
+- `cmt2.rule` - Rule with guard and body regions
+- `cmt2.method` - Action method (can modify state)
+- `cmt2.value` - Value method (read-only)
+- `cmt2.instance` - Module instantiation
+- `cmt2.call` - Method/value invocation
+- `cmt2.interface` / `cmt2.interface.decl` / `cmt2.interface.def` - Interface system
 
-CMakeLists.txt  Cmt2Dialect.cpp  Cmt2OpInterfaces.cpp  Cmt2Ops.cpp  ECMT2  ModuleLibrary  Transforms
+### ECMT2 API Structure
 
-### Test (`test/Dialect/Cmt2`)
+**Low-level API** (`circt::cmt2::ecmt2`):
+- `Circuit` - Main entry point, manages modules and interfaces
+- `Module` / `ExternalModule` - Module wrappers
+- `Rule`, `Method`, `Value` - Function-like operations
+- `Instance` - Instance management
+- `Signal`, `Clock`, `Reset` - Signal types with operator overloading
+- `InterfaceDecl`, `InterfaceDef` - Interface bindings
+- `STLLibrary` - Standard components (Reg, Wire, FIFO, Memory)
 
+**High-level API** (`circt::cmt2::ecmt2::highlevel`):
+- Declarative class-based modules extending `Cmt2Module`
+- Template-based `Method<RetType, Args...>`, `Value<RetType>`, `Rule`
+- Registration macros: `INIT_RULE()`, `INIT_METHOD()`, `INIT_VALUE()`
+- Helper functions: `Return()`, `Add()`, `UIntConst()`, `If()`, etc.
 
-### Example (`example/ECMT2`)
+### Key Files
+
+| Component | Header | Implementation |
+|-----------|--------|----------------|
+| Circuit | `ECMT2/Circuit.h` | `ECMT2/Circuit.cpp` |
+| Module | `ECMT2/Module.h` | `ECMT2/Module.cpp` |
+| Signal | `ECMT2/Signal.h` | `ECMT2/Signal.cpp` |
+| STL Library | `ECMT2/STLLibrary.h` | `ECMT2/STLLibrary.cpp` |
+| Interface | `ECMT2/Interface.h` | `ECMT2/Interface.cpp` |
+| High-level | `ECMT2/HighLevel/*.h` | `ECMT2/HighLevel/*.cpp` |
+| Ops/Dialect | `Cmt2Ops.h` | `Cmt2Ops.cpp` |
+| Transforms | `Transforms/*.h` | `Transforms/*.cpp` |
+
+### Test Files (`test/Dialect/Cmt2`)
+
+- `gcd.mlir` - GCD algorithm example
+- `hello.mlir` - Interface mechanism test
+- `fifo1-push.mlir` - FIFO with scheduling test
+- `virtual-interface.mlir` - Virtual interface patterns
+- `if-test.mlir` - Conditional execution test
+- `bundle-vector.mlir` - Bundle/vector type tests
 
 ## Key Architecture
 
@@ -118,3 +162,45 @@ Located in `lib/Bindings/Python/`. Build with `-DCIRCT_BINDINGS_PYTHON_ENABLED=O
 - Use TableGen for operation definitions when possible
 - Prefer declarative patterns in TableGen over C++ when feasible
 - Test canonicalizations and folders separately from passes
+
+## Cmt2 Development Workflow
+
+### Adding New STL Components
+
+1. Add factory method declaration in `include/circt/Dialect/Cmt2/ECMT2/STLLibrary.h`
+2. Implement in `lib/Dialect/Cmt2/ECMT2/STLLibrary.cpp`
+3. Update documentation in `docs/Dialects/Cmt2/ModuleLibrary.md`
+
+### Adding New ECMT2 Features
+
+1. For low-level API: Add to appropriate file in `lib/Dialect/Cmt2/ECMT2/`
+2. For high-level API: Add to `lib/Dialect/Cmt2/ECMT2/HighLevel/`
+3. Update headers in `include/circt/Dialect/Cmt2/ECMT2/`
+4. Add tests in `test/Dialect/Cmt2/`
+
+### Adding New Operations
+
+1. Define in `include/circt/Dialect/Cmt2/Cmt2Ops.td`
+2. Implement in `lib/Dialect/Cmt2/Cmt2Ops.cpp`
+3. If interface-related, update `Cmt2OpInterfaces.td` and `Cmt2OpInterfaces.cpp`
+4. Add conversion logic in `lib/Dialect/Cmt2/Transforms/Cmt2ToFIRRTL.cpp`
+
+### Running Cmt2 Tests
+
+```bash
+# All Cmt2 tests
+build/bin/llvm-lit -v test/Dialect/Cmt2/
+
+# Specific test
+build/bin/llvm-lit -v test/Dialect/Cmt2/gcd.mlir
+
+# With pass output
+build/bin/circt-opt test/Dialect/Cmt2/hello.mlir -cmt2-print-call-info
+build/bin/circt-opt test/Dialect/Cmt2/hello.mlir -cmt2-to-firrtl
+```
+
+### Common Cmt2 Passes
+
+- `-cmt2-print-call-info` - Print call information analysis
+- `-cmt2-to-firrtl` - Convert Cmt2 to FIRRTL
+- `-cmt2-inline` - Inline module instances
