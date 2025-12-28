@@ -15,6 +15,10 @@ tools/arcilator @fabianschuiki @maerhart
 # Comb
 **/Dialect/Comb @darthscsi
 
+# Cmt2
+**/Dialect/Cmt2 @uv-xiao
+**/Conversion/Cmt2ToFIRRTL @uv-xiao
+
 # DC
 **/Dialect/DC @mortbopet
 
