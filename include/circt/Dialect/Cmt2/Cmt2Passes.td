@@ -131,6 +131,84 @@ def VerifyCallSequence : Pass<"cmt2-verify-call-sequence", "cmt2::CircuitOp"> {
   }];
 }
 
+//===----------------------------------------------------------------------===//
+// Procedural Layer Passes (cmt2.proc.*)
+//===----------------------------------------------------------------------===//
+
+def CompileInvoke : Pass<"cmt2-compile-invoke", "cmt2::CircuitOp"> {
+  let summary = "Compile proc.invoke operations to groups and enables.";
+  let description = [{
+    This pass converts `cmt2.proc.invoke` operations in procedural control flow
+    to `cmt2.proc.enable` operations with generated groups.
+
+    For each `cmt2.proc.invoke`:
+    1. Creates a new `cmt2.proc.group` containing the equivalent `cmt2.call`
+    2. Replaces the `cmt2.proc.invoke` with a `cmt2.proc.enable` referencing
+       the generated group
+
+    This pass must run BEFORE the TDCC pass, as TDCC only handles
+    `cmt2.proc.enable` operations, not `cmt2.proc.invoke`.
+  }];
+}
+
+def TDCC : Pass<"cmt2-tdcc", "cmt2::CircuitOp"> {
+  let summary = "Top-Down Compile Control for procedural rules/methods.";
+  let description = [{
+    This pass implements the Top-Down Compile Control (TDCC) algorithm to
+    compile procedural control flow (`cmt2.proc.seq`, `cmt2.proc.par`,
+    `cmt2.proc.if`, `cmt2.proc.while`) into an FSM-based implementation.
+
+    The algorithm:
+    1. Assigns unique state IDs to each `cmt2.proc.enable` operation
+    2. Builds a schedule with enables (state → assignments) and transitions
+    3. Applies optimizations (state merging, early transitions)
+    4. Generates metadata attributes for FSM generation
+
+    After this pass, procedural rules/methods have metadata attributes
+    describing the FSM states and transitions.
+  }];
+}
+
+def ProcStmtToAction : Pass<"cmt2-proc-stmt-to-action", "cmt2::CircuitOp"> {
+  let summary = "Convert procedural control statements to FSM-based actions.";
+  let description = [{
+    This pass converts procedural control statements to FSM-based action rules.
+    It uses the TDCC metadata to generate:
+
+    1. An FSM register external module (if not exists)
+    2. An FSM register instance for each proc.rule/method
+    3. Regular cmt2.rule operations for each state transition
+    4. cmt2.value operations for idle/running status
+
+    The proc.group operations are preserved and their content is inlined
+    into the generated rules.
+
+    This pass must run AFTER TDCC and BEFORE ProcToGAA.
+  }];
+}
+
+def ProcToGAA : Pass<"cmt2-proc-to-gaa", "cmt2::CircuitOp"> {
+  let summary = "Convert procedural rules/methods to regular GAA rules.";
+  let description = [{
+    This pass converts procedural rules/methods (`cmt2.proc.rule`,
+    `cmt2.proc.method`) to regular GAA constructs.
+
+    For each procedural rule:
+    - Generates an FSM state register
+    - Creates regular GAA rules for each state transition
+    - Generates @name__idle() and @name__running() value methods
+
+    For each procedural method:
+    - Generates argument registers to hold inputs across cycles
+    - Generates result register
+    - Creates entry method that latches args and starts FSM
+    - Creates regular GAA rules for state transitions
+    - Generates result value method
+
+    This pass must run AFTER TDCC.
+  }];
+}
+
 // def InferRules : Pass<"cmt2-infer-rules", "cmt2::CircuitOp"> {
 //   let summary = "generate all Cmt2::RuleRefOp for a circuit.";
 //   let description = [{

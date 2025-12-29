@@ -2,6 +2,10 @@ add_circt_dialect_library(CIRCTCmt2Transforms
   # GenerateConflictMatrix.cpp
   # InferRules.cpp
   Test.cpp
+  CompileInvoke.cpp
+  TDCC.cpp
+  ProcStmtToAction.cpp
+  ProcToGAA.cpp
   InstanceGraph.cpp
   CallInfo.cpp
   ConflictMatrix.cpp
@@ -23,6 +27,7 @@ add_circt_dialect_library(CIRCTCmt2Transforms
   LINK_LIBS PUBLIC
   CIRCTComb
   CIRCTHW
+  CIRCTFIRRTL
   CIRCTSupport
   CIRCTCmt2
   CIRCTCmt2ToFIRRTL
