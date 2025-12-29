@@ -604,6 +604,192 @@ llvm::SmallVector<InstanceOp, 4> getInstances(ModuleOp module) {
 }
 
 //===----------------------------------------------------------------------===//
+// Procedural Operations (ProcRuleOp, ProcMethodOp)
+//===----------------------------------------------------------------------===//
+
+// Helper function to parse procedural function-like operations
+// These have guard + control regions, where control doesn't take arguments
+static ParseResult parseProcFunctionLikeOp(OpAsmParser &parser,
+                                            OperationState &result,
+                                            bool hasBodyResNames = false) {
+  auto builder = parser.getBuilder();
+
+  // Parse the symbol name
+  StringAttr nameAttr;
+  if (parser.parseSymbolName(nameAttr, SymbolTable::getSymbolAttrName(),
+                             result.attributes))
+    return failure();
+
+  // Parse the argument list
+  SmallVector<OpAsmParser::Argument> args;
+  if (parser.parseArgumentList(args, OpAsmParser::Delimiter::OptionalParen,
+                                /*allowType=*/true, /*allowAttrs=*/false))
+    return failure();
+
+  // Extract argument names and types
+  SmallVector<StringRef> argNames;
+  SmallVector<Type> argTypes;
+  for (auto &arg : args) {
+    argNames.push_back(arg.ssaName.name.drop_front());
+    argTypes.push_back(arg.type);
+  }
+
+  // Parse optional `->` and result types
+  SmallVector<Type> resTypes;
+  if (succeeded(parser.parseOptionalArrow())) {
+    if (parser.parseLParen())
+      return failure();
+    if (parser.parseOptionalRParen()) {
+      if (parser.parseTypeList(resTypes) || parser.parseRParen())
+        return failure();
+    }
+  }
+
+  // Store argument names and function type
+  result.addAttribute("argNames", builder.getStrArrayAttr(argNames));
+  auto funcType = builder.getFunctionType(argTypes, resTypes);
+  result.addAttribute("function_type", TypeAttr::get(funcType));
+
+  // Initialize bodyResNames if needed
+  if (hasBodyResNames) {
+    SmallVector<Attribute> resNames;
+    for (size_t i = 0; i < resTypes.size(); ++i)
+      resNames.push_back(builder.getStringAttr("res" + std::to_string(i)));
+    result.addAttribute("bodyResNames", builder.getArrayAttr(resNames));
+  }
+
+  // Parse optional attribute dict
+  if (parser.parseOptionalAttrDictWithKeyword(result.attributes))
+    return failure();
+
+  // Parse guard region (with shared arguments)
+  auto *guardRegion = result.addRegion();
+  if (parser.parseRegion(*guardRegion, args))
+    return failure();
+
+  // Parse "control" keyword and control region (no arguments)
+  if (parser.parseKeyword("control"))
+    return failure();
+
+  auto *controlRegion = result.addRegion();
+  if (parser.parseRegion(*controlRegion, {}))
+    return failure();
+
+  // Handle guard region - add implicit terminator if needed
+  OpBuilder opBuilder(builder.getContext());
+  if (guardRegion->empty()) {
+    Block *guardBlock = new Block();
+    guardBlock->addArguments(
+        argTypes, SmallVector<Location>(argTypes.size(), result.location));
+    guardRegion->push_back(guardBlock);
+  }
+  Block &guardBlock = guardRegion->front();
+  if (guardBlock.empty() || !guardBlock.back().hasTrait<OpTrait::IsTerminator>()) {
+    opBuilder.setInsertionPointToEnd(&guardBlock);
+    opBuilder.create<ReturnOp>(result.location);
+  }
+
+  // Handle control region - ensure it's not empty and has a terminator
+  if (controlRegion->empty()) {
+    Block *controlBlock = new Block();
+    controlRegion->push_back(controlBlock);
+  }
+  Block &controlBlock = controlRegion->front();
+  if (controlBlock.empty() || !controlBlock.back().hasTrait<OpTrait::IsTerminator>()) {
+    opBuilder.setInsertionPointToEnd(&controlBlock);
+    opBuilder.create<ProcControlEndOp>(result.location);
+  }
+
+  return success();
+}
+
+// Helper function to print procedural function-like operations
+static void printProcFunctionLikeOp(OpAsmPrinter &p, Operation *op,
+                                     ArrayAttr argNames, FunctionType funcType,
+                                     Region &guard, Region &control) {
+  p << ' ';
+
+  auto argTypes = funcType.getInputs();
+  auto resTypes = funcType.getResults();
+
+  // Print arguments
+  if (!argTypes.empty()) {
+    Block &guardBlock = guard.front();
+    p << '(';
+    llvm::interleaveComma(llvm::zip(argNames, guardBlock.getArguments()), p,
+                         [&](auto tuple) {
+                           auto [name, arg] = tuple;
+                           p.printOperand(arg);
+                           p << ": ";
+                           p.printType(arg.getType());
+                         });
+    p << ')';
+  } else {
+    p << "()";
+  }
+
+  // Print result types
+  p << " -> (";
+  llvm::interleaveComma(resTypes, p, [&](Type type) {
+    p.printType(type);
+  });
+  p << ')';
+
+  // Print attributes
+  SmallVector<StringRef> elidedAttrs = {"sym_name", "function_type", "argNames",
+                                         "bodyResNames"};
+  p.printOptionalAttrDictWithKeyword(op->getAttrs(), elidedAttrs);
+
+  // Print guard region
+  p << ' ';
+  p.printRegion(guard, /*printEntryBlockArgs=*/false);
+
+  // Print control keyword and region
+  p << " control ";
+  p.printRegion(control, /*printEntryBlockArgs=*/true);
+}
+
+//===----------------------------------------------------------------------===//
+// ProcRuleOp
+//===----------------------------------------------------------------------===//
+
+ParseResult ProcRuleOp::parse(OpAsmParser &parser, OperationState &result) {
+  return parseProcFunctionLikeOp(parser, result, /*hasBodyResNames=*/false);
+}
+
+void ProcRuleOp::print(OpAsmPrinter &p) {
+  p << ' ';
+  p.printSymbolName(getSymName());
+  printProcFunctionLikeOp(p, *this, getArgNames(), getFunctionType(),
+                          getGuard(), getControl());
+}
+
+void ProcRuleOp::getAsmBlockArgumentNames(Region &region,
+                                           OpAsmSetValueNameFn setNameFn) {
+  getAsmBlockArgumentNamesImpl(getArgNames(), region, setNameFn);
+}
+
+//===----------------------------------------------------------------------===//
+// ProcMethodOp
+//===----------------------------------------------------------------------===//
+
+ParseResult ProcMethodOp::parse(OpAsmParser &parser, OperationState &result) {
+  return parseProcFunctionLikeOp(parser, result, /*hasBodyResNames=*/true);
+}
+
+void ProcMethodOp::print(OpAsmPrinter &p) {
+  p << ' ';
+  p.printSymbolName(getSymName());
+  printProcFunctionLikeOp(p, *this, getArgNames(), getFunctionType(),
+                          getGuard(), getControl());
+}
+
+void ProcMethodOp::getAsmBlockArgumentNames(Region &region,
+                                             OpAsmSetValueNameFn setNameFn) {
+  getAsmBlockArgumentNamesImpl(getArgNames(), region, setNameFn);
+}
+
+//===----------------------------------------------------------------------===//
 // IfOp
 //===----------------------------------------------------------------------===//
 

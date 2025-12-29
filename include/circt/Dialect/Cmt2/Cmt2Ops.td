@@ -418,7 +418,7 @@ def ReturnOp : Cmt2Op<
   "return", [
     Terminator,
     ReturnLike,
-    ParentOneOf<["RuleOp", "MethodOp", "ValueOp"]>,
+    ParentOneOf<["RuleOp", "MethodOp", "ValueOp", "ProcRuleOp", "ProcMethodOp"]>,
   ]> {
   let summary = "Return from a value/action/rule.";
   let description = [{
@@ -632,7 +632,7 @@ def MethodOp : Cmt2Op<
 
 def CallOp : Cmt2Op<
   "call", [
-    ParentOneOf<["MethodOp", "RuleOp", "ValueOp", "IfOp"]>,
+    ParentOneOf<["MethodOp", "RuleOp", "ValueOp", "IfOp", "ProcGroupOp", "ProcStaticGroupOp", "ProcRuleOp", "ProcMethodOp"]>,
     DeclareOpInterfaceMethods<CallOpInterface>
   ]> {
   let summary = "Call Method/Value.";
@@ -888,6 +888,461 @@ def YieldOp : Cmt2Op<
   let builders = [OpBuilder<(ins), [{
     build($_builder, $_state, mlir::ValueRange());
   }]>];
+}
+
+//===----------------------------------------------------------------------===//
+// Procedural Layer Operations (cmt2.proc.*)
+//===----------------------------------------------------------------------===//
+
+/// Trait for procedural control operations (seq, par, if, while, enable, invoke)
+/// Note: We can't use NativeOpTrait with custom namespace easily, so we remove
+/// the trait for now - it can be added via interface if needed later.
+
+
+def ProcGroupOp : Cmt2Op<
+  "proc.group", [
+    HasParent<"ModuleOp">,
+    Symbol,
+    SingleBlock,
+    NoTerminator,
+    NoRegionArguments
+  ]> {
+  let summary = "Dynamic group with go-done interface";
+  let description = [{
+    A group bundles operations that execute atomically when activated.
+    Interface:
+    - `go` signal (input): When high, group activates
+    - `done` signal (output): High when group has completed (via group_done)
+
+    Groups are the execution units in the procedural layer. Each group
+    has an implicit go-done protocol that coordinates with the FSM.
+
+    Assembly format:
+    ```mlir
+    cmt2.proc.group @compute {
+      %a = cmt2.call @reg_a @read() : () -> !firrtl.uint<32>
+      %b = cmt2.call @reg_b @read() : () -> !firrtl.uint<32>
+      %sum = firrtl.add %a, %b : (!firrtl.uint<32>, !firrtl.uint<32>) -> !firrtl.uint<33>
+      cmt2.call @reg_out @write(%sum) : (!firrtl.uint<33>) -> ()
+      cmt2.proc.group_done %true : !firrtl.uint<1>
+    }
+    ```
+  }];
+  let arguments = (ins SymbolNameAttr:$sym_name);
+  let regions = (region SizedRegion<1>:$body);
+  let assemblyFormat = [{
+    $sym_name $body attr-dict
+  }];
+}
+
+def ProcStaticGroupOp : Cmt2Op<
+  "proc.static_group", [
+    HasParent<"ModuleOp">,
+    Symbol,
+    SingleBlock,
+    NoTerminator,
+    NoRegionArguments
+  ]> {
+  let summary = "Static group with fixed latency";
+  let description = [{
+    A static group has a known fixed latency specified at compile time.
+    Unlike dynamic groups, static groups do not need done signals at runtime
+    because the completion time is known statically.
+
+    Attributes:
+    - `latency`: The fixed number of cycles this group takes to complete.
+
+    Assembly format:
+    ```mlir
+    cmt2.proc.static_group @multiply <4> {
+      // Operations with timing guards...
+    }
+    ```
+  }];
+  let arguments = (ins
+    SymbolNameAttr:$sym_name,
+    I64Attr:$latency
+  );
+  let regions = (region SizedRegion<1>:$body);
+  let assemblyFormat = [{
+    $sym_name `<` $latency `>` $body attr-dict
+  }];
+}
+
+def ProcAssignOp : Cmt2Op<
+  "proc.assign", [
+    HasParent<"ProcGroupOp">
+  ]> {
+  let summary = "Guarded assignment within procedural groups";
+  let description = [{
+    Assigns a value to a destination when the guard is true.
+    Used in TDCC-generated groups to express state-dependent
+    assignments to FSM registers and group go signals.
+
+    This operation is specific to the procedural layer and should
+    NOT be confused with regular cmt2 method calls. Use `cmt2.call`
+    for invoking methods on instances; use `cmt2.proc.assign` for
+    direct port/signal assignments in synthesized control logic.
+
+    Assembly format:
+    ```mlir
+    cmt2.proc.assign %fsm.in = %guard ? %new_state : !firrtl.uint<2>, !firrtl.uint<1>, !firrtl.uint<2>
+    ```
+  }];
+  let arguments = (ins
+    FIRRTLBaseType:$dest,
+    FIRRTLBaseType:$guard,
+    FIRRTLBaseType:$src
+  );
+  let assemblyFormat = [{
+    $dest `=` $guard `?` $src `:` qualified(type($dest)) `,` qualified(type($guard)) `,` qualified(type($src)) attr-dict
+  }];
+}
+
+def ProcGroupDoneOp : Cmt2Op<
+  "proc.group_done", [
+    HasParent<"ProcGroupOp">
+  ]> {
+  let summary = "Signal group completion";
+  let description = [{
+    Signals that a group has completed execution. The done signal
+    is a 1-bit value that becomes true when the group's work is done.
+
+    For single-cycle groups, this is typically a constant true.
+    For multi-cycle groups, this depends on external completion signals.
+
+    Assembly format:
+    ```mlir
+    cmt2.proc.group_done %done : !firrtl.uint<1>
+    ```
+  }];
+  let arguments = (ins FIRRTLBaseType:$done);
+  let assemblyFormat = [{
+    $done `:` qualified(type($done)) attr-dict
+  }];
+}
+
+def ProcSeqOp : Cmt2Op<
+  "proc.seq", [
+    ParentOneOf<["ProcRuleOp", "ProcMethodOp", "ProcSeqOp", "ProcParOp", "ProcIfOp", "ProcWhileOp"]>,
+    SingleBlock,
+    NoTerminator,
+    NoRegionArguments
+  ]> {
+  let summary = "Sequential composition";
+  let description = [{
+    Executes children sequentially. Each child's done triggers the next.
+    TDCC assigns consecutive state IDs to each Enable.
+
+    Assembly format:
+    ```mlir
+    cmt2.proc.seq {
+      cmt2.proc.enable @A
+      cmt2.proc.enable @B
+      cmt2.proc.enable @C
+    }
+    ```
+
+    After TDCC compilation, states are assigned: A=0, B=1, C=2.
+    Transitions: 0→1 when A[done], 1→2 when B[done], etc.
+  }];
+  let regions = (region SizedRegion<1>:$body);
+  let assemblyFormat = [{
+    $body attr-dict
+  }];
+}
+
+def ProcParOp : Cmt2Op<
+  "proc.par", [
+    ParentOneOf<["ProcRuleOp", "ProcMethodOp", "ProcSeqOp", "ProcParOp", "ProcIfOp", "ProcWhileOp"]>,
+    SingleBlock,
+    NoTerminator,
+    NoRegionArguments
+  ]> {
+  let summary = "Parallel composition";
+  let description = [{
+    Executes children concurrently. Each branch gets independent FSM.
+    Done when all branches complete.
+
+    Assembly format:
+    ```mlir
+    cmt2.proc.par {
+      cmt2.proc.enable @A
+      cmt2.proc.seq { cmt2.proc.enable @B; cmt2.proc.enable @C }
+    }
+    ```
+
+    TDCC creates done registers (pd) for each child to track completion.
+    Par is done when all pd registers are set.
+  }];
+  let regions = (region SizedRegion<1>:$body);
+  let assemblyFormat = [{
+    $body attr-dict
+  }];
+}
+
+def ProcIfOp : Cmt2Op<
+  "proc.if", [
+    ParentOneOf<["ProcRuleOp", "ProcMethodOp", "ProcSeqOp", "ProcParOp", "ProcIfOp", "ProcWhileOp"]>,
+    NoRegionArguments,
+    NoTerminator
+  ]> {
+  let summary = "Conditional execution in procedural control";
+  let description = [{
+    Evaluates condition and executes one branch.
+    TDCC adds condition to transition guards.
+
+    Assembly format:
+    ```mlir
+    cmt2.proc.if %cond : !firrtl.uint<1> {
+      cmt2.proc.enable @A
+    } else {
+      cmt2.proc.enable @B
+    }
+    ```
+
+    State transitions:
+    - (prev, A_state, cond=true)
+    - (prev, B_state, cond=false)
+  }];
+  let arguments = (ins FIRRTLBaseType:$cond);
+  let regions = (region
+    SizedRegion<1>:$thenRegion,
+    AnyRegion:$elseRegion
+  );
+  let assemblyFormat = [{
+    $cond `:` qualified(type($cond)) $thenRegion (`else` $elseRegion^)? attr-dict
+  }];
+}
+
+def ProcWhileOp : Cmt2Op<
+  "proc.while", [
+    ParentOneOf<["ProcRuleOp", "ProcMethodOp", "ProcSeqOp", "ProcParOp", "ProcIfOp", "ProcWhileOp"]>,
+    SingleBlock,
+    NoTerminator,
+    NoRegionArguments
+  ]> {
+  let summary = "Loop control";
+  let description = [{
+    Repeatedly executes body while condition is true.
+    TDCC creates backward edges guarded by condition.
+
+    Assembly format:
+    ```mlir
+    cmt2.proc.while %cond : !firrtl.uint<1> {
+      cmt2.proc.enable @body
+    }
+    ```
+
+    Transitions:
+    - (prev, body_state, cond=true) - enter/continue loop
+    - (body_state, next_state, body_done & cond=false) - exit loop
+  }];
+  let arguments = (ins FIRRTLBaseType:$cond);
+  let regions = (region SizedRegion<1>:$body);
+  let assemblyFormat = [{
+    $cond `:` qualified(type($cond)) $body attr-dict
+  }];
+}
+
+def ProcEnableOp : Cmt2Op<
+  "proc.enable", [
+    ParentOneOf<["ProcRuleOp", "ProcMethodOp", "ProcSeqOp", "ProcParOp", "ProcIfOp", "ProcWhileOp"]>
+  ]> {
+  let summary = "Enable a group";
+  let description = [{
+    Activates a group. Gets a unique NODE_ID during TDCC.
+    Generates: group[go] = (fsm == NODE_ID) & !group[done]
+
+    Assembly format:
+    ```mlir
+    cmt2.proc.enable @groupName
+    ```
+  }];
+  let arguments = (ins FlatSymbolRefAttr:$groupName);
+  let assemblyFormat = [{
+    $groupName attr-dict
+  }];
+}
+
+def ProcInvokeOp : Cmt2Op<
+  "proc.invoke", [
+    ParentOneOf<["ProcRuleOp", "ProcMethodOp", "ProcSeqOp", "ProcParOp", "ProcIfOp", "ProcWhileOp"]>
+  ]> {
+  let summary = "Invoke a method on an instance within procedural control";
+  let description = [{
+    Invokes a method on an instance within procedural control.
+    Can invoke either:
+    - Single-cycle methods (regular cmt2.method)
+    - Multi-cycle procedural methods (cmt2.proc.method)
+
+    For multi-cycle methods, this operation waits until the
+    method's FSM returns to idle before proceeding.
+
+    CompileInvoke pass converts this to:
+    1. A generated group containing the cmt2.call
+    2. A ProcEnableOp referencing the generated group
+
+    Assembly format:
+    ```mlir
+    %result = cmt2.proc.invoke @instance @method(%arg1, %arg2) : (!firrtl.uint<32>, !firrtl.uint<32>) -> !firrtl.uint<32>
+    ```
+  }];
+  let arguments = (ins
+    FlatSymbolRefAttr:$instance,
+    FlatSymbolRefAttr:$method,
+    Variadic<FIRRTLBaseType>:$inputs
+  );
+  let results = (outs Variadic<FIRRTLBaseType>:$outputs);
+  let assemblyFormat = [{
+    $instance $method `(` $inputs `)` attr-dict `:` functional-type($inputs, results)
+  }];
+}
+
+def ProcControlEndOp : Cmt2Op<
+  "proc.control_end", [
+    Terminator,
+    ParentOneOf<["ProcRuleOp", "ProcMethodOp"]>
+  ]> {
+  let summary = "Terminate a procedural control region";
+  let description = [{
+    The `cmt2.proc.control_end` operation terminates the control region
+    of a procedural rule or method. It is implicitly added at the end of
+    control regions during parsing.
+
+    Assembly format:
+    ```mlir
+    cmt2.proc.control_end
+    ```
+  }];
+  let assemblyFormat = "attr-dict";
+}
+
+def ProcRuleOp : Cmt2Op<
+  "proc.rule", [
+    IsolatedFromAbove,
+    HasParent<"ModuleOp">,
+    Symbol,
+    OpAsmOpInterface
+  ]> {
+  let summary = "Procedural rule with guard and control regions";
+  let description = [{
+    The `cmt2.proc.rule` defines a procedural rule, which extends
+    regular rules with multi-cycle control flow. The rule fires when
+    its guard is true AND the internal FSM is idle.
+
+    After lowering (ProcToGAA pass), this generates:
+    - An FSM state register
+    - Multiple regular GAA rules for state transitions
+    - @name__idle() value to check if FSM is idle
+    - @name__running() value to check if FSM is running
+
+    Arguments:
+    - `sym_name`: The symbol name of the rule.
+    - `function_type`: The function type (typically no args/results for rules).
+    - `argNames`: Names of shared input arguments.
+
+    Regions:
+    - `guard`: Guard region returning i1 (ready condition).
+    - `control`: Control region with procedural control flow.
+
+    Assembly format:
+    ```mlir
+    cmt2.proc.rule @compute() {
+      %ready = cmt2.call @input @valid() : () -> !firrtl.uint<1>
+      cmt2.return %ready : !firrtl.uint<1>
+    } control {
+      cmt2.proc.seq {
+        cmt2.proc.enable @load
+        cmt2.proc.enable @process
+        cmt2.proc.enable @store
+      }
+    }
+    ```
+  }];
+  let regions = (region
+    SizedRegion<1>:$guard,
+    SizedRegion<1>:$control
+  );
+  let arguments = (ins
+    SymbolNameAttr:$sym_name,
+    TypeAttrOf<FunctionType>:$function_type,
+    StrArrayAttr:$argNames,
+    OptionalAttr<ArrayAttr>:$arg_attrs,
+    OptionalAttr<ArrayAttr>:$res_attrs
+  );
+
+  let hasCustomAssemblyFormat = 1;
+
+  let extraClassDeclaration = [{
+    void getAsmBlockArgumentNames(mlir::Region &region,
+                                  mlir::OpAsmSetValueNameFn setNameFn);
+  }];
+}
+
+def ProcMethodOp : Cmt2Op<
+  "proc.method", [
+    IsolatedFromAbove,
+    HasParent<"ModuleOp">,
+    Symbol,
+    OpAsmOpInterface
+  ]> {
+  let summary = "Procedural method (multi-cycle action method)";
+  let description = [{
+    The `cmt2.proc.method` defines a procedural method, which extends
+    regular methods with multi-cycle control flow. It can be called
+    via cmt2.proc.invoke from other procedural constructs.
+
+    After lowering (ProcToGAA pass), this generates:
+    - An FSM state register
+    - Argument registers to hold inputs across cycles
+    - Result register to hold output
+    - Entry method that latches args and starts FSM
+    - Multiple regular GAA rules for state transitions
+    - Result value method
+
+    Arguments:
+    - `sym_name`: The symbol name of the method.
+    - `function_type`: The function type including args and results.
+    - `argNames`: Names of shared input arguments.
+    - `bodyResNames`: Names of the body region results.
+
+    Regions:
+    - `guard`: Guard region returning i1 (ready condition).
+    - `control`: Control region with procedural control flow.
+
+    Assembly format:
+    ```mlir
+    cmt2.proc.method @multiply(%a: !firrtl.uint<32>, %b: !firrtl.uint<32>) -> (!firrtl.uint<32>) {
+      %idle = cmt2.call @mult_fsm @isIdle() : () -> !firrtl.uint<1>
+      cmt2.return %idle : !firrtl.uint<1>
+    } control {
+      cmt2.proc.seq {
+        cmt2.proc.enable @start_mult
+        cmt2.proc.enable @wait_result
+      }
+    }
+    ```
+  }];
+  let regions = (region
+    SizedRegion<1>:$guard,
+    SizedRegion<1>:$control
+  );
+  let arguments = (ins
+    SymbolNameAttr:$sym_name,
+    TypeAttrOf<FunctionType>:$function_type,
+    StrArrayAttr:$argNames,
+    StrArrayAttr:$bodyResNames,
+    OptionalAttr<ArrayAttr>:$arg_attrs,
+    OptionalAttr<ArrayAttr>:$res_attrs
+  );
+
+  let hasCustomAssemblyFormat = 1;
+
+  let extraClassDeclaration = [{
+    void getAsmBlockArgumentNames(mlir::Region &region,
+                                  mlir::OpAsmSetValueNameFn setNameFn);
+  }];
 }
 
 #endif // CIRCT_DIALECT_Cmt2_Cmt2OPS_TD
