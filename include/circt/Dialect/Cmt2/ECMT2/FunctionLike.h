@@ -131,6 +131,205 @@ private:
   ValueOp op_;
 };
 
+//===----------------------------------------------------------------------===//
+// Procedural Operations
+//===----------------------------------------------------------------------===//
+
+/// ProcGroup: execution unit with go-done interface
+class ProcGroup {
+public:
+  ProcGroup(llvm::StringRef name, Module *parent);
+
+  /// Body builder - where group actions are defined
+  template <typename Func> ProcGroup &body(Func &&fn) {
+    fn(*bodyBuilder_);
+    return *this;
+  }
+
+  /// Mark group as done with a condition
+  void groupDone(mlir::Value condition);
+
+  llvm::StringRef getName() const { return name_; }
+
+private:
+  std::string name_;
+  ProcGroupOp op_;
+  std::unique_ptr<mlir::OpBuilder> bodyBuilder_;
+};
+
+/// ProcStaticGroup: fixed-latency group
+class ProcStaticGroup {
+public:
+  ProcStaticGroup(llvm::StringRef name, uint64_t latency, Module *parent);
+
+  /// Body builder
+  template <typename Func> ProcStaticGroup &body(Func &&fn) {
+    fn(*bodyBuilder_);
+    return *this;
+  }
+
+  llvm::StringRef getName() const { return name_; }
+
+private:
+  std::string name_;
+  ProcStaticGroupOp op_;
+  std::unique_ptr<mlir::OpBuilder> bodyBuilder_;
+};
+
+/// Control region builder for procedural operations
+class ControlBuilder {
+public:
+  ControlBuilder(mlir::OpBuilder &builder, mlir::Location loc);
+
+  /// Sequential composition
+  template <typename Func> ControlBuilder &seq(Func &&fn) {
+    auto seqOp = builder_.create<ProcSeqOp>(loc_);
+    mlir::OpBuilder seqBuilder(seqOp.getBodyRegion());
+    auto *block = new mlir::Block();
+    seqOp.getBodyRegion().push_back(block);
+    seqBuilder.setInsertionPointToStart(block);
+    ControlBuilder nested(seqBuilder, loc_);
+    fn(nested);
+    return *this;
+  }
+
+  /// Parallel composition
+  template <typename Func> ControlBuilder &par(Func &&fn) {
+    auto parOp = builder_.create<ProcParOp>(loc_);
+    mlir::OpBuilder parBuilder(parOp.getBodyRegion());
+    auto *block = new mlir::Block();
+    parOp.getBodyRegion().push_back(block);
+    parBuilder.setInsertionPointToStart(block);
+    ControlBuilder nested(parBuilder, loc_);
+    fn(nested);
+    return *this;
+  }
+
+  /// Conditional execution
+  template <typename ThenFunc, typename ElseFunc>
+  ControlBuilder &ifThenElse(mlir::Value cond, ThenFunc &&thenFn,
+                             ElseFunc &&elseFn) {
+    auto ifOp = builder_.create<ProcIfOp>(loc_, cond);
+
+    // Then region
+    auto *thenBlock = new mlir::Block();
+    ifOp.getThenRegion().push_back(thenBlock);
+    mlir::OpBuilder thenBuilder(thenBlock, thenBlock->begin());
+    ControlBuilder thenNested(thenBuilder, loc_);
+    thenFn(thenNested);
+
+    // Else region
+    auto *elseBlock = new mlir::Block();
+    ifOp.getElseRegion().push_back(elseBlock);
+    mlir::OpBuilder elseBuilder(elseBlock, elseBlock->begin());
+    ControlBuilder elseNested(elseBuilder, loc_);
+    elseFn(elseNested);
+
+    return *this;
+  }
+
+  /// Conditional execution (no else)
+  template <typename ThenFunc>
+  ControlBuilder &ifThen(mlir::Value cond, ThenFunc &&thenFn) {
+    return ifThenElse(cond, std::forward<ThenFunc>(thenFn),
+                      [](ControlBuilder &) {});
+  }
+
+  /// While loop
+  template <typename Func>
+  ControlBuilder &whileLoop(mlir::Value cond, Func &&fn) {
+    auto whileOp = builder_.create<ProcWhileOp>(loc_, cond);
+    auto *block = new mlir::Block();
+    whileOp.getBodyRegion().push_back(block);
+    mlir::OpBuilder whileBuilder(block, block->begin());
+    ControlBuilder nested(whileBuilder, loc_);
+    fn(nested);
+    return *this;
+  }
+
+  /// Enable a group
+  ControlBuilder &enable(llvm::StringRef groupName);
+
+  /// Invoke a method on an instance
+  mlir::Value invoke(llvm::StringRef instance, llvm::StringRef method,
+                     llvm::ArrayRef<mlir::Value> args,
+                     llvm::ArrayRef<mlir::Type> results);
+
+  /// End control region
+  void end();
+
+  /// Access builder for inline expressions
+  mlir::OpBuilder &getBuilder() { return builder_; }
+
+private:
+  mlir::OpBuilder &builder_;
+  mlir::Location loc_;
+};
+
+/// ProcRule: procedural rule with guard and control regions
+class ProcRule {
+public:
+  ProcRule(llvm::StringRef name, Module *parent);
+
+  /// Guard region builder
+  template <typename Func> ProcRule &guard(Func &&fn) {
+    fn(*guardBuilder_);
+    return *this;
+  }
+
+  /// Control region builder
+  template <typename Func> ProcRule &control(Func &&fn) {
+    ControlBuilder cb(*controlBuilder_, loc_);
+    fn(cb);
+    cb.end();
+    return *this;
+  }
+
+  llvm::StringRef getName() const { return name_; }
+
+private:
+  std::string name_;
+  ProcRuleOp op_;
+  mlir::Location loc_;
+  std::unique_ptr<mlir::OpBuilder> guardBuilder_;
+  std::unique_ptr<mlir::OpBuilder> controlBuilder_;
+};
+
+/// ProcMethod: procedural method with guard, control regions, and arguments
+class ProcMethod {
+public:
+  ProcMethod(llvm::StringRef name,
+             llvm::ArrayRef<std::pair<std::string, mlir::Type>> args,
+             llvm::ArrayRef<mlir::Type> results, Module *parent);
+
+  /// Guard region builder (has access to arguments)
+  template <typename Func> ProcMethod &guard(Func &&fn) {
+    fn(*guardBuilder_, arguments_);
+    return *this;
+  }
+
+  /// Control region builder (has access to arguments)
+  template <typename Func> ProcMethod &control(Func &&fn) {
+    ControlBuilder cb(*controlBuilder_, loc_);
+    fn(cb, arguments_);
+    cb.end();
+    return *this;
+  }
+
+  /// Access arguments
+  llvm::ArrayRef<mlir::BlockArgument> getArguments() const { return arguments_; }
+
+  llvm::StringRef getName() const { return name_; }
+
+private:
+  std::string name_;
+  ProcMethodOp op_;
+  mlir::Location loc_;
+  std::unique_ptr<mlir::OpBuilder> guardBuilder_;
+  std::unique_ptr<mlir::OpBuilder> controlBuilder_;
+  llvm::SmallVector<mlir::BlockArgument, 4> arguments_;
+};
+
 } // namespace ecmt2
 } // namespace cmt2
 } // namespace circt
