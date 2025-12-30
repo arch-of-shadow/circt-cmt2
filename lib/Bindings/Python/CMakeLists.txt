@@ -16,7 +16,9 @@ set(LLVM_OPTIONAL_SOURCES
 set(PYTHON_BINDINGS_SOURCES
   AIGModule.cpp
   CIRCTModule.cpp
+  Cmt2Module.cpp
   ESIModule.cpp
+  FIRRTLModule.cpp
   HWModule.cpp
   MSFTModule.cpp
   OMModule.cpp
@@ -32,6 +34,8 @@ set(PYTHON_BINDINGS_SOURCES
 set(PYTHON_BINDINGS_LINK_LIBS
   CIRCTCAPIAIG
   CIRCTCAPIArc
+  CIRCTCAPICmt2
+  CIRCTCAPIFIRRTL
   CIRCTCAPIComb
   CIRCTCAPIConversion
   CIRCTCAPIDC
@@ -103,6 +107,20 @@ declare_mlir_python_sources(CIRCTBindingsPythonSources.Support
     support.py
 )
 
+declare_mlir_python_sources(CIRCTBindingsPythonSources.PyCmt2
+  ADD_TO_PARENT CIRCTBindingsPythonSources
+  SOURCES
+    pycmt2/__init__.py
+    pycmt2/types.py
+    pycmt2/signals.py
+    pycmt2/refs.py
+    pycmt2/builders.py
+    pycmt2/circuit.py
+    pycmt2/module.py
+    pycmt2/function_builders.py
+    pycmt2/proc_builders.py
+)
+
 ################################################################################
 # Declare dialect-specific bindings.
 ################################################################################
@@ -113,6 +131,21 @@ file(MAKE_DIRECTORY ${CIRCT_BINARY_DIR}/lib/Bindings/Python/circt/dialects)
 
 declare_mlir_python_sources(CIRCTBindingsPythonSources.Dialects
   ADD_TO_PARENT CIRCTBindingsPythonSources)
+
+# FIRRTL dialect - no TableGen ops, just type bindings
+declare_mlir_python_sources(CIRCTBindingsPythonSources.Dialects.FIRRTL
+  ADD_TO_PARENT CIRCTBindingsPythonSources.Dialects
+  SOURCES
+    dialects/firrtl.py
+)
+
+declare_mlir_dialect_python_bindings(
+  ADD_TO_PARENT CIRCTBindingsPythonSources.Dialects
+  ROOT_DIR "${CMAKE_CURRENT_SOURCE_DIR}"
+  TD_FILE dialects/Cmt2Ops.td
+  SOURCES
+    dialects/cmt2.py
+  DIALECT_NAME cmt2)
 
 declare_mlir_dialect_python_bindings(
   ADD_TO_PARENT CIRCTBindingsPythonSources.Dialects

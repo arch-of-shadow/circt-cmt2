@@ -11,11 +11,13 @@
 #include "circt-c/Conversion.h"
 #include "circt-c/Dialect/AIG.h"
 #include "circt-c/Dialect/Arc.h"
+#include "circt-c/Dialect/Cmt2.h"
 #include "circt-c/Dialect/Comb.h"
 #include "circt-c/Dialect/DC.h"
 #include "circt-c/Dialect/Debug.h"
 #include "circt-c/Dialect/ESI.h"
 #include "circt-c/Dialect/Emit.h"
+#include "circt-c/Dialect/FIRRTL.h"
 #include "circt-c/Dialect/FSM.h"
 #include "circt-c/Dialect/HW.h"
 #include "circt-c/Dialect/HWArith.h"
@@ -53,6 +55,7 @@ namespace nb = nanobind;
 static void registerPasses() {
   registerAIGPasses();
   registerArcPasses();
+  registerCmt2Passes();
   registerCombPasses();
   registerDCPasses();
   registerSeqPasses();
@@ -89,6 +92,10 @@ NB_MODULE(_circt, m) {
         mlirDialectHandleRegisterDialect(aig, context);
         mlirDialectHandleLoadDialect(aig, context);
 
+        MlirDialectHandle cmt2 = mlirGetDialectHandle__cmt2__();
+        mlirDialectHandleRegisterDialect(cmt2, context);
+        mlirDialectHandleLoadDialect(cmt2, context);
+
         MlirDialectHandle comb = mlirGetDialectHandle__comb__();
         mlirDialectHandleRegisterDialect(comb, context);
         mlirDialectHandleLoadDialect(comb, context);
@@ -104,6 +111,10 @@ NB_MODULE(_circt, m) {
         MlirDialectHandle esi = mlirGetDialectHandle__esi__();
         mlirDialectHandleRegisterDialect(esi, context);
         mlirDialectHandleLoadDialect(esi, context);
+
+        MlirDialectHandle firrtl = mlirGetDialectHandle__firrtl__();
+        mlirDialectHandleRegisterDialect(firrtl, context);
+        mlirDialectHandleLoadDialect(firrtl, context);
 
         MlirDialectHandle msft = mlirGetDialectHandle__msft__();
         mlirDialectHandleRegisterDialect(msft, context);
@@ -190,8 +201,12 @@ NB_MODULE(_circt, m) {
 
   nb::module_ aig = m.def_submodule("_aig", "AIG API");
   circt::python::populateDialectAIGSubmodule(aig);
+  nb::module_ cmt2 = m.def_submodule("_cmt2", "CMT2 API");
+  circt::python::populateDialectCmt2Submodule(cmt2);
   nb::module_ esi = m.def_submodule("_esi", "ESI API");
   circt::python::populateDialectESISubmodule(esi);
+  nb::module_ firrtl = m.def_submodule("_firrtl", "FIRRTL API");
+  circt::python::populateDialectFIRRTLSubmodule(firrtl);
   nb::module_ msft = m.def_submodule("_msft", "MSFT API");
   circt::python::populateDialectMSFTSubmodule(msft);
   nb::module_ hw = m.def_submodule("_hw", "HW API");
