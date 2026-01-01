@@ -990,6 +990,232 @@ if (circuit.runCmt2ToFIRRTLPipeline().succeeded()) {
 - If operations are type-safe - both branches must return compatible types when results are expected
 - Converts cleanly to `firrtl.when` operations during FIRRTL lowering
 
+## Procedural Operations
+
+The ECMT2 API includes support for procedural (multi-cycle) operations with explicit control flow.
+
+### Procedural Steps
+
+**ProcStep**: Dynamic step with explicit done signal.
+
+```cpp
+class ProcStep {
+    // Body builder - define step actions
+    template <typename Func>
+    ProcStep& body(Func&& fn);
+
+    // Signal step completion
+    void stepDone(mlir::Value condition);
+
+    llvm::StringRef getName() const;
+};
+```
+
+**ProcStaticStep**: Fixed-latency step (no explicit done needed).
+
+```cpp
+class ProcStaticStep {
+    // Body builder
+    template <typename Func>
+    ProcStaticStep& body(Func&& fn);
+
+    llvm::StringRef getName() const;
+};
+```
+
+### Control Flow Builder
+
+The `ControlBuilder` class provides fluent API for procedural control:
+
+```cpp
+class ControlBuilder {
+    // Sequential composition
+    template <typename Func>
+    ControlBuilder& seq(Func&& fn);
+
+    // Parallel composition
+    template <typename Func>
+    ControlBuilder& par(Func&& fn);
+
+    // Conditional (if-then-else)
+    template <typename ThenFunc, typename ElseFunc>
+    ControlBuilder& ifThenElse(mlir::Value cond, ThenFunc&& thenFn, ElseFunc&& elseFn);
+
+    // Conditional (if-then only)
+    template <typename ThenFunc>
+    ControlBuilder& ifThen(mlir::Value cond, ThenFunc&& thenFn);
+
+    // While loop
+    template <typename Func>
+    ControlBuilder& whileLoop(mlir::Value cond, Func&& fn);
+
+    // Enable a step
+    ControlBuilder& enable(llvm::StringRef stepName);
+
+    // Invoke a method on an instance
+    mlir::Value invoke(llvm::StringRef instance, llvm::StringRef method,
+                       llvm::ArrayRef<mlir::Value> args,
+                       llvm::ArrayRef<mlir::Type> results);
+};
+```
+
+### Procedural Rule and Method
+
+**ProcRule**: Rule with procedural control region.
+
+```cpp
+class ProcRule {
+    template <typename Func>
+    ProcRule& guard(Func&& fn);
+
+    template <typename Func>
+    ProcRule& control(Func&& fn);  // Uses ControlBuilder
+};
+```
+
+**ProcMethod**: Method with procedural control region.
+
+```cpp
+class ProcMethod {
+    template <typename Func>
+    ProcMethod& guard(Func&& fn);  // Access to arguments
+
+    template <typename Func>
+    ProcMethod& control(Func&& fn);  // Uses ControlBuilder, access to arguments
+
+    llvm::ArrayRef<mlir::BlockArgument> getArguments() const;
+};
+```
+
+### Example: GCD with Procedural Control
+
+```cpp
+Circuit circuit("gcd_proc", context);
+
+auto* gcd = circuit.addModule("gcd");
+auto& builder = gcd->getBuilder();
+auto loc = gcd->getLoc();
+
+// Clock and reset
+auto clk = gcd->getBodyBlock()->addArgument(firrtl::ClockType::get(&context), loc);
+auto rst = gcd->getBodyBlock()->addArgument(firrtl::UIntType::get(&context, 1), loc);
+
+// Register instances
+auto* x = gcd->addInstance("x", regMod, {clk, rst});
+auto* y = gcd->addInstance("y", regMod, {clk, rst});
+auto* tmp = gcd->addInstance("tmp", regMod, {clk, rst});
+
+// Dynamic step: swap values
+auto* swap = gcd->addProcStep("swap");
+swap->body([&](mlir::OpBuilder& b) {
+    auto xVal = x->callValue("read", b)[0];
+    auto yVal = y->callValue("read", b)[0];
+    x->callMethod("write", {yVal}, b);
+    y->callMethod("write", {xVal}, b);
+});
+swap->stepDone(UInt::constant(1, 1, builder, loc).getValue());
+
+// Dynamic step: subtract
+auto* sub = gcd->addProcStep("sub");
+sub->body([&](mlir::OpBuilder& b) {
+    auto xVal = x->callValue("read", b)[0];
+    auto yVal = y->callValue("read", b)[0];
+    auto diff = b.create<firrtl::SubPrimOp>(loc, xVal, yVal);
+    auto truncated = b.create<firrtl::BitsPrimOp>(loc, diff, 31, 0);
+    x->callMethod("write", {truncated}, b);
+});
+sub->stepDone(UInt::constant(1, 1, builder, loc).getValue());
+
+// Procedural rule: compute GCD
+auto* compute = gcd->addProcRule("compute");
+compute->guard([](mlir::OpBuilder& b) {
+    auto one = b.create<firrtl::ConstantOp>(
+        b.getUnknownLoc(), firrtl::UIntType::get(b.getContext(), 1), 1);
+    b.create<cmt2::ReturnOp>(b.getUnknownLoc(), mlir::ValueRange{one});
+});
+compute->control([&](ControlBuilder& ctrl) {
+    // Get condition: y != 0
+    auto yVal = y->callValue("read", ctrl.getBuilder())[0];
+    auto zero = ctrl.getBuilder().create<firrtl::ConstantOp>(
+        loc, firrtl::UIntType::get(&context, 32), 0);
+    auto yNotZero = ctrl.getBuilder().create<firrtl::NEQPrimOp>(loc, yVal, zero);
+
+    // While y != 0
+    ctrl.whileLoop(yNotZero, [&](ControlBuilder& loop) {
+        // Get swap condition: y > x
+        auto xVal = x->callValue("read", loop.getBuilder())[0];
+        auto yVal2 = y->callValue("read", loop.getBuilder())[0];
+        auto needSwap = loop.getBuilder().create<firrtl::GTPrimOp>(loc, yVal2, xVal);
+
+        loop.seq([&](ControlBuilder& seq) {
+            seq.ifThen(needSwap, [&](ControlBuilder& then) {
+                then.enable("swap");
+            });
+            seq.enable("sub");
+        });
+    });
+});
+
+// Generate output
+llvm::outs() << circuit.emitMLIRString() << "\n";
+```
+
+**Generated CMT2 MLIR:**
+```mlir
+cmt2.module @gcd(%clk: !firrtl.clock, %rst: !firrtl.uint<1>) {
+    cmt2.instance @x = @FIRRTLReg(%clk, %rst) ...
+    cmt2.instance @y = @FIRRTLReg(%clk, %rst) ...
+
+    proc.step @swap {
+        %xVal = cmt2.call @x @read() ...
+        %yVal = cmt2.call @y @read() ...
+        cmt2.call @x @write(%yVal)
+        cmt2.call @y @write(%xVal)
+        proc.done %true
+    }
+
+    proc.step @sub {
+        %xVal = cmt2.call @x @read() ...
+        %yVal = cmt2.call @y @read() ...
+        %diff = firrtl.sub %xVal, %yVal ...
+        cmt2.call @x @write(%diff)
+        proc.done %true
+    }
+
+    proc.rule @compute {
+        cmt2.return %true
+    } {
+        proc.while %yNotZero {
+            proc.seq {
+                proc.if %needSwap {
+                    proc.enable @swap
+                }
+                proc.enable @sub
+            }
+        }
+    }
+}
+```
+
+### Static Step Example
+
+```cpp
+// Fixed 3-cycle latency step
+auto* delay = gcd->addProcStaticStep("delay", 3);
+delay->body([](mlir::OpBuilder& b) {
+    // No explicit done needed - completes after 3 cycles
+});
+
+// Use in control flow
+compute->control([&](ControlBuilder& ctrl) {
+    ctrl.seq([&](ControlBuilder& seq) {
+        seq.enable("swap");
+        seq.enable("delay");  // Wait 3 cycles
+        seq.enable("sub");
+    });
+});
+```
+
 ## Module Library System
 
 The API includes a module library system for managing external FIRRTL modules:

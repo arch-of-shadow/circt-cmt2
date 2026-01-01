@@ -17,24 +17,24 @@ The `cmt2.proc` (procedural) layer extends the Cmt2 dialect with procedural cont
 
 | Calyx Concept | GAA Concept | Description |
 |---------------|-------------|-------------|
-| Group | Method body | Bundle of operations that execute together |
-| go signal | enable signal | Trigger execution of the group |
+| Step | Method body | Bundle of operations that execute together |
+| go signal | enable signal | Trigger execution of the step |
 | done signal | ready signal (inverse sense) | Indicates completion |
 | Guard condition | Guard region | Determines if execution can proceed |
-| Enable | Call | Activate a group/method |
+| Enable | Call | Activate a step/method |
 
 ### Go-Done Protocol
 
-Every group uses a two-signal handshake:
-- **`go`** (input): Asserted by FSM when group should execute
-- **`done`** (output): Group signals completion combinationally
+Every step uses a two-signal handshake:
+- **`go`** (input): Asserted by FSM when step should execute
+- **`done`** (output): Step signals completion combinationally
 
 The protocol ensures atomic execution via guards:
 ```
-group[go] = (fsm.out == state_N) & !group[done] ? 1'd1
+step[go] = (fsm.out == state_N) & !step[done] ? 1'd1
 ```
 
-All non-hole assignments are guarded by `group[go]` to prevent dataflow when inactive.
+All non-hole assignments are guarded by `step[go]` to prevent dataflow when inactive.
 
 ## TDCC: Top-Down Compile Control
 
@@ -44,7 +44,7 @@ Unlike visitor-based FSM generation that creates explicit FSM states and transit
 
 1. **Builds a Schedule**: A data structure containing state→assignments mappings and transitions
 2. **Realizes Hardware Directly**: Generates guarded assignments without intermediate FSM IR
-3. **Single Output Group**: All control becomes a single "tdcc" group with state-dependent logic
+3. **Single Output Step**: All control becomes a single "tdcc" step with state-dependent logic
 
 ### Schedule Data Structure
 
@@ -52,19 +52,19 @@ Unlike visitor-based FSM generation that creates explicit FSM states and transit
 /// Represents the dynamic execution schedule of a control program.
 struct Schedule {
   /// Assignments that should be enabled in a given state.
-  /// State → Vector of assignments (group[go] = ...)
+  /// State → Vector of assignments (step[go] = ...)
   DenseMap<uint64_t, SmallVector<Assignment>> enables;
 
   /// Transition from one state to another when the guard is true.
   /// (from_state, to_state, guard)
   SmallVector<std::tuple<uint64_t, uint64_t, Guard>> transitions;
 
-  /// Mapping from groups to FSM state IDs (for profiling)
-  DenseSet<std::pair<uint64_t, StringRef>> groupsToStates;
+  /// Mapping from steps to FSM state IDs (for profiling)
+  DenseSet<std::pair<uint64_t, StringRef>> stepsToStates;
 };
 
 // Note: No InvokeEntry in Schedule - invoke operations are compiled
-// by CompileInvoke pass BEFORE TDCC runs, converting them to groups+enables.
+// by CompileInvoke pass BEFORE TDCC runs, converting them to steps+enables.
 ```
 
 ### State Numbering Algorithm
@@ -81,7 +81,7 @@ uint64_t computeUniqueIds(Control &con, uint64_t curState) {
       return curState + 1;
     })
     // Note: InvokeOp is NOT handled here.
-    // It should be compiled to Enable + Group by CompileInvoke pass BEFORE TDCC runs.
+    // It should be compiled to Enable + Step by CompileInvoke pass BEFORE TDCC runs.
     .Case<SeqOp>([&](SeqOp seq) {
       // Sequential: states numbered consecutively
       // seq { A; B; C; } → A=0, B=1, C=2
@@ -140,11 +140,11 @@ void controlExits(Control &con, SmallVectorImpl<PredEdge> &exits) {
   TypeSwitch<Control &>(con)
     .Case<EnableOp>([&](EnableOp enable) {
       uint64_t state = enable.getNodeId();
-      // Exit when group's done signal is true
-      exits.push_back({state, guard!(group["done"])});
+      // Exit when step's done signal is true
+      exits.push_back({state, guard!(step["done"])});
     })
     // Note: InvokeOp is NOT handled here.
-    // CompileInvoke converts invoke to enable+group BEFORE TDCC runs.
+    // CompileInvoke converts invoke to enable+step BEFORE TDCC runs.
     .Case<SeqOp>([&](SeqOp seq) {
       // Only the last statement's exits matter
       if (!seq.getBody().empty()) {
@@ -191,21 +191,21 @@ SmallVector<PredEdge> calculateStatesRecur(
         preds.clear();
       }
 
-      // Generate enable assignment: group[go] = (fsm == state) & !done
-      Value notDone = builder.create<NotOp>(group.getDone());
+      // Generate enable assignment: step[go] = (fsm == state) & !done
+      Value notDone = builder.create<NotOp>(step.getDone());
       Value signalOn = builder.getConstant(1, 1);
       Assignment enableGo = {
-        group.getGo(),                           // dst
+        step.getGo(),                           // dst
         signalOn,                                // src
         guard!(fsm["out"] == curState) & notDone // guard
       };
       schedule.enables[curState].push_back(enableGo);
 
-      // Early transitions: activate next group before previous finishes
+      // Early transitions: activate next step before previous finishes
       if (earlyTransitions) {
         for (auto [predState, predGuard] : preds) {
           Assignment earlyGo = {
-            group.getGo(), signalOn, predGuard
+            step.getGo(), signalOn, predGuard
           };
           schedule.enables[predState].push_back(earlyGo);
         }
@@ -217,11 +217,11 @@ SmallVector<PredEdge> calculateStatesRecur(
       }
 
       // Return exit edge
-      return SmallVector<PredEdge>{{curState, guard!(group["done"])}};
+      return SmallVector<PredEdge>{{curState, guard!(step["done"])}};
     })
 
     // Note: InvokeOp is NOT handled here.
-    // CompileInvoke pass converts invoke to enable+group BEFORE TDCC runs.
+    // CompileInvoke pass converts invoke to enable+step BEFORE TDCC runs.
     // By the time TDCC sees the control, all invokes are already enables.
 
     .Case<SeqOp>([&](SeqOp seq) {
@@ -286,10 +286,10 @@ SmallVector<PredEdge> calculateStatesRecur(
 Once the schedule is built, `realizeSchedule()` generates hardware:
 
 ```cpp
-/// Convert a Schedule into hardware assignments in a single group.
-GroupOp realizeSchedule(Schedule &schedule, OpBuilder &builder) {
-  // Create the output group
-  GroupOp tdccGroup = builder.create<GroupOp>("tdcc");
+/// Convert a Schedule into hardware assignments in a single step.
+StepOp realizeSchedule(Schedule &schedule, OpBuilder &builder) {
+  // Create the output step
+  StepOp tdccStep = builder.create<StepOp>("tdcc");
 
   // Build FSM register
   uint64_t lastState = schedule.getLastState();
@@ -298,7 +298,7 @@ GroupOp realizeSchedule(Schedule &schedule, OpBuilder &builder) {
   Value signalOn = builder.getConstant(1, 1);
   Value firstState = builder.getConstant(0, fsmWidth);
 
-  // 1. Generate enable assignments (state-dependent group activation)
+  // 1. Generate enable assignments (state-dependent step activation)
   for (auto [state, assigns] : schedule.enables) {
     Value stateConst = builder.getConstant(state, fsmWidth);
     Guard stateGuard = guard!(fsm["out"] == stateConst["out"]);
@@ -306,7 +306,7 @@ GroupOp realizeSchedule(Schedule &schedule, OpBuilder &builder) {
     for (auto &assign : assigns) {
       // AND state guard with existing assignment guard
       assign.guard = assign.guard & stateGuard;
-      tdccGroup.addAssignment(assign);
+      tdccStep.addAssignment(assign);
     }
   }
 
@@ -317,20 +317,20 @@ GroupOp realizeSchedule(Schedule &schedule, OpBuilder &builder) {
     Guard transGuard = guard!(fsm["out"] == fromConst["out"]) & guard;
 
     // fsm.in = toState when transition guard is true
-    tdccGroup.addAssignment({fsm.getIn(), toConst, transGuard});
-    tdccGroup.addAssignment({fsm.getWriteEn(), signalOn, transGuard});
+    tdccStep.addAssignment({fsm.getIn(), toConst, transGuard});
+    tdccStep.addAssignment({fsm.getWriteEn(), signalOn, transGuard});
   }
 
   // 3. Generate done condition
   Value lastConst = builder.getConstant(lastState, fsmWidth);
   Guard doneGuard = guard!(fsm["out"] == lastConst["out"]);
-  tdccGroup.addAssignment({tdccGroup.getDone(), signalOn, doneGuard});
+  tdccStep.addAssignment({tdccStep.getDone(), signalOn, doneGuard});
 
   // 4. Generate reset to initial state (continuous assignment)
   builder.addContinuousAssignment({fsm.getIn(), firstState, doneGuard});
   builder.addContinuousAssignment({fsm.getWriteEn(), signalOn, doneGuard});
 
-  return tdccGroup;
+  return tdccStep;
 }
 ```
 
@@ -355,21 +355,21 @@ cmt2.proc.seq {
 %c3 = hw.constant 3 : i2
 %signal_on = hw.constant 1 : i1
 
-cmt2.proc.group @tdcc {
-  // State 0: Enable group A
+cmt2.proc.step @tdcc {
+  // State 0: Enable step A
   // A[go] = (fsm == 0) & !A[done]
   %state0 = comb.icmp eq %fsm.out, %c0 : i2
   %not_a_done = comb.xor %A.done, %signal_on : i1
   %a_go_guard = comb.and %state0, %not_a_done : i1
   cmt2.proc.assign %A.go = %a_go_guard ? %signal_on : i1
 
-  // State 1: Enable group B
+  // State 1: Enable step B
   %state1 = comb.icmp eq %fsm.out, %c1 : i2
   %not_b_done = comb.xor %B.done, %signal_on : i1
   %b_go_guard = comb.and %state1, %not_b_done : i1
   cmt2.proc.assign %B.go = %b_go_guard ? %signal_on : i1
 
-  // State 2: Enable group C
+  // State 2: Enable step C
   %state2 = comb.icmp eq %fsm.out, %c2 : i2
   %not_c_done = comb.xor %C.done, %signal_on : i1
   %c_go_guard = comb.and %state2, %not_c_done : i1
@@ -392,7 +392,7 @@ cmt2.proc.group @tdcc {
 
   // Done when in final state
   %state3 = comb.icmp eq %fsm.out, %c3 : i2
-  cmt2.proc.group_done %state3 : i1
+  cmt2.proc.step_done %state3 : i1
 }
 
 // Reset FSM to 0 when done (continuous assignment)
@@ -446,7 +446,7 @@ cmt2.proc.seq {
 
 #### 2. Early Transitions
 
-Instead of waiting for `group[done]` before enabling the next group, we can start the next group **in the same cycle** that the previous group completes. This saves one cycle per transition.
+Instead of waiting for `step[done]` before enabling the next step, we can start the next step **in the same cycle** that the previous step completes. This saves one cycle per transition.
 
 **Without early transitions:**
 ```
@@ -477,9 +477,9 @@ B[go] = ((fsm == 1) & !B[done]) | (A[done] & (fsm == 0)) ? 1
 ```cpp
 if (earlyTransitions || hasFastGuarantee) {
   for (auto [st, g] : prevStates) {
-    // Enable group in previous states when their done fires
+    // Enable step in previous states when their done fires
     Assignment earlyGo = {
-      group.getGo(),
+      step.getGo(),
       signalOn,
       g  // Previous state's done guard
     };
@@ -488,7 +488,7 @@ if (earlyTransitions || hasFastGuarantee) {
 }
 ```
 
-**Note:** Early transitions are safe because groups are guaranteed to run for at least one cycle, and the early enable only fires for one cycle before the normal enable takes over.
+**Note:** Early transitions are safe because steps are guaranteed to run for at least one cycle, and the early enable only fires for one cycle before the normal enable takes over.
 
 #### 3. FSM Encoding Options
 
@@ -515,36 +515,36 @@ Value stateGuard = builder.create<ICmpOp>(slicer, constant1);
 
 ## IR Operations
 
-### 1. GroupOp - Execution Unit
+### 1. StepOp - Execution Unit
 
 ```mlir
-cmt2.proc.group @compute {
+cmt2.proc.step @compute {
   %a = cmt2.call @reg_a @read() : () -> i32
   %b = cmt2.call @reg_b @read() : () -> i32
   %sum = comb.add %a, %b : i32
   cmt2.call @reg_out @write(%sum) : (i32) -> ()
-  cmt2.proc.group_done %true : i1
+  cmt2.proc.step_done %true : i1
 }
 ```
 
 ```tablegen
-def GroupOp : Cmt2Op<"proc.group", [Symbol, SingleBlock, NoTerminator]> {
-  let summary = "Dynamic group with go-done interface";
+def StepOp : Cmt2Op<"proc.step", [Symbol, SingleBlock, NoTerminator]> {
+  let summary = "Dynamic step with go-done interface";
   let description = [{
-    A group bundles operations that execute atomically when activated.
+    A step bundles operations that execute atomically when activated.
     Interface:
-    - `go` signal (input): When high, group activates
-    - `done` signal (output): High when group has completed
+    - `go` signal (input): When high, step activates
+    - `done` signal (output): High when step has completed
   }];
   let arguments = (ins SymbolNameAttr:$sym_name);
   let regions = (region SizedRegion<1>:$body);
 }
 ```
 
-### 2. StaticGroupOp - Fixed Latency Group
+### 2. StaticStepOp - Fixed Latency Step
 
 ```mlir
-cmt2.proc.static_group @multiply <4> {
+cmt2.proc.static_step @multiply <4> {
   %a = cmt2.call @reg_a @read() : () -> i32 {guard = #cmt2.timing_guard<0, 1>}
   %b = cmt2.call @reg_b @read() : () -> i32 {guard = #cmt2.timing_guard<0, 1>}
   %prod = cmt2.call @mult @compute(%a, %b) {guard = #cmt2.timing_guard<1, 4>}
@@ -554,21 +554,21 @@ cmt2.proc.static_group @multiply <4> {
 
 ### 3. AssignOp - Guarded Assignment
 
-The `cmt2.proc.assign` operation is used within groups to express guarded assignments to ports/signals. This is distinct from `cmt2.call` which invokes methods on instances.
+The `cmt2.proc.assign` operation is used within steps to express guarded assignments to ports/signals. This is distinct from `cmt2.call` which invokes methods on instances.
 
 ```mlir
 // Guarded assignment: dst = guard ? src
 cmt2.proc.assign %fsm.in = %guard ? %new_state : i2
-cmt2.proc.assign %group.go = %enable_guard ? %signal_on : i1
+cmt2.proc.assign %step.go = %enable_guard ? %signal_on : i1
 ```
 
 ```tablegen
 def AssignOp : Cmt2Op<"proc.assign", []> {
-  let summary = "Guarded assignment within procedural groups";
+  let summary = "Guarded assignment within procedural steps";
   let description = [{
     Assigns a value to a destination when the guard is true.
-    Used in TDCC-generated groups to express state-dependent
-    assignments to FSM registers and group go signals.
+    Used in TDCC-generated steps to express state-dependent
+    assignments to FSM registers and step go signals.
 
     This operation is specific to the procedural layer and should
     NOT be confused with regular cmt2 method calls. Use `cmt2.call`
@@ -592,7 +592,7 @@ def AssignOp : Cmt2Op<"proc.assign", []> {
 
 The `cmt2.proc.assign` is primarily used in the **output of TDCC compilation** - users typically don't write it directly. It appears in:
 - FSM register updates: `cmt2.proc.assign %fsm.in = %trans_guard ? %next_state`
-- Group go signals: `cmt2.proc.assign %group.go = %state_guard ? %signal_on`
+- Step go signals: `cmt2.proc.assign %step.go = %state_guard ? %signal_on`
 - Write enables: `cmt2.proc.assign %fsm.write_en = %trans_guard ? %signal_on`
 
 ### 4. Control Operations
@@ -637,12 +637,12 @@ def WhileOp : Cmt2Op<"proc.while", [SingleBlock, NoTerminator, ControlLike]> {
 }
 
 def EnableOp : Cmt2Op<"proc.enable", [ControlLike]> {
-  let summary = "Enable a group";
+  let summary = "Enable a step";
   let description = [{
-    Activates a group. Gets a unique NODE_ID during TDCC.
-    Generates: group[go] = (fsm == NODE_ID) & !group[done]
+    Activates a step. Gets a unique NODE_ID during TDCC.
+    Generates: step[go] = (fsm == NODE_ID) & !step[done]
   }];
-  let arguments = (ins FlatSymbolRefAttr:$groupName);
+  let arguments = (ins FlatSymbolRefAttr:$stepName);
 }
 
 def InvokeOp : Cmt2Op<"proc.invoke", [ControlLike]> {
@@ -745,7 +745,7 @@ This section describes how `cmt2.proc.rule` and `cmt2.proc.method` are lowered t
 **Calyx/Procedural Semantics:**
 - Groups can span **multiple cycles**
 - **Go-done** protocol: go triggers execution, done signals completion
-- FSM controls which group is active
+- FSM controls which step is active
 
 **The Core Insight:**
 A procedural rule is NOT a single atomic rule - it generates:
@@ -757,15 +757,15 @@ A procedural rule is NOT a single atomic rule - it generates:
 
 | Calyx (Go-Done) | GAA (Ready-Enable) | Implementation |
 |-----------------|-------------------|----------------|
-| `group[go] = 1` | Rule fires when in state | Transition rule for entering this state |
-| `group[done]` | Transition guard | Used to guard transition to next state |
+| `step[go] = 1` | Rule fires when in state | Transition rule for entering this state |
+| `step[done]` | Transition guard | Used to guard transition to next state |
 | Waiting in state | No rule fires | FSM stays in current state |
 | FSM idle | Procedural rule ready | `fsm == IDLE && original_guard` |
 
 **Key Mapping:**
-- **Group activation** (setting go=1) → Transition rule body executes group's entry actions
-- **Group completion** (done=1) → Guards the transition OUT of that state
-- **Continuous assignment** in group → Becomes a `cmt2.value` driven by FSM state
+- **Step activation** (setting go=1) → Transition rule body executes step's entry actions
+- **Step completion** (done=1) → Guards the transition OUT of that state
+- **Continuous assignment** in step → Becomes a `cmt2.value` driven by FSM state
 
 ### Transition-Based Lowering Model
 
@@ -775,11 +775,11 @@ The key insight is that **actions execute on transitions, not on states**:
 Transition (State_A → State_B, guard=G):
   Guard: (fsm == State_A) && G
   Body:
-    - Execute State_B's entry actions (group activation)
+    - Execute State_B's entry actions (step activation)
     - Set fsm = State_B
 ```
 
-This ensures each group's actions execute **exactly once** - when transitioning INTO that state.
+This ensures each step's actions execute **exactly once** - when transitioning INTO that state.
 
 ### Lowering `cmt2.proc.rule`
 
@@ -804,8 +804,8 @@ cmt2.proc.rule @compute(%arg: i32) -> () {
 // FSM state register (states: 0=IDLE, 1=LOAD, 2=PROCESS, 3=STORE)
 %compute_fsm = cmt2.instance @compute_fsm = @stl.reg(2, 0)
 
-// Group definitions (inlined or as separate methods)
-// @load group body, @process group body, @store group body defined elsewhere
+// Step definitions (inlined or as separate methods)
+// @load step body, @process step body, @store step body defined elsewhere
 
 //=== Transition Rules ===
 
@@ -818,8 +818,8 @@ cmt2.rule @compute__idle_to_load() -> () {
   %can_start = comb.and %is_idle, %original_ready : i1
   cmt2.return %can_start : i1
 } {
-  // Body: Execute @load group's entry actions, transition to LOAD state
-  // ... @load group's actions (e.g., cmt2.call @mem @read_start()) ...
+  // Body: Execute @load step's entry actions, transition to LOAD state
+  // ... @load step's actions (e.g., cmt2.call @mem @read_start()) ...
   cmt2.call @compute_fsm @write(%c1_i2) : (i2) -> ()
 }
 
@@ -827,12 +827,12 @@ cmt2.rule @compute__idle_to_load() -> () {
 cmt2.rule @compute__load_to_process() -> () {
   %fsm_state = cmt2.call @compute_fsm @read() : () -> i2
   %in_load = comb.icmp eq %fsm_state, %c1_i2 : i2
-  %load_done = cmt2.call @mem @read_done() : () -> i1  // Group's done signal
+  %load_done = cmt2.call @mem @read_done() : () -> i1  // Step's done signal
   %can_transition = comb.and %in_load, %load_done : i1
   cmt2.return %can_transition : i1
 } {
-  // Body: Execute @process group's entry actions, transition to PROCESS state
-  // ... @process group's actions ...
+  // Body: Execute @process step's entry actions, transition to PROCESS state
+  // ... @process step's actions ...
   cmt2.call @compute_fsm @write(%c2_i2) : (i2) -> ()
 }
 
@@ -840,11 +840,11 @@ cmt2.rule @compute__load_to_process() -> () {
 cmt2.rule @compute__process_to_store() -> () {
   %fsm_state = cmt2.call @compute_fsm @read() : () -> i2
   %in_process = comb.icmp eq %fsm_state, %c2_i2 : i2
-  %process_done = %true  // Single-cycle group, always done
+  %process_done = %true  // Single-cycle step, always done
   %can_transition = comb.and %in_process, %process_done : i1
   cmt2.return %can_transition : i1
 } {
-  // ... @store group's actions ...
+  // ... @store step's actions ...
   cmt2.call @compute_fsm @write(%c3_i2) : (i2) -> ()
 }
 
@@ -946,19 +946,19 @@ cmt2.value @multiply_done() -> (i1) {
 // ...
 ```
 
-### Group Types and Their Lowering
+### Step Types and Their Lowering
 
 #### 1. Combinational Groups (Single-Cycle)
 
 Groups where `done` is always true:
 
 ```mlir
-cmt2.proc.group @add_values {
+cmt2.proc.step @add_values {
   %a = cmt2.call @reg_a @read() : () -> i32
   %b = cmt2.call @reg_b @read() : () -> i32
   %sum = comb.add %a, %b : i32
   cmt2.call @reg_sum @write(%sum) : (i32) -> ()
-  cmt2.proc.group_done %true : i1  // Always done immediately
+  cmt2.proc.step_done %true : i1  // Always done immediately
 }
 ```
 
@@ -969,10 +969,10 @@ cmt2.proc.group @add_values {
 Groups that wait for external completion:
 
 ```mlir
-cmt2.proc.group @memory_read {
+cmt2.proc.step @memory_read {
   cmt2.call @mem @read_start(%addr) : (i32) -> ()
   %done = cmt2.call @mem @read_done() : () -> i1
-  cmt2.proc.group_done %done : i1
+  cmt2.proc.step_done %done : i1
 }
 ```
 
@@ -986,11 +986,11 @@ cmt2.proc.group @memory_read {
 Groups that need to drive outputs while active:
 
 ```mlir
-cmt2.proc.group @hold_output {
+cmt2.proc.step @hold_output {
   // Output needs to be held while in this state
   cmt2.call @output @write(%value) : (i32) -> ()
   %done = cmt2.call @timer @expired() : () -> i1
-  cmt2.proc.group_done %done : i1
+  cmt2.proc.step_done %done : i1
 }
 ```
 
@@ -1029,7 +1029,7 @@ cmt2.rule @..._to_then() -> () {
   %can_trans = comb.and %in_state, %cond : i1
   cmt2.return %can_trans : i1
 } {
-  // @then_group's entry actions
+  // @then_step's entry actions
   cmt2.call @fsm @write(%then_state) : (i2) -> ()
 }
 
@@ -1041,7 +1041,7 @@ cmt2.rule @..._to_else() -> () {
   %can_trans = comb.and %in_state, %not_cond : i1
   cmt2.return %can_trans : i1
 } {
-  // @else_group's entry actions
+  // @else_step's entry actions
   cmt2.call @fsm @write(%else_state) : (i2) -> ()
 }
 ```
@@ -1064,7 +1064,7 @@ cmt2.rule @..._enter_loop() -> () {
   %can_enter = comb.and %before_state, %cond : i1
   cmt2.return %can_enter : i1
 } {
-  // @body_group's entry actions
+  // @body_step's entry actions
   cmt2.call @fsm @write(%body_state) : (i2) -> ()
 }
 
@@ -1076,7 +1076,7 @@ cmt2.rule @..._loop_back() -> () {
   %can_loop = comb.and %in_body, %body_done, %cond : i1
   cmt2.return %can_loop : i1
 } {
-  // Re-execute @body_group's entry actions
+  // Re-execute @body_step's entry actions
   cmt2.call @fsm @write(%body_state) : (i2) -> ()
 }
 
@@ -1115,9 +1115,9 @@ cmt2.proc.par {
 
 **TDCC Handling:** Following Calyx's `finish_par`, parallel composition is handled specially:
 
-1. **Each child is compiled independently** - simple enables stay as enables, complex control gets its own schedule/group
+1. **Each child is compiled independently** - simple enables stay as enables, complex control gets its own schedule/step
 2. **Done registers track completion** - each child has a `pd` register to remember it finished
-3. **Par group coordinates everything** - single group that enables all children and waits for all to complete
+3. **Par step coordinates everything** - single step that enables all children and waits for all to complete
 
 **Compiled Output:**
 
@@ -1126,21 +1126,21 @@ cmt2.proc.par {
 %pd_0 = cmt2.instance @pd_0 = @stl.reg(1, 0)  // For group_a
 %pd_1 = cmt2.instance @pd_1 = @stl.reg(1, 0)  // For tdcc_group (b;c)
 
-// Complex child (seq {b; c}) compiled to its own group
-cmt2.proc.group @tdcc_par_child_1 {
+// Complex child (seq {b; c}) compiled to its own step
+cmt2.proc.step @tdcc_par_child_1 {
   // Contains FSM logic for: seq { group_b; group_c }
   // ... (compiled by TDCC)
-  cmt2.proc.group_done %child1_done : i1
+  cmt2.proc.step_done %child1_done : i1
 }
 
-// Par group coordinates all children
-cmt2.proc.group @par {
+// Par step coordinates all children
+cmt2.proc.step @par {
   // Child 0: Simple enable
-  // Enable when not done yet: !(pd.out | group.done)
+  // Enable when not done yet: !(pd.out | step.done)
   %child0_go = comb.and (comb.not %pd_0_out), (comb.not %group_a_done)
   cmt2.proc.assign @group_a.go = %true ? %child0_go : i1
 
-  // Child 1: Complex schedule (already compiled to group)
+  // Child 1: Complex schedule (already compiled to step)
   %child1_go = comb.and (comb.not %pd_1_out), (comb.not %tdcc_child1_done)
   cmt2.proc.assign @tdcc_par_child_1.go = %true ? %child1_go : i1
 
@@ -1153,7 +1153,7 @@ cmt2.proc.group @par {
 
   // Par done when all pd registers are set
   %all_done = comb.and %pd_0_out, %pd_1_out
-  cmt2.proc.group_done %all_done : i1
+  cmt2.proc.step_done %all_done : i1
 }
 
 // Cleanup: Reset pd registers when par completes (continuous assignments)
@@ -1164,8 +1164,8 @@ cmt2.proc.assign %pd_1.write_en = %all_done ? %signal_on : i1
 ```
 
 **Key Points:**
-- Simple enables (single group) stay as direct enables in the par group
-- Complex control (seq, if, while) gets compiled by TDCC into its own sub-group first
+- Simple enables (single step) stay as direct enables in the par step
+- Complex control (seq, if, while) gets compiled by TDCC into its own sub-step first
 - Done registers (`pd`) latch when each child completes
 - Par is done when ALL `pd` registers are set
 - Cleanup logic resets `pd` registers when par completes
@@ -1174,41 +1174,41 @@ cmt2.proc.assign %pd_1.write_en = %all_done ? %signal_on : i1
 
 ```cpp
 void finishPar(ParOp par, OpBuilder &builder) {
-  // Create par group
-  auto parGroup = builder.create<GroupOp>("par");
+  // Create par step
+  auto parStep = builder.create<StepOp>("par");
   SmallVector<Value> doneRegs;
 
   for (auto &child : par.getBody()) {
     // Compile child
-    Value group;
+    Value step;
     if (isa<EnableOp>(child)) {
       // Simple enable - use directly
-      group = cast<EnableOp>(child).getGroup();
+      step = cast<EnableOp>(child).getStep();
     } else {
-      // Complex control - compile to TDCC group
+      // Complex control - compile to TDCC step
       Schedule sch;
       sch.calculateStates(child, earlyTransitions);
-      group = sch.realizeSchedule(dumpFsm, fsmGroups, fsmImpl);
+      step = sch.realizeSchedule(dumpFsm, fsmSteps, fsmImpl);
     }
 
     // Create done register
     auto pd = builder.create<RegOp>(1);
     doneRegs.push_back(pd);
 
-    // Enable logic: group.go = !(pd.out | group.done)
-    Value groupGo = builder.create<AndOp>(
+    // Enable logic: step.go = !(pd.out | step.done)
+    Value stepGo = builder.create<AndOp>(
       builder.create<NotOp>(pd.getOut()),
-      builder.create<NotOp>(group.getDone()));
+      builder.create<NotOp>(step.getDone()));
 
     // Save done in pd
-    parGroup.addAssignment(group.getGo(), groupGo);
-    parGroup.addAssignment(pd.getIn(), group.getDone());
-    parGroup.addAssignment(pd.getWriteEn(), group.getDone());
+    parStep.addAssignment(step.getGo(), stepGo);
+    parStep.addAssignment(pd.getIn(), step.getDone());
+    parStep.addAssignment(pd.getWriteEn(), step.getDone());
   }
 
   // Par done = AND of all pd.out
   Value allDone = builder.create<AndOp>(doneRegs...);
-  parGroup.setDone(allDone);
+  parStep.setDone(allDone);
 
   // Cleanup: Reset pd registers (continuous assignments)
   for (auto pd : doneRegs) {
@@ -1216,12 +1216,12 @@ void finishPar(ParOp par, OpBuilder &builder) {
     component.addContinuousAssignment(pd.getWriteEn(), allDone, signalOn);
   }
 
-  // Replace par with enable of par group
-  par.replaceWith(builder.create<EnableOp>(parGroup));
+  // Replace par with enable of par step
+  par.replaceWith(builder.create<EnableOp>(parStep));
 }
 ```
 
-> **Note:** Par is processed during TDCC traversal (in `finish_par`), not in `calculate_states_recur`. The resulting par group is then treated as a single enable by the parent control.
+> **Note:** Par is processed during TDCC traversal (in `finish_par`), not in `calculate_states_recur`. The resulting par step is then treated as a single enable by the parent control.
 
 ### Invoke Operation
 
@@ -1229,8 +1229,8 @@ The `cmt2.proc.invoke` operation allows calling methods on instances within proc
 
 > **IMPORTANT: Pass Ordering**
 >
-> Following Calyx's design, `invoke` operations are compiled by a **separate `CompileInvoke` pass that runs BEFORE TDCC**. The pass converts each invoke into a group + enable:
-> 1. `CompileInvoke`: invoke → group + enable
+> Following Calyx's design, `invoke` operations are compiled by a **separate `CompileInvoke` pass that runs BEFORE TDCC**. The pass converts each invoke into a step + enable:
+> 1. `CompileInvoke`: invoke → step + enable
 > 2. `TDCC`: processes enables (including converted invokes)
 >
 > This separation ensures that TDCC only sees `enable` and `par` at the control level, simplifying the schedule building algorithm.
@@ -1257,12 +1257,12 @@ cmt2.proc.invoke @instance @method(%arg1, %arg2) : (i32, i32) -> ()
 | Operation | Context | Duration | Semantics |
 |-----------|---------|----------|-----------|
 | `cmt2.call` | Rule/Method body | Single-cycle | Direct method invocation |
-| `cmt2.proc.enable` | Procedural control | Multi-cycle | Activate a local group |
+| `cmt2.proc.enable` | Procedural control | Multi-cycle | Activate a local step |
 | `cmt2.proc.invoke` | Procedural control | Variable | Call method on instance |
 
 **When to use each:**
 - `cmt2.call`: Inside rule/method bodies for instantaneous calls
-- `cmt2.proc.enable`: Activate groups defined in the same module
+- `cmt2.proc.enable`: Activate steps defined in the same module
 - `cmt2.proc.invoke`: Call methods on submodule instances within procedural control
 
 #### Types of Invoke Targets
@@ -1314,28 +1314,28 @@ cmt2.proc.seq {
 }
 ```
 
-**Lowering:** Creates a wrapper group that:
+**Lowering:** Creates a wrapper step that:
 - Entry action: call the method to start its FSM
 - Done: method's `done` value (its FSM returns to idle)
 - Result: captured from method's result value
 
 #### CompileInvoke Pass (Runs BEFORE TDCC)
 
-Following Calyx's architecture, invoke operations are compiled by a separate pass that runs **before** TDCC. This pass converts each invoke into a group + enable, so TDCC only needs to handle enables.
+Following Calyx's architecture, invoke operations are compiled by a separate pass that runs **before** TDCC. This pass converts each invoke into a step + enable, so TDCC only needs to handle enables.
 
 **CompileInvoke Algorithm:**
 
 ```cpp
 class CompileInvoke {
   void visitInvoke(InvokeOp invoke, OpBuilder &builder) {
-    // Step 1: Create a group for this invoke
-    auto invokeGroup = builder.create<GroupOp>(
+    // Step 1: Create a step for this invoke
+    auto invokeStep = builder.create<StepOp>(
       "invoke_" + invoke.getInstance() + "_" + invoke.getMethod());
 
-    // Step 2: Build the group body
+    // Step 2: Build the step body
     {
       OpBuilder::InsertionGuard guard(builder);
-      builder.setInsertionPointToStart(invokeGroup.getBody());
+      builder.setInsertionPointToStart(invokeStep.getBody());
 
       // 2a. Assert component.go = 1
       Value signalOn = builder.create<hw::ConstantOp>(1, 1);
@@ -1356,13 +1356,13 @@ class CompileInvoke {
         builder.create<AssignOp>(dest, /*guard=*/true, port);
       }
 
-      // 2d. Group done = component.done
+      // 2d. Step done = component.done
       Value donePort = getDonePort(invoke.getInstance());
-      builder.create<GroupDoneOp>(donePort);
+      builder.create<StepDoneOp>(donePort);
     }
 
     // Step 3: Replace invoke with enable
-    auto enable = builder.create<EnableOp>(invokeGroup.getName());
+    auto enable = builder.create<EnableOp>(invokeStep.getName());
     invoke.replaceAllUsesWith(enable);
     invoke.erase();
   }
@@ -1379,7 +1379,7 @@ cmt2.proc.seq {
 }
 
 // AFTER CompileInvoke:
-cmt2.proc.group @invoke_alu_compute_0 {
+cmt2.proc.step @invoke_alu_compute_0 {
   // Assert go signal
   cmt2.proc.assign @alu.go = %true ? %signal_on : i1
 
@@ -1391,7 +1391,7 @@ cmt2.proc.group @invoke_alu_compute_0 {
   cmt2.proc.assign %result = %true ? @alu.result : i32
 
   // Done when component done
-  cmt2.proc.group_done @alu.done : i1
+  cmt2.proc.step_done @alu.done : i1
 }
 
 cmt2.proc.seq {
@@ -1407,7 +1407,7 @@ Now TDCC only sees enables, simplifying schedule building.
 The complete procedural lowering requires this pass order:
 
 ```
-1. CompileInvoke    - invoke → group + enable
+1. CompileInvoke    - invoke → step + enable
 2. TDCC             - control → schedule → hardware
 3. ProcToGAA        - proc constructs → GAA rules/methods
 ```
@@ -1454,10 +1454,10 @@ cmt2.module @Top {
   %process_fsm = cmt2.instance @process_fsm = @stl.reg(2, 0)
   %invoke_result = cmt2.instance @invoke_result = @stl.reg(32, 0)
 
-  // Group for invoke (done = ALU's done)
-  cmt2.proc.group @invoke_alu_add_0 {
+  // Step for invoke (done = ALU's done)
+  cmt2.proc.step @invoke_alu_add_0 {
     %done = cmt2.call @alu @add__done() : () -> i1
-    cmt2.proc.group_done %done : i1
+    cmt2.proc.step_done %done : i1
   }
 
   // Transition 1→2: Start invoke (call ALU's add method)
@@ -1575,9 +1575,9 @@ Both must be realized as GAA constructs.
 
 #### Lowering `enables` (State Actions)
 
-In TDCC, `enables` are essentially: `group[go] = (fsm == state) & !group[done]`
+In TDCC, `enables` are essentially: `step[go] = (fsm == state) & !step[done]`
 
-These represent **continuous activation** of groups while in a state. In GAA, we model this differently based on group type:
+These represent **continuous activation** of steps while in a state. In GAA, we model this differently based on step type:
 
 **Type 1: Single-Cycle Action Groups**
 
@@ -1704,7 +1704,7 @@ for (auto [from_state, to_state, guard] : schedule.transitions) {
 }
 ```
 
-> **Note:** Since invoke operations are compiled to groups+enables by `CompileInvoke` before TDCC runs, there's no special invoke handling needed here. The generated invoke group handles go/done signaling just like any other group.
+> **Note:** Since invoke operations are compiled to steps+enables by `CompileInvoke` before TDCC runs, there's no special invoke handling needed here. The generated invoke step handles go/done signaling just like any other step.
 
 ### Generated GAA Operations Summary
 
@@ -1716,10 +1716,10 @@ For a complete `cmt2.proc.rule`, the lowering generates:
 | `cmt2.rule @...__trans_X_to_Y` | State transitions | One per transition in schedule |
 | `cmt2.value @...__idle` | Check if FSM is idle | Always |
 | `cmt2.value @...__running` | Check if FSM is running | Always |
-| `cmt2.value @...__output_*` | Continuous outputs | For groups with continuous outputs |
+| `cmt2.value @...__output_*` | Continuous outputs | For steps with continuous outputs |
 | `cmt2.instance @...__hold_*` | Hold registers | For values that must persist across states |
 
-> **Note:** Invoke operations don't add additional generated operations here because `CompileInvoke` runs first and converts each invoke to a group + enable. The invoke's group handles the go/done protocol.
+> **Note:** Invoke operations don't add additional generated operations here because `CompileInvoke` runs first and converts each invoke to a step + enable. The invoke's step handles the go/done protocol.
 
 For a complete `cmt2.proc.method`, additionally:
 
@@ -1824,17 +1824,17 @@ Following Calyx's pass ordering, the complete procedural lowering runs these pas
 ```
 CompleteProcLowering(module):
   // ========== Phase 1: CompileInvoke ==========
-  // Convert all invoke operations to groups + enables
+  // Convert all invoke operations to steps + enables
   // This runs BEFORE TDCC so TDCC only sees enables
   for invoke in module.collectInvokeOps():
-    invokeGroup = createGroup("invoke_" + invoke.name)
-    invokeGroup.addAssign(invoke.instance.go, signalOn)
+    invokeStep = createGroup("invoke_" + invoke.name)
+    invokeStep.addAssign(invoke.instance.go, signalOn)
     for (port, value) in invoke.inputs:
-      invokeGroup.addAssign(invoke.instance.port, value)
+      invokeStep.addAssign(invoke.instance.port, value)
     for (port, dest) in invoke.outputs:
-      invokeGroup.addAssign(dest, invoke.instance.port)
-    invokeGroup.setDone(invoke.instance.done)
-    invoke.replaceWith(Enable(invokeGroup))
+      invokeStep.addAssign(dest, invoke.instance.port)
+    invokeStep.setDone(invoke.instance.done)
+    invoke.replaceWith(Enable(invokeStep))
 
   // ========== Phase 2: TDCC ==========
   // For each procedural op, compile control to schedule then to hardware
@@ -1847,7 +1847,7 @@ CompleteProcLowering(module):
     schedule = buildSchedule(proc_op.control)
 
     // 2c. Realize schedule as hardware
-    tdccGroup = realizeSchedule(schedule)
+    tdccStep = realizeSchedule(schedule)
 
     // 2d. Generate FSM register
     fsm_width = log2(schedule.lastState + 1)
@@ -1919,9 +1919,9 @@ cmt2.module @Example {
     }
   }
 
-  cmt2.proc.group @init_acc { ... done = true }
-  cmt2.proc.group @load_elem { ... done = mem.read_done }
-  cmt2.proc.group @add_to_acc { ... done = true }
+  cmt2.proc.step @init_acc { ... done = true }
+  cmt2.proc.step @load_elem { ... done = mem.read_done }
+  cmt2.proc.step @add_to_acc { ... done = true }
 }
 ```
 
@@ -2080,7 +2080,7 @@ cmt2.module @ALU {
       cmt2.proc.enable @wait_result
     }
   }
-  // ... groups and FSM ...
+  // ... steps and FSM ...
 }
 
 cmt2.module @Processor {
@@ -2164,18 +2164,18 @@ cmt2.module @Processor {
 
 ### Static Control Compilation
 
-Static groups with known latency use timing guards instead of done signals:
+Static steps with known latency use timing guards instead of done signals:
 
 ```cpp
-void compileStaticGroup(StaticGroupOp group, OpBuilder &builder) {
-  uint64_t latency = group.getLatency();
+void compileStaticGroup(StaticStepOp step, OpBuilder &builder) {
+  uint64_t latency = step.getLatency();
   uint64_t counterWidth = llvm::Log2_64_Ceil(latency);
 
   // Create FSM counter
   Value counter = builder.create<CounterOp>(counterWidth, latency);
 
   // Replace timing guards with counter comparisons
-  for (auto &op : group.getBody()) {
+  for (auto &op : step.getBody()) {
     if (auto guard = op.getAttr<TimingGuardAttr>("guard")) {
       // %[i:j] → (counter >= i) & (counter < j)
       Value start = builder.getConstant(guard.getStart(), counterWidth);
@@ -2189,13 +2189,13 @@ void compileStaticGroup(StaticGroupOp group, OpBuilder &builder) {
 
   // Done when counter wraps
   Value done = builder.create<EqOp>(counter, builder.getConstant(0, counterWidth));
-  group.setDone(done);
+  step.setDone(done);
 }
 ```
 
 ### Control Collapsing
 
-Merges static control into single static groups:
+Merges static control into single static steps:
 
 ```cpp
 void collapseStaticSeq(StaticSeqOp seq) {
@@ -2203,8 +2203,8 @@ void collapseStaticSeq(StaticSeqOp seq) {
   SmallVector<Assignment> collapsed;
 
   for (auto &child : seq.getBody()) {
-    if (auto group = dyn_cast<StaticGroupOp>(child)) {
-      for (auto &assign : group.getAssignments()) {
+    if (auto step = dyn_cast<StaticStepOp>(child)) {
+      for (auto &assign : step.getAssignments()) {
         // Shift timing guard by offset
         if (auto guard = assign.getAttr<TimingGuardAttr>("guard")) {
           assign.setAttr("guard", TimingGuardAttr::get(
@@ -2213,12 +2213,12 @@ void collapseStaticSeq(StaticSeqOp seq) {
         }
         collapsed.push_back(assign);
       }
-      offset += group.getLatency();
+      offset += step.getLatency();
     }
   }
 
-  // Create merged group with total latency
-  auto merged = builder.create<StaticGroupOp>("collapsed", offset);
+  // Create merged step with total latency
+  auto merged = builder.create<StaticStepOp>("collapsed", offset);
   merged.getBody().splice(merged.getBody().end(), collapsed);
 }
 ```
@@ -2265,13 +2265,13 @@ Input: cmt2.proc IR
 [Schedule Compaction] - ASAP scheduling (static code)
   |
   v
-[Control Collapsing] - Merge static groups
+[Control Collapsing] - Merge static steps
   |
   v
 [Cell Sharing] - Resource sharing based on live ranges
   |
   v
-[Compile Static] - Static groups → dynamic wrappers
+[Compile Static] - Static steps → dynamic wrappers
   |
   v
 [Top-Down Compile Control] - Build schedule, realize hardware
@@ -2280,7 +2280,7 @@ Input: cmt2.proc IR
 [Go Insertion] - Add go guards to all assignments
   |
   v
-Output: cmt2 IR with TDCC groups
+Output: cmt2 IR with TDCC steps
   |
   v
 [cmt2-to-firrtl] - Lower to FIRRTL
@@ -2309,7 +2309,7 @@ public:
   void calculateStates(Control &con, bool earlyTransitions);
 
   /// Generate hardware from schedule
-  GroupOp realizeSchedule(OpBuilder &builder);
+  StepOp realizeSchedule(OpBuilder &builder);
 
 private:
   SmallVector<PredEdge> calculateStatesRecur(
@@ -2429,7 +2429,7 @@ transitions:
 ### After TDCC Realization
 
 ```mlir
-cmt2.proc.group @tdcc {
+cmt2.proc.step @tdcc {
   // FSM: 3-bit register for states 0-4
   %fsm = ...
 
@@ -2457,7 +2457,7 @@ cmt2.proc.group @tdcc {
 
   // Done when state == 4
   %s4 = comb.icmp eq %fsm.out, 4
-  cmt2.proc.group_done %s4
+  cmt2.proc.step_done %s4
 }
 ```
 

@@ -189,36 +189,36 @@ void ecmt2::Value::finalize() {
 }
 
 //===----------------------------------------------------------------------===//
-// ProcGroup
+// ProcStep
 //===----------------------------------------------------------------------===//
 
-ProcGroup::ProcGroup(llvm::StringRef name, Module *parent) : name_(name.str()) {
+ProcStep::ProcStep(llvm::StringRef name, Module *parent) : name_(name.str()) {
   auto &builder = parent->getBuilder();
   auto loc = parent->getLoc();
 
-  op_ = builder.create<ProcGroupOp>(loc, builder.getStringAttr(name));
+  op_ = builder.create<ProcStepOp>(loc, builder.getStringAttr(name));
 
   auto *block = new mlir::Block();
   op_.getBodyRegion().push_back(block);
   bodyBuilder_ = std::make_unique<mlir::OpBuilder>(block, block->begin());
 }
 
-void ProcGroup::groupDone(mlir::Value condition) {
-  bodyBuilder_->create<ProcGroupDoneOp>(bodyBuilder_->getUnknownLoc(),
+void ProcStep::stepDone(mlir::Value condition) {
+  bodyBuilder_->create<ProcStepDoneOp>(bodyBuilder_->getUnknownLoc(),
                                         condition);
 }
 
 //===----------------------------------------------------------------------===//
-// ProcStaticGroup
+// ProcStaticStep
 //===----------------------------------------------------------------------===//
 
-ProcStaticGroup::ProcStaticGroup(llvm::StringRef name, uint64_t latency,
-                                 Module *parent)
+ProcStaticStep::ProcStaticStep(llvm::StringRef name, uint64_t latency,
+                               Module *parent)
     : name_(name.str()) {
   auto &builder = parent->getBuilder();
   auto loc = parent->getLoc();
 
-  op_ = builder.create<ProcStaticGroupOp>(loc, builder.getStringAttr(name),
+  op_ = builder.create<ProcStaticStepOp>(loc, builder.getStringAttr(name),
                                           latency);
 
   auto *block = new mlir::Block();
@@ -233,10 +233,10 @@ ProcStaticGroup::ProcStaticGroup(llvm::StringRef name, uint64_t latency,
 ControlBuilder::ControlBuilder(mlir::OpBuilder &builder, mlir::Location loc)
     : builder_(builder), loc_(loc) {}
 
-ControlBuilder &ControlBuilder::enable(llvm::StringRef groupName) {
+ControlBuilder &ControlBuilder::enable(llvm::StringRef stepName) {
   builder_.create<ProcEnableOp>(loc_,
                                 FlatSymbolRefAttr::get(builder_.getContext(),
-                                                       groupName));
+                                                       stepName));
   return *this;
 }
 

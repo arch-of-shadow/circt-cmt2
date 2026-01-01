@@ -119,13 +119,13 @@ with mod.value("read", returns=[UInt(32)]) as val:
 ### Procedural Control
 
 ```python
-# Group (go-done interface)
-with mod.group("load") as grp:
+# Step (go-done interface)
+with mod.step("load") as grp:
     # ... operations
     grp.done(condition)
 
 # Static latency group
-with mod.static_group(4, "compute") as sgrp:
+with mod.static_step(4, "compute") as sgrp:
     # ... 4-cycle operation
     pass
 

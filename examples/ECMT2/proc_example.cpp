@@ -66,24 +66,24 @@ int main() {
   auto *regInst = procMod->addInstance("reg", regMod,
                                         {clk.getValue(), rst.getValue()});
 
-  // Create groups
-  auto *loadGroup = procMod->addProcGroup("load");
-  loadGroup->body([&](mlir::OpBuilder &builder) {
+  // Create steps
+  auto *loadStep = procMod->addProcStep("load");
+  loadStep->body([&](mlir::OpBuilder &builder) {
     // Read from register
     regInst->callValue("read", builder);
     // Signal done
     auto done = UInt::constant(1, 1, builder, procMod->getLoc());
-    loadGroup->groupDone(done.getValue());
+    loadStep->stepDone(done.getValue());
   });
 
-  auto *storeGroup = procMod->addProcGroup("store");
-  storeGroup->body([&](mlir::OpBuilder &builder) {
+  auto *storeStep = procMod->addProcStep("store");
+  storeStep->body([&](mlir::OpBuilder &builder) {
     // Write to register
     auto val = UInt::constant(42, 32, builder, procMod->getLoc());
     regInst->callMethod("write", {val.getValue()}, builder);
     // Signal done
     auto done = UInt::constant(1, 1, builder, procMod->getLoc());
-    storeGroup->groupDone(done.getValue());
+    storeStep->stepDone(done.getValue());
   });
 
   // Create a procedural rule

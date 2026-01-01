@@ -32,8 +32,8 @@ class Value;
 class Instance;
 class InterfaceDecl;
 class InterfaceDef;
-class ProcGroup;
-class ProcStaticGroup;
+class ProcStep;
+class ProcStaticStep;
 class ProcRule;
 class ProcMethod;
 
@@ -113,8 +113,8 @@ public:
   Value *addValue(llvm::StringRef name, llvm::ArrayRef<mlir::Type> results);
 
   /// Procedural operations
-  ProcGroup *addProcGroup(llvm::StringRef name);
-  ProcStaticGroup *addProcStaticGroup(llvm::StringRef name, uint64_t latency);
+  ProcStep *addProcStep(llvm::StringRef name);
+  ProcStaticStep *addProcStaticStep(llvm::StringRef name, uint64_t latency);
   ProcRule *addProcRule(llvm::StringRef name);
   ProcMethod *addProcMethod(llvm::StringRef name,
                             llvm::ArrayRef<std::pair<std::string, mlir::Type>> args,
@@ -151,8 +151,8 @@ private:
   std::vector<std::unique_ptr<Value>> values_;
   std::vector<std::unique_ptr<InterfaceDecl>> interfaces_;
   std::vector<std::unique_ptr<InterfaceDef>> interfaceDefs_;
-  std::vector<std::unique_ptr<ProcGroup>> procGroups_;
-  std::vector<std::unique_ptr<ProcStaticGroup>> procStaticGroups_;
+  std::vector<std::unique_ptr<ProcStep>> procSteps_;
+  std::vector<std::unique_ptr<ProcStaticStep>> procStaticSteps_;
   std::vector<std::unique_ptr<ProcRule>> procRules_;
   std::vector<std::unique_ptr<ProcMethod>> procMethods_;
 };

@@ -7,23 +7,18 @@
 Counter Example using PyCMT2 EDSL
 
 This example demonstrates a simple counter module using the PyCMT2 embedded DSL.
-It shows the full flow from Python JIT to MLIR IR generation.
+It shows:
+- Module creation with clock/reset ports
+- Rule definitions with guards and bodies
+- Value methods for reading state
+- End-to-end compilation to MLIR, FIRRTL, and Verilog
 
 Usage:
     cd circt-cmt2/build
     PYTHONPATH=tools/circt/python_packages/circt_core python3 ../examples/PyCMT2/counter_example.py
 """
 
-import sys
-import os
-
-# Add the pycmt2 package to path
-build_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-python_packages = os.path.join(build_dir, "build/tools/circt/python_packages/circt_core")
-if python_packages not in sys.path:
-    sys.path.insert(0, python_packages)
-
-from circt.pycmt2 import Circuit, UInt, SInt, Clock, Reset
+from circt.pycmt2 import Circuit, UInt
 
 
 def main():
@@ -31,50 +26,63 @@ def main():
     print("PyCMT2 Counter Example")
     print("=" * 60)
 
-    # Create a circuit - name is inferred from variable assignment (JIT naming)
-    counter_circuit = Circuit("CounterCircuit")
+    # Create circuit
+    circuit = Circuit("Counter")
 
-    # Create a counter module
-    with counter_circuit.module("Counter") as counter:
-        # Add clock and reset ports
-        clk = counter.clock("clk")
-        rst = counter.reset("rst")
+    with circuit.module("Counter") as m:
+        # Ports
+        clk = m.clock()
+        rst = m.reset()
+        enable = m.input("enable", UInt(1))
 
-        # Add an input enable signal
-        enable = counter.input("enable", UInt(1))
-
-        # Define a rule to increment the counter
-        with counter.rule("increment") as rule:
+        # Increment rule - always fires (demonstrates rule structure)
+        # Note: Using g.always() because CMT2 rules are IsolatedFromAbove
+        # and can't directly access module ports. A real counter would
+        # need to use a register interface method call in the guard.
+        with m.rule("increment") as rule:
             with rule.guard() as g:
-                # Guard: always fire when enabled
-                g.returns(enable)
-
+                g.always()
             with rule.body() as b:
-                # Body: would increment counter value
-                # (In a full implementation, we'd call methods on a register instance)
+                # Would increment register here
                 pass
 
-        # Define a value method to read the counter
-        with counter.value("read", returns=[UInt(32)]) as val:
+        # Read value method - always ready
+        with m.value("read", returns=[UInt(32)]) as val:
             with val.guard() as g:
-                # Guard: always ready to read
                 g.always()
-
             with val.body() as b:
-                # Return a constant for now (placeholder)
-                result = b.const(0, 32)
-                b.returns(result)
+                b.returns(b.const(0, 32))
 
-    # Print the generated MLIR IR
-    print("\n=== Generated CMT2 MLIR IR ===\n")
-    print(counter_circuit.emit_mlir())
+    # Emit CMT2 MLIR
+    print("\n=== CMT2 MLIR ===\n")
+    print(circuit.emit_mlir())
+
+    # Try to emit FIRRTL (may fail if passes not available)
+    print("\n=== FIRRTL (if available) ===\n")
+    try:
+        print(circuit.emit_firrtl())
+    except Exception as e:
+        print(f"FIRRTL emission not available: {e}")
+
+    # Try to emit Verilog
+    print("\n=== Verilog (if available) ===\n")
+    try:
+        verilog = circuit.emit_verilog()
+        if "Verilog generation failed" in verilog:
+            # This is an error message
+            print("Verilog emission failed.")
+            print(verilog)
+        else:
+            print(verilog)
+    except Exception as e:
+        print(f"Verilog emission not available: {e}")
 
     print("\n" + "=" * 60)
-    print("Counter module created successfully!")
+    print("Counter example completed!")
     print("=" * 60)
-
     return 0
 
 
 if __name__ == "__main__":
+    import sys
     sys.exit(main())

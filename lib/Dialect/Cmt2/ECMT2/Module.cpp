@@ -453,18 +453,18 @@ void Module::setPrecedence(
 // Procedural Operations
 //===----------------------------------------------------------------------===//
 
-ProcGroup *Module::addProcGroup(llvm::StringRef name) {
-  auto group = std::make_unique<ProcGroup>(name, this);
-  auto *ptr = group.get();
-  procGroups_.push_back(std::move(group));
+ProcStep *Module::addProcStep(llvm::StringRef name) {
+  auto step = std::make_unique<ProcStep>(name, this);
+  auto *ptr = step.get();
+  procSteps_.push_back(std::move(step));
   return ptr;
 }
 
-ProcStaticGroup *Module::addProcStaticGroup(llvm::StringRef name,
-                                            uint64_t latency) {
-  auto group = std::make_unique<ProcStaticGroup>(name, latency, this);
-  auto *ptr = group.get();
-  procStaticGroups_.push_back(std::move(group));
+ProcStaticStep *Module::addProcStaticStep(llvm::StringRef name,
+                                          uint64_t latency) {
+  auto step = std::make_unique<ProcStaticStep>(name, latency, this);
+  auto *ptr = step.get();
+  procStaticSteps_.push_back(std::move(step));
   return ptr;
 }
 

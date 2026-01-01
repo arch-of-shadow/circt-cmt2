@@ -135,35 +135,35 @@ private:
 // Procedural Operations
 //===----------------------------------------------------------------------===//
 
-/// ProcGroup: execution unit with go-done interface
-class ProcGroup {
+/// ProcStep: execution unit with go-done interface
+class ProcStep {
 public:
-  ProcGroup(llvm::StringRef name, Module *parent);
+  ProcStep(llvm::StringRef name, Module *parent);
 
-  /// Body builder - where group actions are defined
-  template <typename Func> ProcGroup &body(Func &&fn) {
+  /// Body builder - where step actions are defined
+  template <typename Func> ProcStep &body(Func &&fn) {
     fn(*bodyBuilder_);
     return *this;
   }
 
-  /// Mark group as done with a condition
-  void groupDone(mlir::Value condition);
+  /// Mark step as done with a condition
+  void stepDone(mlir::Value condition);
 
   llvm::StringRef getName() const { return name_; }
 
 private:
   std::string name_;
-  ProcGroupOp op_;
+  ProcStepOp op_;
   std::unique_ptr<mlir::OpBuilder> bodyBuilder_;
 };
 
-/// ProcStaticGroup: fixed-latency group
-class ProcStaticGroup {
+/// ProcStaticStep: fixed-latency step
+class ProcStaticStep {
 public:
-  ProcStaticGroup(llvm::StringRef name, uint64_t latency, Module *parent);
+  ProcStaticStep(llvm::StringRef name, uint64_t latency, Module *parent);
 
   /// Body builder
-  template <typename Func> ProcStaticGroup &body(Func &&fn) {
+  template <typename Func> ProcStaticStep &body(Func &&fn) {
     fn(*bodyBuilder_);
     return *this;
   }
@@ -172,7 +172,7 @@ public:
 
 private:
   std::string name_;
-  ProcStaticGroupOp op_;
+  ProcStaticStepOp op_;
   std::unique_ptr<mlir::OpBuilder> bodyBuilder_;
 };
 
@@ -248,7 +248,7 @@ public:
   }
 
   /// Enable a group
-  ControlBuilder &enable(llvm::StringRef groupName);
+  ControlBuilder &enable(llvm::StringRef stepName);
 
   /// Invoke a method on an instance
   mlir::Value invoke(llvm::StringRef instance, llvm::StringRef method,
