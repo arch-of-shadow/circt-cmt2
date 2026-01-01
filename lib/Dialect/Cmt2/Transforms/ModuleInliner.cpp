@@ -10,6 +10,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "circt/Dialect/Cmt2/Transforms/CallInfo.h"
+#include "circt/Dialect/Cmt2/Transforms/Diagnostics.h"
 #include "circt/Dialect/Cmt2/Transforms/InstanceGraph.h"
 #include "circt/Dialect/Cmt2/Cmt2Ops.h"
 #include "circt/Dialect/Cmt2/Cmt2Passes.h"
@@ -85,15 +86,18 @@ LogicalResult ModuleInlinerPass::inlineInstance(InstanceOp instance) {
   // Get the target module
   auto targetModule = instance.getReferencedModule();
   if (!targetModule) {
-    instance.emitError("cannot find referenced module");
-    return failure();
+    return reportMissingDefinition(instance, "module",
+                                    instance.getModuleNameAttr().getValue())
+        .hint("check that the module is defined in the circuit")
+        .emit();
   }
 
   // Get the parent module
   auto parentModule = instance->getParentOfType<cmt2::ModuleOp>();
   if (!parentModule) {
-    instance.emitError("instance not within a module");
-    return failure();
+    return reportConversionError(instance, "instance not within a module")
+        .note("instances must be inside cmt2.module operations")
+        .emit();
   }
 
   LLVM_DEBUG(llvm::dbgs() << "Inlining instance: " << instance.getInstanceName()
@@ -198,7 +202,10 @@ void ModuleInlinerPass::inlineCalls(InstanceOp instance,
     StringAttr methodName = call.getMethodOrValueAttr().getLeafReference();
     auto targetFunc = targetModule.lookupFunctionLike(methodName);
     if (!targetFunc) {
-      call.emitError("cannot find method/value in target module");
+      (void)reportMissingDefinition(call, "method/value", methodName.getValue(),
+                               targetModule.moduleName())
+          .hint("check spelling or ensure the method is defined")
+          .emit();
       return;
     }
 

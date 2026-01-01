@@ -3,6 +3,7 @@ add_circt_dialect_library(CIRCTCmt2Transforms
   # InferRules.cpp
   Test.cpp
   CompileInvoke.cpp
+  Diagnostics.cpp
   TDCC.cpp
   ProcStmtToAction.cpp
   ProcToGAA.cpp
