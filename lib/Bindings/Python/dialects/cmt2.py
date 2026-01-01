@@ -104,8 +104,8 @@ class ProcMethodOp(ProcMethodOp):
 
 
 @_ods_cext.register_operation(_Dialect, replace=True)
-class ProcGroupOp(ProcGroupOp):
-    """CMT2 Procedural Group operation wrapper."""
+class ProcStepOp(ProcStepOp):
+    """CMT2 Procedural Step operation wrapper."""
 
     @property
     def body_block(self):
@@ -113,8 +113,8 @@ class ProcGroupOp(ProcGroupOp):
 
 
 @_ods_cext.register_operation(_Dialect, replace=True)
-class ProcStaticGroupOp(ProcStaticGroupOp):
-    """CMT2 Procedural Static Group operation wrapper."""
+class ProcStaticStepOp(ProcStaticStepOp):
+    """CMT2 Procedural Static Step operation wrapper."""
 
     @property
     def body_block(self):

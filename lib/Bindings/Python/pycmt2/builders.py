@@ -105,8 +105,9 @@ class RegionBuilder:
 
         with InsertionPoint(self._block):
             # Create a FIRRTL constant
+            # For FIRRTL, we need an unsigned integer type attribute, not signless
             ty = firrtl.UIntType.get(self._ctx.mlir_context, width)
-            int_ty = IntegerType.get_signless(width)
+            int_ty = IntegerType.get_unsigned(width)
             attr = IntegerAttr.get(int_ty, value)
             const_op = firrtl.ConstantOp(ty, attr, loc=self._loc)
             return Signal(const_op.result, UInt(width), self)
@@ -120,28 +121,38 @@ class RegionBuilder:
         return self.const(val, width)
 
     def add(self, a: Signal, b: Signal | int) -> Signal:
-        """Add two signals."""
+        """Add two signals.
+
+        Note: FIRRTL addition increases width by 1. The result type reflects
+        this wider width. Use truncate() or bits() if you need the original width.
+        """
         from circt.ir import InsertionPoint
         from circt.dialects import firrtl
 
         b_sig = self._ensure_signal(b, a.type.bit_width())
 
         with InsertionPoint(self._block):
-            result_width = max(a.type.bit_width(), b_sig.type.bit_width()) + 1
+            input_width = max(a.type.bit_width(), b_sig.type.bit_width())
+            # FIRRTL add returns width+1
             add_op = firrtl.AddPrimOp(a.value, b_sig.value, loc=self._loc)
-            return Signal(add_op.result, UInt(result_width), self)
+            return Signal(add_op.result, UInt(input_width + 1), self)
 
     def sub(self, a: Signal, b: Signal | int) -> Signal:
-        """Subtract two signals."""
+        """Subtract two signals.
+
+        Note: FIRRTL subtraction increases width by 1. The result type reflects
+        this wider width. Use truncate() or bits() if you need the original width.
+        """
         from circt.ir import InsertionPoint
         from circt.dialects import firrtl
 
         b_sig = self._ensure_signal(b, a.type.bit_width())
 
         with InsertionPoint(self._block):
-            result_width = max(a.type.bit_width(), b_sig.type.bit_width()) + 1
+            input_width = max(a.type.bit_width(), b_sig.type.bit_width())
+            # FIRRTL sub returns width+1
             sub_op = firrtl.SubPrimOp(a.value, b_sig.value, loc=self._loc)
-            return Signal(sub_op.result, UInt(result_width), self)
+            return Signal(sub_op.result, UInt(input_width + 1), self)
 
     def rsub(self, a: int, b: Signal) -> Signal:
         """Subtract signal from integer (a - b)."""
@@ -221,17 +232,27 @@ class RegionBuilder:
 
     def shr(self, a: Signal, amount: Signal | int) -> Signal:
         """Right shift."""
-        from circt.ir import InsertionPoint
+        from circt.ir import InsertionPoint, IntegerAttr, IntegerType, Operation
         from circt.dialects import firrtl
 
         with InsertionPoint(self._block):
             if isinstance(amount, int):
-                shr_op = firrtl.ShrPrimOp(a.value, amount, loc=self._loc)
+                # Use Operation.create to ensure correct result type
+                # (The Python bindings' ShrPrimOp doesn't properly infer the narrower type)
                 result_width = max(1, a.type.bit_width() - amount)
+                result_ty = firrtl.UIntType.get(self._ctx.mlir_context, result_width)
+                op = Operation.create(
+                    "firrtl.shr",
+                    results=[result_ty],
+                    operands=[a.value],
+                    attributes={"amount": IntegerAttr.get(IntegerType.get_signless(32), amount)},
+                    loc=self._loc
+                )
+                return Signal(op.result, UInt(result_width), self)
             else:
                 shr_op = firrtl.DShrPrimOp(a.value, amount.value, loc=self._loc)
                 result_width = a.type.bit_width()
-            return Signal(shr_op.result, UInt(result_width), self)
+                return Signal(shr_op.result, UInt(result_width), self)
 
     def eq(self, a: Signal, b: Signal | int) -> Signal[UInt]:
         """Equality comparison."""
@@ -392,26 +413,63 @@ class RegionBuilder:
                 return Signal(pad_op.result, SInt(width), self)
             return Signal(pad_op.result, UInt(width), self)
 
-    def mux(self, cond: Signal, t: Signal, f: Signal) -> Signal:
-        """Multiplexer: if cond then t else f."""
+    def truncate(self, a: Signal, width: int) -> Signal:
+        """Truncate signal to given width (extract low bits)."""
         from circt.ir import InsertionPoint
         from circt.dialects import firrtl
 
+        if width >= a.type.bit_width():
+            return a  # No truncation needed
+        with InsertionPoint(self._block):
+            bits_op = firrtl.BitsPrimOp(a.value, width - 1, 0, loc=self._loc)
+            if isinstance(a.type, SInt):
+                return Signal(bits_op.result, SInt(width), self)
+            return Signal(bits_op.result, UInt(width), self)
+
+    def convert_width(self, a: Signal, width: int) -> Signal:
+        """Convert signal to given width (truncate or pad as needed)."""
+        current_width = a.type.bit_width()
+        if current_width == width:
+            return a
+        elif current_width > width:
+            return self.truncate(a, width)
+        else:
+            return self.pad(a, width)
+
+    def mux(self, cond: Signal, t: Signal, f: Signal) -> Signal:
+        """Multiplexer: if cond then t else f.
+
+        Note: If t and f have different widths, they are converted to the
+        maximum width before the mux operation.
+        """
+        from circt.ir import InsertionPoint
+        from circt.dialects import firrtl
+
+        # Convert t and f to the same width (maximum of both)
+        t_width = t.type.bit_width()
+        f_width = f.type.bit_width()
+        max_width = max(t_width, f_width)
+
+        if t_width != max_width:
+            t = self.convert_width(t, max_width)
+        if f_width != max_width:
+            f = self.convert_width(f, max_width)
+
         with InsertionPoint(self._block):
             mux_op = firrtl.MuxPrimOp(cond.value, t.value, f.value, loc=self._loc)
-            return Signal(mux_op.result, t.type, self)
+            return Signal(mux_op.result, UInt(max_width), self)
 
     def call(
         self,
-        target: Instance | None,
-        method_or_value: MethodRef | ValueRef,
+        target,
+        method_or_value,
         *args: Signal,
     ) -> tuple[Signal, ...] | Signal | None:
         """Call a method or value on an instance.
 
         Args:
-            target: The instance to call on, or None for @this.
-            method_or_value: A MethodRef or ValueRef.
+            target: The instance to call on (Instance object), or None for @this.
+            method_or_value: A MethodRef, ValueRef, or string method name.
             *args: Arguments to pass.
 
         Returns:
@@ -420,28 +478,66 @@ class RegionBuilder:
         """
         from circt.ir import InsertionPoint, FlatSymbolRefAttr, StringAttr
         from circt.dialects import cmt2
+        from .refs import MethodRef, ValueRef, Instance
+        from .external_module import ExternalModuleBuilder
 
         with InsertionPoint(self._block):
-            # Determine the callee symbol
+            # Determine the callee symbol (instance name)
             if target is None:
                 callee = FlatSymbolRefAttr.get("this")
+                instance_module = None
+            elif isinstance(target, Instance):
+                callee = FlatSymbolRefAttr.get(target.name)
+                instance_module = target._module
             else:
                 callee = FlatSymbolRefAttr.get(target.name)
+                instance_module = getattr(target, "_ext_module", None)
 
-            method_sym = FlatSymbolRefAttr.get(method_or_value.name)
+            # Determine method/value symbol
+            if isinstance(method_or_value, (MethodRef, ValueRef)):
+                method_name = method_or_value.name
+                method_builder = method_or_value.builder
+            elif isinstance(method_or_value, str):
+                method_name = method_or_value
+                method_builder = None
+            else:
+                raise TypeError(f"Expected MethodRef, ValueRef, or str, got {type(method_or_value)}")
 
-            # Get result types from method/value builder if available
+            method_sym = FlatSymbolRefAttr.get(method_name)
+
+            # Get result types and argument types from method/value builder or external module
             result_types = []
-            if method_or_value.builder is not None:
-                builder = method_or_value.builder
-                if hasattr(builder, "_return_types"):
-                    result_types = [
-                        ty.to_firrtl_type(self._ctx.mlir_context)
-                        for ty in builder._return_types
-                    ]
+            cmt2_return_types = []
+            cmt2_arg_types = []
+
+            if method_builder is not None and hasattr(method_builder, "_return_types"):
+                cmt2_return_types = method_builder._return_types
+                if hasattr(method_builder, "_arg_types"):
+                    cmt2_arg_types = method_builder._arg_types
+            elif isinstance(instance_module, ExternalModuleBuilder):
+                # Look up types from external module - try value first, then method
+                cmt2_return_types = instance_module.get_value_return_types(method_name)
+                cmt2_arg_types = instance_module.get_value_arg_types(method_name)
+                if not cmt2_return_types and not cmt2_arg_types:
+                    cmt2_return_types = instance_module.get_method_return_types(method_name)
+                    cmt2_arg_types = instance_module.get_method_arg_types(method_name)
+
+            result_types = [
+                ty.to_firrtl_type(self._ctx.mlir_context)
+                for ty in cmt2_return_types
+            ]
+
+            # Convert argument widths if needed
+            converted_args = list(args)
+            if cmt2_arg_types and len(cmt2_arg_types) == len(args):
+                for i, (arg, expected_type) in enumerate(zip(args, cmt2_arg_types)):
+                    expected_width = expected_type.bit_width()
+                    actual_width = arg.type.bit_width()
+                    if actual_width != expected_width:
+                        converted_args[i] = self.convert_width(arg, expected_width)
 
             # Create the call
-            input_values = [arg.value for arg in args]
+            input_values = [arg.value for arg in converted_args]
             call_op = cmt2.CallOp(
                 result_types,
                 input_values,
@@ -454,19 +550,11 @@ class RegionBuilder:
             if len(call_op.results) == 0:
                 return None
             elif len(call_op.results) == 1:
-                # Infer type from builder
-                if method_or_value.builder and hasattr(method_or_value.builder, "_return_types"):
-                    ty = method_or_value.builder._return_types[0]
-                else:
-                    ty = UInt(32)  # Default
+                ty = cmt2_return_types[0] if cmt2_return_types else UInt(32)
                 return Signal(call_op.results[0], ty, self)
             else:
+                return_types = cmt2_return_types if cmt2_return_types else [UInt(32)] * len(call_op.results)
                 signals = []
-                return_types = (
-                    method_or_value.builder._return_types
-                    if method_or_value.builder and hasattr(method_or_value.builder, "_return_types")
-                    else [UInt(32)] * len(call_op.results)
-                )
                 for i, result in enumerate(call_op.results):
                     signals.append(Signal(result, return_types[i], self))
                 return tuple(signals)

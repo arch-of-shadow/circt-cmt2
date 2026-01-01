@@ -12,7 +12,8 @@ from typing import TYPE_CHECKING, Iterator
 from .types import Cmt2Type, UInt, Bool
 from .signals import Signal
 from .builders import RegionBuilder
-from .refs import MethodRef, ValueRef
+from .refs import MethodRef, ValueRef, RuleRef
+from .location import get_python_location, PythonLocation
 
 if TYPE_CHECKING:
     from .module import ModuleBuilder
@@ -90,11 +91,28 @@ class BodyBuilder(RegionBuilder):
             b.call(reg, reg.write, new_val)
     """
 
-    def __init__(self, parent, block, loc, ctx, args: list[tuple[str, Signal]] | None = None):
+    def __init__(
+        self,
+        parent,
+        block,
+        loc,
+        ctx,
+        args: list[tuple[str, Signal]] | None = None,
+        return_types: list[Cmt2Type] | None = None,
+    ):
         super().__init__(block, loc, ctx)
         self._parent = parent
         self._args = {name: sig for name, sig in (args or [])}
+        self._return_types = return_types or []
         self._results: list[Signal] = []
+        self._has_return = False
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        # Ensure body block has a return even if empty (for rules)
+        if exc_type is None and not self._has_return:
+            self._emit_body_return()
+        super().__exit__(exc_type, exc_val, exc_tb)
+        return False
 
     def arg(self, name: str) -> Signal:
         """Get an argument by name.
@@ -117,9 +135,24 @@ class BodyBuilder(RegionBuilder):
 
         Args:
             *values: Signals to return.
+
+        Note:
+            If return type hints are specified and the value widths don't match,
+            the values are automatically converted (truncated or padded) to match
+            the expected return types.
         """
-        self._results = list(values)
-        self._emit_body_return(*values)
+        # Convert values to match expected return types if specified
+        converted_values = list(values)
+        if self._return_types and len(self._return_types) == len(values):
+            for i, (val, expected_type) in enumerate(zip(values, self._return_types)):
+                expected_width = expected_type.bit_width()
+                actual_width = val.type.bit_width()
+                if actual_width != expected_width:
+                    converted_values[i] = self.convert_width(val, expected_width)
+
+        self._results = converted_values
+        self._has_return = True
+        self._emit_body_return(*converted_values)
 
     def _emit_body_return(self, *values: Signal):
         """Emit the return operation for the body."""
@@ -232,6 +265,10 @@ class RuleBuilder:
         self._body_builder: BodyBuilder | None = None
         self._op = None
 
+        # Capture Python source location for debugging
+        # depth=3 to skip: __init__ -> rule() -> contextmanager wrapper -> user code
+        self._python_loc = get_python_location(depth=3)
+
         # Create the rule op
         self._create_rule_op()
 
@@ -239,6 +276,11 @@ class RuleBuilder:
         """Create the MLIR rule operation."""
         from circt.ir import InsertionPoint, StringAttr, ArrayAttr, Block, FunctionType, TypeAttr
         from circt.dialects import cmt2
+
+        # Use Python source location for better error messages
+        mlir_loc = self._python_loc.to_mlir_location(
+            self._module._circuit._ctx.mlir_context
+        )
 
         with InsertionPoint(self._module._op.body):
             # Rule type: () -> ()
@@ -249,7 +291,7 @@ class RuleBuilder:
                 function_type=TypeAttr.get(func_type),
                 argNames=ArrayAttr.get([]),
                 bodyResNames=ArrayAttr.get([]),
-                loc=self._module._circuit._ctx.location,
+                loc=mlir_loc,
             )
 
             # Create guard and body blocks
@@ -302,6 +344,14 @@ class RuleBuilder:
         with self._body_builder as b:
             yield b
 
+    def ref(self) -> RuleRef:
+        """Get a reference to this rule for scheduling directives.
+
+        Returns:
+            A RuleRef for use with precedence() and other scheduling directives.
+        """
+        return RuleRef(self, self.name)
+
     def _finalize(self):
         """Finalize rule construction."""
         if self._guard_builder is None:
@@ -341,6 +391,10 @@ class MethodBuilder:
         self._op = None
         self._arg_signals: list[tuple[str, Signal]] = []
 
+        # Capture Python source location for debugging
+        # depth=3 to skip: __init__ -> method() -> contextmanager wrapper -> user code
+        self._python_loc = get_python_location(depth=3)
+
         # Create the method op
         self._create_method_op()
 
@@ -351,6 +405,9 @@ class MethodBuilder:
         from circt.dialects import cmt2
 
         ctx = self._module._circuit._ctx
+
+        # Use Python source location for better error messages
+        mlir_loc = self._python_loc.to_mlir_location(ctx.mlir_context)
 
         with InsertionPoint(self._module._op.body):
             # Build function type
@@ -366,11 +423,11 @@ class MethodBuilder:
                 function_type=TypeAttr.get(func_type),
                 argNames=ArrayAttr.get(arg_names),
                 bodyResNames=ArrayAttr.get(body_res_names),
-                loc=ctx.location,
+                loc=mlir_loc,
             )
 
             # Create guard and body blocks with arguments
-            arg_locs = [ctx.location] * len(arg_mlir_types)
+            arg_locs = [mlir_loc] * len(arg_mlir_types)
             guard_block = Block.create_at_start(self._op.guard, arg_mlir_types, arg_locs)
             body_block = Block.create_at_start(self._op.body, arg_mlir_types, arg_locs)
 
@@ -419,6 +476,7 @@ class MethodBuilder:
             self._module._circuit._ctx.location,
             self._module._circuit._ctx,
             args=self._arg_signals,
+            return_types=self._return_types,
         )
         with self._body_builder as b:
             yield b
@@ -463,6 +521,10 @@ class ValueBuilder:
         self._body_builder: BodyBuilder | None = None
         self._op = None
 
+        # Capture Python source location for debugging
+        # depth=3 to skip: __init__ -> value() -> contextmanager wrapper -> user code
+        self._python_loc = get_python_location(depth=3)
+
         # Create the value op
         self._create_value_op()
 
@@ -472,6 +534,9 @@ class ValueBuilder:
         from circt.dialects import cmt2
 
         ctx = self._module._circuit._ctx
+
+        # Use Python source location for better error messages
+        mlir_loc = self._python_loc.to_mlir_location(ctx.mlir_context)
 
         with InsertionPoint(self._module._op.body):
             # Build function type
@@ -485,7 +550,7 @@ class ValueBuilder:
                 function_type=TypeAttr.get(func_type),
                 argNames=ArrayAttr.get([]),
                 bodyResNames=ArrayAttr.get(body_res_names),
-                loc=ctx.location,
+                loc=mlir_loc,
             )
 
             # Create guard and body blocks
@@ -526,6 +591,7 @@ class ValueBuilder:
             body_block,
             self._module._circuit._ctx.location,
             self._module._circuit._ctx,
+            return_types=self._return_types,
         )
         with self._body_builder as b:
             yield b

@@ -168,19 +168,33 @@ class Circuit:
 
     @contextmanager
     def external_module(
-        self, firrtl_name: str, name: str | None = None
-    ) -> Iterator[object]:
-        """Create an external FIRRTL module binding.
+        self, name: str
+    ) -> Iterator["ExternalModuleBuilder"]:
+        """Create an external module binding.
+
+        External modules define the CMT2 interface to FIRRTL modules,
+        including clock/reset ports, value methods, and action methods.
 
         Args:
-            firrtl_name: The name of the FIRRTL module to bind.
-            name: Optional CMT2 module name.
+            name: The external module name.
 
         Yields:
             An ExternalModuleBuilder for defining bindings.
+
+        Example:
+            with circuit.external_module("Reg32") as reg:
+                reg.clock("clk")
+                reg.reset("rst")
+                reg.value("read", returns=[UInt(32)])
+                reg.method("write", args=[("data", UInt(32))])
+                reg.sequence_before("read", "write")
         """
-        # TODO: Implement ExternalModuleBuilder
-        raise NotImplementedError("External modules not yet implemented")
+        from .external_module import ExternalModuleBuilder
+
+        builder = ExternalModuleBuilder(self, name)
+        yield builder
+        builder._finalize()
+        self._external_modules[name] = builder
 
     @contextmanager
     def interface(self, name: str | None = None) -> Iterator[object]:
@@ -203,8 +217,46 @@ class Circuit:
         """
         return str(self._mlir_module)
 
-    def to_verilog(self) -> str:
-        """Run the compilation pipeline and emit Verilog.
+    def emit_firrtl(self) -> str:
+        """Run CMT2-to-FIRRTL conversion and emit FIRRTL MLIR.
+
+        This runs the CMT2 pass pipeline to lower the design to FIRRTL.
+
+        Returns:
+            The FIRRTL MLIR representation of the circuit.
+        """
+        from circt.passmanager import PassManager
+        import copy
+
+        # Clone the module to preserve original
+        cloned = self._clone_module()
+
+        # Run CMT2 to FIRRTL pipeline
+        # CMT2 passes operate on cmt2.circuit, conversion operates on builtin.module
+        pm = PassManager.parse(
+            "builtin.module("
+            "cmt2.circuit("
+            "cmt2-compile-invoke,"
+            "cmt2-tdcc,"
+            "cmt2-proc-stmt-to-action,"
+            "cmt2-proc-to-gaa"
+            "),"
+            "lower-cmt2-to-firrtl"
+            ")",
+            context=self._ctx.mlir_context
+        )
+        pm.run(cloned.operation)
+
+        return str(cloned)
+
+    def emit_verilog(self, output_dir: str | None = None) -> str:
+        """Run full compilation pipeline and emit Verilog.
+
+        This runs the complete pipeline: CMT2 -> FIRRTL -> HW -> Verilog.
+
+        Args:
+            output_dir: Optional directory to write Verilog files.
+                       If None, returns Verilog as a string.
 
         Returns:
             The Verilog representation of the circuit.
@@ -212,20 +264,157 @@ class Circuit:
         from circt.passmanager import PassManager
         import io
 
-        # Clone the module for pass running
-        # pm = PassManager.parse(
-        #     "builtin.module("
-        #     "cmt2-compile-invoke,"
-        #     "cmt2-to-firrtl"
-        #     ")"
-        # )
-        # pm.run(self._mlir_module)
+        # Clone the module to preserve original
+        cloned = self._clone_module()
 
-        # Export to verilog
+        # Run full pipeline: CMT2 -> FIRRTL -> lower-to-hw -> export-verilog
+        try:
+            # First run CMT2 to FIRRTL
+            # CMT2 passes operate on cmt2.circuit, conversion operates on builtin.module
+            cmt2_pm = PassManager.parse(
+                "builtin.module("
+                "cmt2.circuit("
+                "cmt2-compile-invoke,"
+                "cmt2-tdcc,"
+                "cmt2-proc-stmt-to-action,"
+                "cmt2-proc-to-gaa"
+                "),"
+                "lower-cmt2-to-firrtl"
+                ")",
+                context=self._ctx.mlir_context
+            )
+            cmt2_pm.run(cloned.operation)
+
+            # Then run FIRRTL passes to prepare for lowering
+            # These passes are needed to handle high-level FIRRTL constructs
+            firrtl_prep_pm = PassManager.parse(
+                "builtin.module("
+                "firrtl.circuit("
+                "firrtl-infer-resets,"
+                "firrtl-lower-types"
+                "),"
+                "any(any(firrtl-expand-whens))"
+                ")",
+                context=self._ctx.mlir_context
+            )
+            firrtl_prep_pm.run(cloned.operation)
+
+            # Then run FIRRTL to HW/SV conversion
+            firrtl_pm = PassManager.parse(
+                "builtin.module("
+                "lower-firrtl-to-hw,"
+                "lower-seq-to-sv"
+                ")",
+                context=self._ctx.mlir_context
+            )
+            firrtl_pm.run(cloned.operation)
+
+        except Exception as e:
+            # If passes fail, return error message as comment
+            return f"// Verilog generation failed: {e}\n// Run passes manually for debugging."
+
+        # Export to Verilog
         output = io.StringIO()
         from circt import export_verilog
-        export_verilog(self._mlir_module, output)
-        return output.getvalue()
+        export_verilog(cloned, output)
+        result = output.getvalue()
+
+        if output_dir:
+            import os
+            os.makedirs(output_dir, exist_ok=True)
+            filepath = os.path.join(output_dir, f"{self.name}.sv")
+            with open(filepath, 'w') as f:
+                f.write(result)
+
+        return result
+
+    def to_verilog(self) -> str:
+        """Run the compilation pipeline and emit Verilog.
+
+        Deprecated: Use emit_verilog() instead.
+
+        Returns:
+            The Verilog representation of the circuit.
+        """
+        return self.emit_verilog()
+
+    def _clone_module(self):
+        """Clone the MLIR module for pass running.
+
+        Uses Operation.clone() to create a deep copy without serialization,
+        avoiding MLIR print/parse round-trip issues (e.g., boolean constants).
+        """
+        from circt.ir import Module as MlirModule, InsertionPoint
+
+        # Create a new empty module
+        new_module = MlirModule.create(self._ctx.location)
+
+        # Clone all operations from the original module's body
+        with InsertionPoint(new_module.body):
+            for op in self._mlir_module.body:
+                op.operation.clone()
+
+        return new_module
+
+    def _add_firrtl_external_modules(self, mlir_module):
+        """Add FIRRTL external module declarations for CMT2 external modules.
+
+        The CMT2 to FIRRTL conversion expects FIRRTL modules to exist for
+        each external module binding. This method creates firrtl.extmodule
+        operations with the appropriate port signatures.
+        """
+        from circt.ir import InsertionPoint, StringAttr, IntegerAttr, IntegerType, ArrayAttr
+        from circt.dialects import firrtl
+        from .types import ClockType, ResetType
+
+        ctx = self._ctx.mlir_context
+
+        # Find or create the firrtl.circuit
+        firrtl_circuit = None
+        for op in mlir_module.body:
+            if op.operation.name == "firrtl.circuit":
+                firrtl_circuit = op
+                break
+
+        if firrtl_circuit is None:
+            # No FIRRTL circuit yet - it will be created by lower-cmt2-to-firrtl
+            # We need to add the external modules before running the conversion
+            # The conversion pass creates the FIRRTL circuit, so we need to
+            # add the external modules to the top-level module first
+            pass
+
+        # Create FIRRTL external modules for each CMT2 external module
+        for name, ext_mod in self._external_modules.items():
+            self._create_firrtl_extmodule(mlir_module, ext_mod)
+
+    def interpreter(self, output: "Callable[[str], None] | None" = None) -> "Interpreter":
+        """Create a Python interpreter for this circuit.
+
+        The interpreter provides cycle-accurate simulation with GAA semantics:
+        - One-Rule-At-A-Time (ORAAT) execution
+        - Conflict resolution via precedence
+        - Breakpoint support
+        - State inspection and modification
+
+        Args:
+            output: Optional callback for output messages. Defaults to print.
+
+        Returns:
+            An Interpreter instance for this circuit.
+
+        Example:
+            circuit = Circuit("Counter")
+            # ... define circuit ...
+
+            interp = circuit.interpreter()
+            interp.reset()
+
+            for _ in range(10):
+                results = interp.step()
+                print(f"Cycle {interp.cycle}: counter = {interp.get_register('counter')}")
+        """
+        from .interpreter import Interpreter
+        return Interpreter(self, output)
 
     def __repr__(self) -> str:
         return f"Circuit({self.name!r})"

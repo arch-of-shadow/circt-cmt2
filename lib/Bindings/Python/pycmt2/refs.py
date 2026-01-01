@@ -13,7 +13,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from .builders import MethodBuilder, ValueBuilder, GroupBuilder
+    from .builders import MethodBuilder, ValueBuilder, StepBuilder
     from .module import ModuleBuilder
     from .signals import Signal
     from .types import Cmt2Type
@@ -100,10 +100,10 @@ class ValueRef:
         return f"ValueRef(@this::{self.name})"
 
 
-class GroupRef:
-    """Reference to a procedural group for control flow.
+class StepRef:
+    """Reference to a procedural step for control flow.
 
-    GroupRef provides a type-safe way to reference groups in procedural
+    StepRef provides a type-safe way to reference steps in procedural
     control flow (e.g., cmt2.proc.enable).
     """
 
@@ -111,7 +111,7 @@ class GroupRef:
 
     def __init__(
         self,
-        builder: GroupBuilder | None = None,
+        builder: StepBuilder | None = None,
         name: str | None = None,
     ):
         self._builder = builder
@@ -119,16 +119,47 @@ class GroupRef:
 
     @property
     def name(self) -> str:
-        """Get the group name."""
+        """Get the step name."""
         return self._name
 
     @property
-    def builder(self) -> GroupBuilder | None:
-        """Get the group builder, if available."""
+    def builder(self) -> StepBuilder | None:
+        """Get the step builder, if available."""
         return self._builder
 
     def __repr__(self) -> str:
-        return f"GroupRef(@{self.name})"
+        return f"StepRef(@{self.name})"
+
+
+class RuleRef:
+    """Reference to a rule for scheduling directives.
+
+    RuleRef provides a type-safe way to reference rules (both regular rules
+    and proc.rules) for scheduling directives like precedence.
+    """
+
+    __slots__ = ("_builder", "_name")
+
+    def __init__(
+        self,
+        builder=None,  # RuleBuilder or ProcRuleBuilder
+        name: str | None = None,
+    ):
+        self._builder = builder
+        self._name = name or (builder.name if builder else "")
+
+    @property
+    def name(self) -> str:
+        """Get the rule name."""
+        return self._name
+
+    @property
+    def builder(self):
+        """Get the rule builder, if available."""
+        return self._builder
+
+    def __repr__(self) -> str:
+        return f"RuleRef(@{self.name})"
 
 
 class Instance:

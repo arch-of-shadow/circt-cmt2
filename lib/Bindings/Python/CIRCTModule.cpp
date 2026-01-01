@@ -58,6 +58,7 @@ static void registerPasses() {
   registerCmt2Passes();
   registerCombPasses();
   registerDCPasses();
+  registerFIRRTLPasses();
   registerSeqPasses();
   registerSVPasses();
   registerFSMPasses();

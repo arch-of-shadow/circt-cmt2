@@ -50,7 +50,47 @@ from .circuit import Circuit
 
 from .module import ModuleBuilder
 
-from .refs import MethodRef, ValueRef, GroupRef, Instance
+from .refs import MethodRef, ValueRef, StepRef, RuleRef, Instance
+
+from .simulation import SimulationWorkspace
+
+from .testbench import Testbench, TestSequence
+
+from .stl import (
+    Reg,
+    Wire,
+    FIFO,
+    Memory,
+    get_stl_rtl_files,
+    add_stl_rtl_to_workspace,
+    clear_stl_registry,
+)
+
+from .location import PythonLocation, get_python_location, LocationTracker
+
+from .external_module import ExternalModuleBuilder, ExternalModuleInstance
+
+from .diagnostics import (
+    DiagnosticLevel,
+    Diagnostic,
+    DiagnosticHandler,
+    emit_error,
+    emit_warning,
+    emit_info,
+    emit_debug,
+    type_mismatch_error,
+    undefined_reference_error,
+    scheduling_conflict_warning,
+    format_diagnostic_with_source,
+)
+
+from .interpreter import (
+    Interpreter,
+    Breakpoint,
+    BreakpointType,
+    RuleResult,
+    CycleTrace,
+)
 
 __all__ = [
     # Types
@@ -74,6 +114,45 @@ __all__ = [
     # References
     "MethodRef",
     "ValueRef",
-    "GroupRef",
+    "StepRef",
+    "RuleRef",
     "Instance",
+    # Simulation
+    "SimulationWorkspace",
+    # Testbench
+    "Testbench",
+    "TestSequence",
+    # STL Components
+    "Reg",
+    "Wire",
+    "FIFO",
+    "Memory",
+    "get_stl_rtl_files",
+    "add_stl_rtl_to_workspace",
+    "clear_stl_registry",
+    # Source Location Tracing
+    "PythonLocation",
+    "get_python_location",
+    "LocationTracker",
+    # External Modules
+    "ExternalModuleBuilder",
+    "ExternalModuleInstance",
+    # Diagnostics
+    "DiagnosticLevel",
+    "Diagnostic",
+    "DiagnosticHandler",
+    "emit_error",
+    "emit_warning",
+    "emit_info",
+    "emit_debug",
+    "type_mismatch_error",
+    "undefined_reference_error",
+    "scheduling_conflict_warning",
+    "format_diagnostic_with_source",
+    # Interpreter
+    "Interpreter",
+    "Breakpoint",
+    "BreakpointType",
+    "RuleResult",
+    "CycleTrace",
 ]

@@ -13,8 +13,8 @@ from ..dialects._ods_common import _cext as _ods_cext
 
 def register_dialect(context):
     """Register the FIRRTL dialect with the given context."""
-    from .. import _circt
-    _circt.register_dialects(context)
+    from .._mlir_libs._circt import register_dialects
+    register_dialects(context)
 
 
 class ConstantOp:
@@ -73,16 +73,99 @@ class _BinaryPrimOp:
         return self.op.result
 
 
-class AddPrimOp(_BinaryPrimOp):
+def _get_uint_width(firrtl_type) -> int:
+    """Extract width from a FIRRTL UInt type.
+
+    Parses the type string representation (e.g., "!firrtl.uint<32>") to get width.
+    """
+    import re
+    type_str = str(firrtl_type)
+    # Match patterns like !firrtl.uint<32> or !firrtl.sint<16>
+    match = re.search(r'!firrtl\.[us]int<(\d+)>', type_str)
+    if match:
+        return int(match.group(1))
+    # Handle analog types similarly if needed
+    match = re.search(r'!firrtl\.analog<(\d+)>', type_str)
+    if match:
+        return int(match.group(1))
+    # Default case
+    return 32
+
+
+class _WidenResultBinaryPrimOp:
+    """Base class for binary primitive operations that widen the result by 1 bit.
+
+    Used for add and sub operations where the result width is max(w1, w2) + 1.
+    """
+
+    OP_NAME = None
+
+    def __init__(self, lhs, rhs, *, loc=None, ip=None):
+        if loc is None:
+            loc = Location.unknown()
+        if ip is None:
+            ip = InsertionPoint.current
+
+        from ..ir import Operation
+
+        # Get widths from operand types
+        ctx = lhs.type.context
+        lhs_width = _get_uint_width(lhs.type)
+        rhs_width = _get_uint_width(rhs.type)
+        result_width = max(lhs_width, rhs_width) + 1
+        result_type = UIntType.get(ctx, result_width)
+
+        self.op = Operation.create(
+            self.OP_NAME,
+            results=[result_type],
+            operands=[lhs, rhs],
+            loc=loc,
+            ip=ip,
+        )
+
+    @property
+    def result(self):
+        return self.op.result
+
+
+class AddPrimOp(_WidenResultBinaryPrimOp):
     OP_NAME = "firrtl.add"
 
 
-class SubPrimOp(_BinaryPrimOp):
+class SubPrimOp(_WidenResultBinaryPrimOp):
     OP_NAME = "firrtl.sub"
 
 
-class MulPrimOp(_BinaryPrimOp):
+class MulPrimOp:
+    """Multiplication: result width is w1 + w2."""
     OP_NAME = "firrtl.mul"
+
+    def __init__(self, lhs, rhs, *, loc=None, ip=None):
+        if loc is None:
+            loc = Location.unknown()
+        if ip is None:
+            ip = InsertionPoint.current
+
+        from ..ir import Operation
+
+        # Get widths from operand types
+        ctx = lhs.type.context
+        lhs_width = _get_uint_width(lhs.type)
+        rhs_width = _get_uint_width(rhs.type)
+        result_width = lhs_width + rhs_width
+        result_type = UIntType.get(ctx, result_width)
+
+        self.op = Operation.create(
+            self.OP_NAME,
+            results=[result_type],
+            operands=[lhs, rhs],
+            loc=loc,
+            ip=ip,
+        )
+
+    @property
+    def result(self):
+        return self.op.result
 
 
 class AndPrimOp(_BinaryPrimOp):

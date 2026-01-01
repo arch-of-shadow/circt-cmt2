@@ -119,6 +119,13 @@ declare_mlir_python_sources(CIRCTBindingsPythonSources.PyCmt2
     pycmt2/module.py
     pycmt2/function_builders.py
     pycmt2/proc_builders.py
+    pycmt2/external_module.py
+    pycmt2/location.py
+    pycmt2/stl.py
+    pycmt2/simulation.py
+    pycmt2/testbench.py
+    pycmt2/diagnostics.py
+    pycmt2/interpreter.py
 )
 
 ################################################################################

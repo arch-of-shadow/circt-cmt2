@@ -13,20 +13,21 @@ from .types import Cmt2Type, UInt, Bool
 from .signals import Signal
 from .builders import RegionBuilder
 from .function_builders import GuardBuilder, BodyBuilder
-from .refs import GroupRef, MethodRef, ValueRef
+from .refs import StepRef, MethodRef, ValueRef, RuleRef
+from .location import get_python_location, PythonLocation
 
 if TYPE_CHECKING:
     from .module import ModuleBuilder
 
 
-class GroupBuilder(RegionBuilder):
-    """Builder for procedural groups.
+class StepBuilder(RegionBuilder):
+    """Builder for procedural steps.
 
     Groups are execution units with a go-done interface. They bundle
     operations that execute atomically when activated.
 
     Example:
-        with mod.group("load") as load:
+        with mod.step("load") as load:
             val = load.call(input_reg, input_reg.read)
             load.call(reg_a, reg_a.write, val)
             load.done(load.const(1, 1))
@@ -38,33 +39,43 @@ class GroupBuilder(RegionBuilder):
         self._done_set = False
         self._op = None
 
-        # Create the group op
+        # Capture Python source location for debugging
+        # depth=3 to skip: __init__ -> step() -> contextmanager wrapper -> user code
+        self._python_loc = get_python_location(depth=3)
+
+        # Create the step op
         self._create_group_op()
 
-        # Initialize RegionBuilder
+        # Initialize RegionBuilder with Python source location
         body_block = self._op.body_block
+        mlir_loc = self._python_loc.to_mlir_location(module._circuit._ctx.mlir_context)
         super().__init__(
             body_block,
-            module._circuit._ctx.location,
+            mlir_loc,
             module._circuit._ctx,
         )
 
     def _create_group_op(self):
-        """Create the MLIR group operation."""
+        """Create the MLIR step operation."""
         from circt.ir import InsertionPoint, StringAttr, Block
         from circt.dialects import cmt2
 
+        # Use Python source location for better error messages
+        mlir_loc = self._python_loc.to_mlir_location(
+            self._module._circuit._ctx.mlir_context
+        )
+
         with InsertionPoint(self._module._op.body):
-            self._op = cmt2.ProcGroupOp(
+            self._op = cmt2.ProcStepOp(
                 sym_name=StringAttr.get(self.name),
-                loc=self._module._circuit._ctx.location,
+                loc=mlir_loc,
             )
             # Create body block
             body_block = Block.create_at_start(self._op.body)
 
     @property
     def name(self) -> str:
-        """Get the group name."""
+        """Get the step name."""
         if self._name is None:
             from .circuit import _get_assignment_target
             jit_name = _get_assignment_target(depth=5)
@@ -75,7 +86,7 @@ class GroupBuilder(RegionBuilder):
         return self._name
 
     def done(self, condition: Signal) -> None:
-        """Signal that the group is done.
+        """Signal that the step is done.
 
         Args:
             condition: Boolean condition indicating completion.
@@ -87,28 +98,28 @@ class GroupBuilder(RegionBuilder):
             raise TypeError("Done condition must be Bool (UInt<1>)")
 
         with InsertionPoint(self._block):
-            cmt2.ProcGroupDoneOp(condition.value, loc=self._loc)
+            cmt2.ProcStepDoneOp(condition.value, loc=self._loc)
 
         self._done_set = True
 
-    def ref(self) -> GroupRef:
-        """Get a reference to this group for control flow."""
-        return GroupRef(self, self.name)
+    def ref(self) -> StepRef:
+        """Get a reference to this step for control flow."""
+        return StepRef(self, self.name)
 
     def _finalize(self):
-        """Finalize group construction."""
+        """Finalize step construction."""
         if not self._done_set:
-            raise ValueError(f"Group '{self.name}' must call done()")
+            raise ValueError(f"Step '{self.name}' must call done()")
 
 
-class StaticGroupBuilder(RegionBuilder):
-    """Builder for static latency groups.
+class StaticStepBuilder(RegionBuilder):
+    """Builder for static latency steps.
 
-    Static groups have a known fixed latency, so they don't need
+    Static steps have a known fixed latency, so they don't need
     runtime done signals.
 
     Example:
-        with mod.static_group(4, "multiply") as mult:
+        with mod.static_step(4, "multiply") as mult:
             # Operations with fixed 4-cycle latency
             mult.call(multiplier, multiplier.start, a, b)
     """
@@ -119,49 +130,59 @@ class StaticGroupBuilder(RegionBuilder):
         self._latency = latency
         self._op = None
 
-        # Create the static group op
-        self._create_static_group_op()
+        # Capture Python source location for debugging
+        # depth=3 to skip: __init__ -> static_step() -> contextmanager wrapper -> user code
+        self._python_loc = get_python_location(depth=3)
 
-        # Initialize RegionBuilder
+        # Create the static step op
+        self._create_static_step_op()
+
+        # Initialize RegionBuilder with Python source location
         body_block = self._op.body_block
+        mlir_loc = self._python_loc.to_mlir_location(module._circuit._ctx.mlir_context)
         super().__init__(
             body_block,
-            module._circuit._ctx.location,
+            mlir_loc,
             module._circuit._ctx,
         )
 
-    def _create_static_group_op(self):
-        """Create the MLIR static group operation."""
+    def _create_static_step_op(self):
+        """Create the MLIR static step operation."""
         from circt.ir import InsertionPoint, StringAttr, Block, IntegerAttr, IntegerType
         from circt.dialects import cmt2
 
+        # Use Python source location for better error messages
+        mlir_loc = self._python_loc.to_mlir_location(
+            self._module._circuit._ctx.mlir_context
+        )
+
         with InsertionPoint(self._module._op.body):
-            self._op = cmt2.ProcStaticGroupOp(
+            self._op = cmt2.ProcStaticStepOp(
                 sym_name=StringAttr.get(self.name),
                 latency=IntegerAttr.get(IntegerType.get_signless(64), self._latency),
-                loc=self._module._circuit._ctx.location,
+                loc=mlir_loc,
             )
             # Create body block
             body_block = Block.create_at_start(self._op.body)
 
     @property
     def name(self) -> str:
-        """Get the group name."""
+        """Get the step name."""
         if self._name is None:
             from .circuit import _get_assignment_target
             jit_name = _get_assignment_target(depth=5)
             if jit_name:
                 self._name = jit_name
             else:
-                self._name = f"static_group_{id(self):x}"
+                self._name = f"static_step_{id(self):x}"
         return self._name
 
-    def ref(self) -> GroupRef:
-        """Get a reference to this group for control flow."""
-        return GroupRef(self, self.name)
+    def ref(self) -> StepRef:
+        """Get a reference to this step for control flow."""
+        return StepRef(self, self.name)
 
     def _finalize(self):
-        """Finalize static group construction."""
+        """Finalize static step construction."""
         pass
 
 
@@ -199,8 +220,9 @@ class ControlBuilder:
         from circt.dialects import firrtl
 
         with InsertionPoint(self._block):
+            # For FIRRTL, we need an unsigned integer type attribute, not signless
             ty = firrtl.UIntType.get(self._ctx.mlir_context, width)
-            int_ty = IntegerType.get_signless(width)
+            int_ty = IntegerType.get_unsigned(width)
             attr = IntegerAttr.get(int_ty, value)
             const_op = firrtl.ConstantOp(ty, attr, loc=self._loc)
             from .builders import RegionBuilder
@@ -275,18 +297,18 @@ class ControlBuilder:
         nested = ControlBuilder(while_block, self._loc, self._ctx)
         yield nested
 
-    def enable(self, group: GroupRef) -> None:
-        """Enable a group.
+    def enable(self, group: StepRef) -> None:
+        """Enable a step.
 
         Args:
-            group: Reference to the group to enable.
+            group: Reference to the step to enable.
         """
         from circt.ir import InsertionPoint, FlatSymbolRefAttr
         from circt.dialects import cmt2
 
         with InsertionPoint(self._block):
             cmt2.ProcEnableOp(
-                groupName=FlatSymbolRefAttr.get(group.name),
+                stepName=FlatSymbolRefAttr.get(group.name),
                 loc=self._loc,
             )
 
@@ -418,6 +440,10 @@ class ProcRuleBuilder:
         self._control_builder: ControlBuilder | None = None
         self._op = None
 
+        # Capture Python source location for debugging
+        # depth=3 to skip: __init__ -> proc_rule() -> contextmanager wrapper -> user code
+        self._python_loc = get_python_location(depth=3)
+
         # Create the proc rule op
         self._create_proc_rule_op()
 
@@ -426,6 +452,11 @@ class ProcRuleBuilder:
         from circt.ir import InsertionPoint, StringAttr, ArrayAttr, Block, FunctionType, TypeAttr
         from circt.dialects import cmt2
 
+        # Use Python source location for better error messages
+        mlir_loc = self._python_loc.to_mlir_location(
+            self._module._circuit._ctx.mlir_context
+        )
+
         with InsertionPoint(self._module._op.body):
             func_type = FunctionType.get([], [])
 
@@ -433,7 +464,7 @@ class ProcRuleBuilder:
                 sym_name=StringAttr.get(self.name),
                 function_type=TypeAttr.get(func_type),
                 argNames=ArrayAttr.get([]),
-                loc=self._module._circuit._ctx.location,
+                loc=mlir_loc,
             )
 
             # Create guard and control blocks
@@ -456,10 +487,13 @@ class ProcRuleBuilder:
     def guard(self) -> Iterator[GuardBuilder]:
         """Enter the guard region."""
         guard_block = self._op.guard_block
+        mlir_loc = self._python_loc.to_mlir_location(
+            self._module._circuit._ctx.mlir_context
+        )
         self._guard_builder = GuardBuilder(
             self,
             guard_block,
-            self._module._circuit._ctx.location,
+            mlir_loc,
             self._module._circuit._ctx,
         )
         with self._guard_builder as g:
@@ -469,9 +503,12 @@ class ProcRuleBuilder:
     def control(self) -> Iterator[ControlBuilder]:
         """Enter the control region."""
         control_block = self._op.control_block
+        mlir_loc = self._python_loc.to_mlir_location(
+            self._module._circuit._ctx.mlir_context
+        )
         self._control_builder = ControlBuilder(
             control_block,
-            self._module._circuit._ctx.location,
+            mlir_loc,
             self._module._circuit._ctx,
         )
         yield self._control_builder
@@ -480,6 +517,14 @@ class ProcRuleBuilder:
         from circt.dialects import cmt2
         with InsertionPoint(control_block):
             cmt2.ProcControlEndOp(loc=self._module._circuit._ctx.location)
+
+    def ref(self) -> RuleRef:
+        """Get a reference to this proc rule for scheduling directives.
+
+        Returns:
+            A RuleRef for use with precedence() and other scheduling directives.
+        """
+        return RuleRef(self, self.name)
 
     def _finalize(self):
         """Finalize procedural rule construction."""
