@@ -14,6 +14,7 @@
 
 #include "circt/Dialect/Cmt2/Cmt2Ops.h"
 #include "circt/Dialect/Cmt2/Cmt2Passes.h"
+#include "circt/Dialect/Cmt2/Transforms/Diagnostics.h"
 #include "circt/Dialect/FIRRTL/FIRRTLDialect.h"
 #include "circt/Dialect/FIRRTL/FIRRTLOps.h"
 #include "circt/Dialect/FIRRTL/FIRRTLTypes.h"
@@ -51,7 +52,7 @@ private:
   /// Process a procedural rule and generate FSM-based rules.
   LogicalResult processProcRule(ProcRuleOp rule, cmt2::ModuleOp module);
 
-  /// Generate state-based rules for each enabled group.
+  /// Generate state-based rules for each enabled step.
   void generateStateRules(ProcRuleOp procRule, cmt2::ModuleOp module,
                           OpBuilder &builder, StringRef fsmInstName,
                           unsigned fsmWidth, ArrayAttr enablesAttr,
@@ -113,15 +114,15 @@ void ProcStmtToActionPass::generateStateRules(
   auto boolType = firrtl::UIntType::get(builder.getContext(), 1);
   StringRef ruleName = procRule.getSymName();
 
-  // Build map from group name to state
-  DenseMap<StringRef, uint64_t> groupToState;
+  // Build map from step name to state
+  DenseMap<StringRef, uint64_t> stepToState;
   if (enablesAttr) {
     for (auto enableAttr : enablesAttr) {
       auto dict = cast<DictionaryAttr>(enableAttr);
-      auto groupRef = dict.getAs<FlatSymbolRefAttr>("group");
+      auto stepRef = dict.getAs<FlatSymbolRefAttr>("group");
       auto stateAttr = dict.getAs<IntegerAttr>("state");
-      if (groupRef && stateAttr) {
-        groupToState[groupRef.getValue()] = stateAttr.getInt();
+      if (stepRef && stateAttr) {
+        stepToState[stepRef.getValue()] = stateAttr.getInt();
       }
     }
   }
@@ -139,14 +140,14 @@ void ProcStmtToActionPass::generateStateRules(
     }
   }
 
-  // For each group, generate a rule
+  // For each step, generate a rule
   for (auto &op : module.getBodyRegion().front()) {
-    auto group = dyn_cast<ProcGroupOp>(op);
-    if (!group)
+    auto step = dyn_cast<ProcStepOp>(op);
+    if (!step)
       continue;
 
-    auto stateIt = groupToState.find(group.getSymName());
-    if (stateIt == groupToState.end())
+    auto stateIt = stepToState.find(step.getSymName());
+    if (stateIt == stepToState.end())
       continue;
 
     uint64_t state = stateIt->second;
@@ -201,16 +202,16 @@ void ProcStmtToActionPass::generateStateRules(
 
     guardBuilder.create<ReturnOp>(loc, ValueRange{guardResult});
 
-    // Build body region: execute group + write next state
+    // Build body region: execute step + write next state
     Block *bodyBlock = new Block();
     stateRule.getBody().push_back(bodyBlock);
     OpBuilder bodyBuilder(bodyBlock, bodyBlock->begin());
 
-    // Clone group body (except group_done)
+    // Clone step body (except step_done)
     IRMapping bodyMapping;
-    for (auto &groupOp : group.getBody().front()) {
-      if (!isa<ProcGroupDoneOp>(groupOp)) {
-        bodyBuilder.clone(groupOp, bodyMapping);
+    for (auto &stepOp : step.getBody().front()) {
+      if (!isa<ProcStepDoneOp>(stepOp)) {
+        bodyBuilder.clone(stepOp, bodyMapping);
       }
     }
 
@@ -409,7 +410,10 @@ LogicalResult ProcStmtToActionPass::processProcRule(ProcRuleOp rule,
   }
 
   if (!clock || !reset) {
-    return rule.emitError("Could not find clock/reset for FSM");
+    return reportConversionError(rule, "could not find clock/reset for FSM")
+        .note("procedural rules require clock and reset signals")
+        .hint("ensure module has clock and reset arguments")
+        .emit();
   }
 
   // Create FSM instance

@@ -37,17 +37,17 @@ builtin.module {
         cmt2.module @TestInvokeCompile(%clk: !firrtl.clock, %rst: !firrtl.uint<1>) {
             cmt2.instance @reg_a = @reg (%clk, %rst) : !firrtl.clock, !firrtl.uint<1>
 
-            // Check that a group was generated for the invoke (it gets placed before existing groups)
-            // CHECK: cmt2.proc.group @__invoke_group_0
+            // Check that a step was generated for the invoke (it gets placed before existing groups)
+            // CHECK: cmt2.proc.step @__invoke_group_0
             // CHECK: cmt2.call @this @add
-            // CHECK: cmt2.proc.group_done
+            // CHECK: cmt2.proc.step_done
 
-            // Existing groups should be preserved
-            // CHECK: cmt2.proc.group @existing_group
-            cmt2.proc.group @existing_group {
+            // Existing steps should be preserved
+            // CHECK: cmt2.proc.step @existing_group
+            cmt2.proc.step @existing_group {
                 %a = cmt2.call @reg_a @read() : () -> !firrtl.uint<32>
                 %c1 = firrtl.constant 1 : !firrtl.uint<1>
-                cmt2.proc.group_done %c1 : !firrtl.uint<1>
+                cmt2.proc.step_done %c1 : !firrtl.uint<1>
             }
 
             // CHECK: cmt2.proc.method @add

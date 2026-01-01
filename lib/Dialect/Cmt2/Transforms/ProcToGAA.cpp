@@ -9,7 +9,7 @@
 // This file implements the ProcToGAA pass for the Cmt2 dialect.
 // It performs final cleanup of procedural operations after ProcStmtToAction
 // has generated the FSM-based rules. This pass removes the original proc
-// operations (proc.rule, proc.group, etc.) that are no longer needed.
+// operations (proc.rule, proc.step, etc.) that are no longer needed.
 //
 //===----------------------------------------------------------------------===//
 
@@ -127,15 +127,15 @@ void ProcToGAAPass::processModule(cmt2::ModuleOp module) {
   // Collect all proc ops
   SmallVector<ProcRuleOp> rules;
   SmallVector<ProcMethodOp> methods;
-  SmallVector<ProcGroupOp> groups;
+  SmallVector<ProcStepOp> steps;
 
   for (auto &op : module.getBodyRegion().front()) {
     if (auto rule = dyn_cast<ProcRuleOp>(op))
       rules.push_back(rule);
     else if (auto method = dyn_cast<ProcMethodOp>(op))
       methods.push_back(method);
-    else if (auto group = dyn_cast<ProcGroupOp>(op))
-      groups.push_back(group);
+    else if (auto step = dyn_cast<ProcStepOp>(op))
+      steps.push_back(step);
   }
 
   // Mark rules and methods for removal
@@ -153,7 +153,7 @@ void ProcToGAAPass::processModule(cmt2::ModuleOp module) {
   // safely remove them after all references are resolved.
 
   LLVM_DEBUG(llvm::dbgs() << "  Processed " << rules.size() << " rules, "
-                          << methods.size() << " methods, " << groups.size()
+                          << methods.size() << " methods, " << steps.size()
                           << " groups\n");
 }
 

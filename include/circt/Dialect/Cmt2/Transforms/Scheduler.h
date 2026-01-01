@@ -7,7 +7,7 @@
 //===----------------------------------------------------------------------===//
 //
 // This file defines the Scheduler analysis for the Cmt2 dialect.
-// The Scheduler groups functions and orders them for optimal scheduling.
+// The Scheduler steps functions and orders them for optimal scheduling.
 //
 //===----------------------------------------------------------------------===//
 
@@ -33,16 +33,16 @@ struct PreventingFiring {
   Relationship relationship; // Type: SequentialBefore or Conflict
 };
 
-/// A schedule group contains functions that have Conflict or SequentialBefore
-/// relationships. Functions in the group are ordered to satisfy constraints.
-class ScheduleGroup {
+/// A schedule step contains functions that have Conflict or SequentialBefore
+/// relationships. Functions in the step are ordered to satisfy constraints.
+class ScheduleStep {
 public:
-  ScheduleGroup() = default;
+  ScheduleStep() = default;
 
-  /// Add a function to the group (ordered)
+  /// Add a function to the step (ordered)
   void addFunction(StringAttr func) { functions.push_back(func); }
 
-  /// Get all functions in this group (in scheduled order)
+  /// Get all functions in this step (in scheduled order)
   const SmallVector<StringAttr> &getFunctions() const { return functions; }
 
   /// Add a preventing firing violation
@@ -74,17 +74,17 @@ class ModuleScheduleResult {
 public:
   ModuleScheduleResult() = default;
 
-  /// Add a schedule group
-  void addGroup(ScheduleGroup group) { groups.push_back(std::move(group)); }
+  /// Add a schedule step
+  void addStep(ScheduleStep step) { steps.push_back(std::move(step)); }
 
-  /// Get all schedule groups
-  const SmallVector<ScheduleGroup> &getGroups() const { return groups; }
+  /// Get all schedule steps
+  const SmallVector<ScheduleStep> &getSteps() const { return steps; }
 
   /// Print the schedule result
   void print(llvm::raw_ostream &os, StringAttr moduleName) const;
 
 private:
-  SmallVector<ScheduleGroup> groups;
+  SmallVector<ScheduleStep> steps;
 };
 
 /// SchedulerAnalysis: computes scheduling for all modules
@@ -152,16 +152,16 @@ private:
   /// Returns list of precedence chains: [[@a, @b, @c], ...] means a << b << c
   SmallVector<SmallVector<StringAttr>> parsePrecedence(ModuleOp module);
 
-  /// Group functions using union-find based on conflict relationships
-  /// Returns mapping from function index to group id
+  /// Step functions using union-find based on conflict relationships
+  /// Returns mapping from function index to step id
   std::vector<size_t> groupFunctions(
       const SmallVector<StringAttr> &functions,
       const ModuleConflictMatrix *matrix);
 
-  /// Solve scheduling for a single group
+  /// Solve scheduling for a single step
   /// Minimizes violations while respecting precedence constraints
-  SmallVector<StringAttr> solveGroupSchedule(
-      const SmallVector<StringAttr> &groupFunctions,
+  SmallVector<StringAttr> solveStepSchedule(
+      const SmallVector<StringAttr> &stepFunctions,
       const ModuleConflictMatrix *matrix,
       const SmallVector<SmallVector<StringAttr>> &precedence);
 
@@ -169,11 +169,11 @@ private:
   bool hasPrecedence(StringAttr fx, StringAttr fy,
                      const SmallVector<SmallVector<StringAttr>> &precedence);
 
-  /// Analyze preventing firing relationships in a scheduled group
+  /// Analyze preventing firing relationships in a scheduled step
   /// Returns violations where c[i] > c[j] but f[i] < f[j] or f[i] <> f[j]
   void analyzePreventingFiring(const SmallVector<StringAttr> &scheduledFunctions,
                                const ModuleConflictMatrix *matrix,
-                               ScheduleGroup &group);
+                               ScheduleStep &step);
 
   /// Check if a function is a private function (only called via @this)
   /// Returns true if the function should not be in the schedule

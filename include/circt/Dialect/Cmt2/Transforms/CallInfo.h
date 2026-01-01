@@ -83,6 +83,41 @@ private:
   llvm::DenseMap<mlir::StringRef, ModuleCallInfo> callInfoMap;
 };
 
+//===----------------------------------------------------------------------===//
+// Step Call Collection Utilities
+//===----------------------------------------------------------------------===//
+
+/// Collect all method calls within a procedural step operation.
+/// This is used for backpressure analysis and static step validation.
+///
+/// @param step The ProcStepOp or ProcStaticStepOp to analyze
+/// @param module The containing module for symbol resolution
+/// @param circuit The circuit for cross-module lookups
+/// @return Vector of CallInfo for all method calls in the step
+llvm::SmallVector<CallInfo, 4> collectStepCalls(mlir::Operation *step,
+                                                  cmt2::ModuleOp module,
+                                                  CircuitOp circuit);
+
+/// Check if any call in the given step has potential conflicts with other
+/// functions in the module.
+///
+/// @param step The step operation to check
+/// @param module The containing module
+/// @param conflictMatrix The conflict matrix for analysis
+/// @return true if any method call has potential conflicts
+bool stepHasConflictingCalls(mlir::Operation *step, cmt2::ModuleOp module,
+                             const class ModuleConflictMatrix &conflictMatrix);
+
+/// Get all functions that could fire concurrently with a given step.
+/// This includes rules and methods that are not in a sequential relationship
+/// with the step's parent proc rule.
+///
+/// @param step The step operation
+/// @param module The containing module
+/// @return Vector of function names that could be concurrent
+llvm::SmallVector<mlir::StringAttr, 8>
+getConcurrentFunctions(mlir::Operation *step, cmt2::ModuleOp module);
+
 } // namespace cmt2
 } // namespace circt
 

@@ -1,4 +1,4 @@
-//===- CompileInvoke.cpp - Compile proc.invoke to groups --------*- C++ -*-===//
+//===- CompileInvoke.cpp - Compile proc.invoke to steps --------*- C++ -*-===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
@@ -7,7 +7,7 @@
 //===----------------------------------------------------------------------===//
 //
 // This file implements the CompileInvoke pass for the Cmt2 dialect.
-// It converts cmt2.proc.invoke operations to cmt2.proc.enable + generated groups.
+// It converts cmt2.proc.invoke operations to cmt2.proc.enable + generated steps.
 //
 //===----------------------------------------------------------------------===//
 
@@ -46,28 +46,28 @@ private:
   /// Process a single module
   void processModule(cmt2::ModuleOp module);
 
-  /// Convert a ProcInvokeOp to a generated group and ProcEnableOp
-  void compileInvoke(ProcInvokeOp invoke, cmt2::ModuleOp module, unsigned &groupCounter);
+  /// Convert a ProcInvokeOp to a generated step and ProcEnableOp
+  void compileInvoke(ProcInvokeOp invoke, cmt2::ModuleOp module, unsigned &stepCounter);
 };
 
 } // end anonymous namespace
 
 void CompileInvokePass::compileInvoke(ProcInvokeOp invoke, cmt2::ModuleOp module,
-                                       unsigned &groupCounter) {
+                                       unsigned &stepCounter) {
   OpBuilder builder(invoke);
   Location loc = invoke.getLoc();
 
-  // Generate unique group name
-  std::string groupName = "__invoke_group_" + std::to_string(groupCounter++);
+  // Generate unique step name
+  std::string stepName = "__invoke_group_" + std::to_string(stepCounter++);
 
-  // Create the group at module level (before any proc operations)
+  // Create the step at module level (before any proc operations)
   Block *moduleBody = &module.getBody().front();
   OpBuilder moduleBuilder(moduleBody, moduleBody->begin());
 
   // Find insertion point - after instances and before proc operations
   Operation *insertBefore = nullptr;
   for (auto &op : moduleBody->getOperations()) {
-    if (isa<ProcGroupOp, ProcStaticGroupOp, ProcRuleOp, ProcMethodOp>(op)) {
+    if (isa<ProcStepOp, ProcStaticStepOp, ProcRuleOp, ProcMethodOp>(op)) {
       insertBefore = &op;
       break;
     }
@@ -79,23 +79,23 @@ void CompileInvokePass::compileInvoke(ProcInvokeOp invoke, cmt2::ModuleOp module
     moduleBuilder.setInsertionPointToEnd(moduleBody);
 
   // Create the group
-  auto groupOp = moduleBuilder.create<ProcGroupOp>(
-      loc, builder.getStringAttr(groupName));
+  auto stepOp = moduleBuilder.create<ProcStepOp>(
+      loc, builder.getStringAttr(stepName));
 
   // Add the body to the group
-  Block *groupBody = new Block();
-  groupOp.getBody().push_back(groupBody);
-  OpBuilder groupBuilder(groupBody, groupBody->begin());
+  Block *stepBody = new Block();
+  stepOp.getBody().push_back(stepBody);
+  OpBuilder stepBuilder(stepBody, stepBody->begin());
 
-  // Clone the operand-producing operations into the group body
+  // Clone the operand-producing operations into the step body
   // This handles values defined in the control region that need to be used
-  // in the group (which is at module level)
+  // in the step (which is at module level)
   IRMapping valueMap;
   SmallVector<Value> clonedInputs;
   for (Value input : invoke.getInputs()) {
     if (Operation *defOp = input.getDefiningOp()) {
-      // Clone the operation into the group body
-      Operation *clonedOp = groupBuilder.clone(*defOp, valueMap);
+      // Clone the operation into the step body
+      Operation *clonedOp = stepBuilder.clone(*defOp, valueMap);
       // Get the corresponding result from the cloned op
       unsigned resultIdx = cast<OpResult>(input).getResultNumber();
       clonedInputs.push_back(clonedOp->getResult(resultIdx));
@@ -108,7 +108,7 @@ void CompileInvokePass::compileInvoke(ProcInvokeOp invoke, cmt2::ModuleOp module
 
   // Create the cmt2.call inside the group
   // CallOp::build(builder, state, resultTypes, inputs, callee, methodOrValue, arg_attrs, res_attrs)
-  auto callOp = groupBuilder.create<CallOp>(
+  auto callOp = stepBuilder.create<CallOp>(
       loc, invoke.getResultTypes(), clonedInputs,
       SymbolRefAttr::get(builder.getContext(), invoke.getInstance()),
       SymbolRefAttr::get(builder.getContext(), invoke.getMethod()),
@@ -117,15 +117,15 @@ void CompileInvokePass::compileInvoke(ProcInvokeOp invoke, cmt2::ModuleOp module
   // Store the call results for later use
   SmallVector<Value> callResults(callOp.getResults());
 
-  // Create group_done with constant true
+  // Create step_done with constant true
   auto uint1Type = firrtl::UIntType::get(builder.getContext(), 1);
-  auto trueConst = groupBuilder.create<firrtl::ConstantOp>(
+  auto trueConst = stepBuilder.create<firrtl::ConstantOp>(
       loc, uint1Type, llvm::APInt(1, 1));
-  groupBuilder.create<ProcGroupDoneOp>(loc, trueConst);
+  stepBuilder.create<ProcStepDoneOp>(loc, trueConst);
 
   // Replace the invoke with an enable
   builder.create<ProcEnableOp>(loc, FlatSymbolRefAttr::get(
-      builder.getContext(), groupName));
+      builder.getContext(), stepName));
 
   // Replace uses of invoke results with call results
   // Note: For now, we don't handle result values from invoke
@@ -135,11 +135,11 @@ void CompileInvokePass::compileInvoke(ProcInvokeOp invoke, cmt2::ModuleOp module
   // Erase the original invoke
   invoke.erase();
 
-  LLVM_DEBUG(llvm::dbgs() << "Compiled invoke to group @" << groupName << "\n");
+  LLVM_DEBUG(llvm::dbgs() << "Compiled invoke to step @" << stepName << "\n");
 }
 
 void CompileInvokePass::processModule(cmt2::ModuleOp module) {
-  unsigned groupCounter = 0;
+  unsigned stepCounter = 0;
 
   // Collect all ProcInvokeOps first to avoid iterator invalidation
   SmallVector<ProcInvokeOp> invokes;
@@ -149,10 +149,10 @@ void CompileInvokePass::processModule(cmt2::ModuleOp module) {
 
   // Process each invoke
   for (auto invoke : invokes) {
-    compileInvoke(invoke, module, groupCounter);
+    compileInvoke(invoke, module, stepCounter);
   }
 
-  LLVM_DEBUG(llvm::dbgs() << "Compiled " << groupCounter << " invokes in module @"
+  LLVM_DEBUG(llvm::dbgs() << "Compiled " << stepCounter << " invokes in module @"
                            << module.getSymName() << "\n");
 }
 

@@ -14,6 +14,9 @@
 
 #include "circt/Dialect/Cmt2/Cmt2Ops.h"
 #include "circt/Dialect/Cmt2/Cmt2Passes.h"
+#include "circt/Dialect/Cmt2/Transforms/CallInfo.h"
+#include "circt/Dialect/Cmt2/Transforms/ConflictMatrix.h"
+#include "circt/Dialect/Cmt2/Transforms/Diagnostics.h"
 #include "circt/Dialect/Comb/CombOps.h"
 #include "circt/Dialect/FIRRTL/FIRRTLOps.h"
 #include "circt/Dialect/FIRRTL/FIRRTLTypes.h"
@@ -88,7 +91,7 @@ struct TDCCPass : public circt::cmt2::impl::TDCCBase<TDCCPass> {
 
 private:
   /// Process a single module.
-  void processModule(cmt2::ModuleOp module);
+  void processModule(cmt2::ModuleOp module, const ConflictMatrixAnalysis &cma);
 
   /// Process a single procedural rule or method.
   void processProcOp(Operation *procOp, cmt2::ModuleOp module);
@@ -112,11 +115,19 @@ private:
   void realizeSchedule(Schedule &schedule, Operation *procOp,
                        cmt2::ModuleOp module, OpBuilder &builder);
 
+  /// Validate static steps for potential backpressure issues.
+  void validateStaticSteps(cmt2::ModuleOp module,
+                           const ConflictMatrixAnalysis &cma);
+
+  /// Check if a dynamic step can be promoted to static.
+  bool canPromoteToStatic(ProcStepOp step, cmt2::ModuleOp module,
+                          const ConflictMatrixAnalysis &cma);
+
   /// Map from EnableOp to its state ID.
   DenseMap<Operation *, uint64_t> stateIds;
 
-  /// Map from group name to group operation.
-  DenseMap<StringRef, Operation *> groupMap;
+  /// Map from step name to step operation.
+  DenseMap<StringRef, Operation *> stepMap;
 };
 
 } // end anonymous namespace
@@ -212,7 +223,7 @@ void TDCCPass::controlExits(Operation *op, SmallVectorImpl<PredEdge> &exits,
   llvm::TypeSwitch<Operation *>(op)
       .Case<ProcEnableOp>([&](ProcEnableOp enable) {
         uint64_t state = stateIds[enable];
-        // Exit when group's done signal is true
+        // Exit when step's done signal is true
         // For now, we'll use a placeholder - actual done signal comes from group
         exits.push_back({state, nullptr}); // null = unconditional (done)
       })
@@ -380,7 +391,7 @@ void TDCCPass::realizeSchedule(Schedule &schedule, Operation *procOp,
   for (auto &[enableOp, state] : stateIds) {
     if (auto enable = dyn_cast<ProcEnableOp>(enableOp)) {
       auto entry = builder.getDictionaryAttr({
-        builder.getNamedAttr("group", enable.getGroupNameAttr()),
+        builder.getNamedAttr("step", enable.getStepNameAttr()),
         builder.getNamedAttr("state", builder.getI64IntegerAttr(state))
       });
       stateAssigns.push_back(entry);
@@ -400,6 +411,109 @@ void TDCCPass::realizeSchedule(Schedule &schedule, Operation *procOp,
   procOp->setAttr("tdcc.transitions", builder.getArrayAttr(transAttrs));
 
   LLVM_DEBUG(llvm::dbgs() << "Added TDCC attributes to " << procName << "\n");
+}
+
+//===----------------------------------------------------------------------===//
+// Static Step Validation
+//===----------------------------------------------------------------------===//
+
+void TDCCPass::validateStaticSteps(cmt2::ModuleOp module,
+                                    const ConflictMatrixAnalysis &cma) {
+  auto circuit = module->getParentOfType<CircuitOp>();
+  auto *moduleMatrix = cma.getModuleMatrix(module.getSymNameAttr());
+
+  // Validate each static step
+  module.walk([&](ProcStaticStepOp staticStep) {
+    auto calls = collectStepCalls(staticStep, module, circuit);
+
+    // Check for conflicts between methods called within the same step
+    for (size_t i = 0; i < calls.size(); ++i) {
+      for (size_t j = i + 1; j < calls.size(); ++j) {
+        if (calls[i].callType != CallType::MethodCall ||
+            calls[j].callType != CallType::MethodCall)
+          continue;
+
+        // Check if these methods conflict
+        if (moduleMatrix) {
+          auto rel = moduleMatrix->getRelationship(
+              calls[i].calleeEntity.getLeafReference(),
+              calls[j].calleeEntity.getLeafReference());
+          if (rel == Relationship::Conflict) {
+            std::string method1 =
+                (calls[i].calleeInstance.getLeafReference().getValue() + "." +
+                 calls[i].calleeEntity.getLeafReference().getValue())
+                    .str();
+            std::string method2 =
+                (calls[j].calleeInstance.getLeafReference().getValue() + "." +
+                 calls[j].calleeEntity.getLeafReference().getValue())
+                    .str();
+            (void)reportSchedulingConflict(staticStep, method1, method2,
+                                     "in static step")
+                .note("latency guarantee may be violated due to backpressure")
+                .hint("consider using dynamic step or explicit sequencing")
+                .emit();
+          }
+        }
+      }
+    }
+
+    // Check for conflicts with concurrently firing functions
+    auto concurrentFuncs = getConcurrentFunctions(staticStep, module);
+    for (const auto &call : calls) {
+      if (call.callType != CallType::MethodCall)
+        continue;
+
+      for (auto concFunc : concurrentFuncs) {
+        if (moduleMatrix) {
+          auto rel = moduleMatrix->getRelationship(
+              call.calleeEntity.getLeafReference(),
+              concFunc);
+          if (rel == Relationship::Conflict) {
+            std::string method =
+                (call.calleeInstance.getLeafReference().getValue() + "." +
+                 call.calleeEntity.getLeafReference().getValue())
+                    .str();
+            (void)reportSchedulingConflict(staticStep, method, concFunc.getValue(),
+                                     "static step may conflict with concurrent rule/method")
+                .note("latency guarantee may be violated")
+                .hint("ensure concurrent operations don't conflict")
+                .emit();
+          }
+        }
+      }
+    }
+  });
+}
+
+bool TDCCPass::canPromoteToStatic(ProcStepOp step, cmt2::ModuleOp module,
+                                   const ConflictMatrixAnalysis &cma) {
+  auto circuit = module->getParentOfType<CircuitOp>();
+  auto *moduleMatrix = cma.getModuleMatrix(module.getSymNameAttr());
+
+  auto calls = collectStepCalls(step, module, circuit);
+
+  for (const auto &call : calls) {
+    if (call.callType != CallType::MethodCall)
+      continue;
+
+    // Check if this method has ANY potential conflicts
+    if (moduleMatrix &&
+        stepHasConflictingCalls(step, module, *moduleMatrix)) {
+      std::string method =
+          (call.calleeInstance.getLeafReference().getValue() + "." +
+           call.calleeEntity.getLeafReference().getValue())
+              .str();
+      (void)Cmt2Diagnostic::info(step, "cannot promote step to static")
+          .note("method '" + method + "' has potential conflicts")
+          .note("backpressure could occur")
+          .hint("step will remain dynamic to handle backpressure correctly")
+          .withPythonSource()
+          .emit();
+      return false;
+    }
+  }
+
+  return true;
 }
 
 //===----------------------------------------------------------------------===//
@@ -447,19 +561,23 @@ void TDCCPass::processProcOp(Operation *procOp, cmt2::ModuleOp module) {
   realizeSchedule(schedule, procOp, module, builder);
 }
 
-void TDCCPass::processModule(cmt2::ModuleOp module) {
+void TDCCPass::processModule(cmt2::ModuleOp module,
+                             const ConflictMatrixAnalysis &cma) {
   LLVM_DEBUG(llvm::dbgs() << "Processing module @" << module.getSymName()
                           << "\n");
 
-  // Build group map
-  groupMap.clear();
+  // Build step map
+  stepMap.clear();
   module.walk([&](Operation *op) {
-    if (auto group = dyn_cast<ProcGroupOp>(op)) {
-      groupMap[group.getSymName()] = group;
-    } else if (auto staticGroup = dyn_cast<ProcStaticGroupOp>(op)) {
-      groupMap[staticGroup.getSymName()] = staticGroup;
+    if (auto step = dyn_cast<ProcStepOp>(op)) {
+      stepMap[step.getSymName()] = step;
+    } else if (auto staticStep = dyn_cast<ProcStaticStepOp>(op)) {
+      stepMap[staticStep.getSymName()] = staticStep;
     }
   });
+
+  // Validate static steps for backpressure issues
+  validateStaticSteps(module, cma);
 
   // Process all procedural rules and methods
   SmallVector<Operation *> procOps;
@@ -476,10 +594,13 @@ void TDCCPass::processModule(cmt2::ModuleOp module) {
 void TDCCPass::runOnOperation() {
   CircuitOp circuit = getOperation();
 
+  // Build conflict matrix analysis for backpressure validation
+  ConflictMatrixAnalysis cma(circuit);
+
   // Process each module in the circuit
   for (auto &op : circuit.getBodyRegion().front().getOperations()) {
     if (auto module = dyn_cast<cmt2::ModuleOp>(op)) {
-      processModule(module);
+      processModule(module, cma);
     }
   }
 }

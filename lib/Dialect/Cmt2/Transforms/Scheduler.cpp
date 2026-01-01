@@ -18,10 +18,10 @@ using namespace circt;
 using namespace cmt2;
 
 //===----------------------------------------------------------------------===//
-// ScheduleGroup
+// ScheduleStep
 //===----------------------------------------------------------------------===//
 
-void ScheduleGroup::print(llvm::raw_ostream &os) const {
+void ScheduleStep::print(llvm::raw_ostream &os) const {
   os << "[";
   for (size_t i = 0; i < functions.size(); ++i) {
     if (i > 0)
@@ -39,14 +39,14 @@ void ModuleScheduleResult::print(llvm::raw_ostream &os,
                                   StringAttr moduleName) const {
   os << "Schedule for module @" << moduleName.getValue() << ":\n";
   os << "[\n";
-  for (size_t i = 0; i < groups.size(); ++i) {
+  for (size_t i = 0; i < steps.size(); ++i) {
     os << "  ";
-    groups[i].print(os);
-    if (i + 1 < groups.size())
+    steps[i].print(os);
+    if (i + 1 < steps.size())
       os << ",";
     os << "\n";
-    
-    auto preventingFirings = groups[i].getPreventingFirings();
+
+    auto preventingFirings = steps[i].getPreventingFirings();
     // Print preventing firing summary if there are any violations
     if (!preventingFirings.empty()) {
       os << "\tPreventing Firing Analysis:\n";
@@ -160,33 +160,32 @@ SchedulerAnalysis::computeModuleSchedule(ModuleOp module) {
   // Step 3: Parse precedence constraints
   auto precedence = parsePrecedence(module);
 
-  // Step 4: Group functions using union-find
+  // Step 4: Step functions using union-find
   // Functions with Conflict or SequentialBefore must be in same group
-  std::vector<size_t> groupIds = groupFunctions(functions, matrix);
+  std::vector<size_t> stepIds = groupFunctions(functions, matrix);
 
   // Step 5: Organize functions by group
-  std::map<size_t, SmallVector<StringAttr>> groupMap;
+  std::map<size_t, SmallVector<StringAttr>> stepMap;
   for (size_t i = 0; i < functions.size(); ++i) {
-    groupMap[groupIds[i]].push_back(functions[i]);
+    stepMap[stepIds[i]].push_back(functions[i]);
   }
 
   
   LLVM_DEBUG(matrix->print(llvm::dbgs(), "ToSchedule"));
   
-  // Step 6: Solve scheduling for each group and analyze preventing firing
-  for (const auto &[groupId, groupFuncs] : groupMap) {
-    auto scheduled = solveGroupSchedule(groupFuncs, matrix, precedence);
+  // Step 6: Solve scheduling for each step and analyze preventing firing
+  for (const auto &[stepId, stepFuncs] : stepMap) {
+    auto scheduled = solveStepSchedule(stepFuncs, matrix, precedence);
 
-    
-    ScheduleGroup group;
+    ScheduleStep step;
 
     // Analyze preventing firing relationships
-    analyzePreventingFiring(scheduled, matrix, group);
+    analyzePreventingFiring(scheduled, matrix, step);
 
     for (auto func : scheduled) {
-      group.addFunction(func);
+      step.addFunction(func);
     }
-    result.addGroup(std::move(group));
+    result.addStep(std::move(step));
   }
 
   return result;
@@ -243,7 +242,7 @@ std::vector<size_t> SchedulerAnalysis::groupFunctions(
     }
   }
 
-  // Map roots to sequential group IDs
+  // Map roots to sequential step IDs
   std::map<size_t, size_t> rootToGroup;
   std::vector<size_t> result(n);
   size_t nextGroupId = 0;
@@ -259,17 +258,17 @@ std::vector<size_t> SchedulerAnalysis::groupFunctions(
   return result;
 }
 
-SmallVector<StringAttr> SchedulerAnalysis::solveGroupSchedule(
-    const SmallVector<StringAttr> &groupFunctions,
+SmallVector<StringAttr> SchedulerAnalysis::solveStepSchedule(
+    const SmallVector<StringAttr> &stepFunctions,
     const ModuleConflictMatrix *matrix,
     const SmallVector<SmallVector<StringAttr>> &precedence) {
 
-  size_t n = groupFunctions.size();
+  size_t n = stepFunctions.size();
 
   // Map function names to indices
   DenseMap<StringAttr, size_t> funcToIdx;
   for (size_t i = 0; i < n; ++i) {
-    funcToIdx[groupFunctions[i]] = i;
+    funcToIdx[stepFunctions[i]] = i;
   }
 
   // Build hard constraint graph from precedence constraints ONLY (fx << fy)
@@ -297,7 +296,7 @@ SmallVector<StringAttr> SchedulerAnalysis::solveGroupSchedule(
     for (size_t i = 0; i < n; ++i) {
       for (size_t j = 0; j < n; ++j) {
         if (i != j) {
-          auto rel = matrix->getRelationship(groupFunctions[i], groupFunctions[j]);
+          auto rel = matrix->getRelationship(stepFunctions[i], stepFunctions[j]);
           if (rel == Relationship::SequentialBefore) {
             // i < j means we prefer i to be scheduled before j
             softBefore[i].push_back(j);
@@ -328,7 +327,7 @@ SmallVector<StringAttr> SchedulerAnalysis::solveGroupSchedule(
       // Add remaining unscheduled functions
       for (size_t i = 0; i < n; ++i) {
         if (!scheduled[i]) {
-          result.push_back(groupFunctions[i]);
+          result.push_back(stepFunctions[i]);
         }
       }
       break;
@@ -357,7 +356,7 @@ SmallVector<StringAttr> SchedulerAnalysis::solveGroupSchedule(
 
     // Schedule the best candidate
     scheduled[bestIdx] = true;
-    result.push_back(groupFunctions[bestIdx]);
+    result.push_back(stepFunctions[bestIdx]);
 
     // Update in-degrees by removing edges from bestIdx
     for (size_t next : hardAdj[bestIdx]) {
@@ -385,14 +384,12 @@ bool SchedulerAnalysis::hasPrecedence(
 void SchedulerAnalysis::analyzePreventingFiring(
     const SmallVector<StringAttr> &scheduledFunctions,
     const ModuleConflictMatrix *matrix,
-    ScheduleGroup &group
-  ) {
+    ScheduleStep &step) {
 
   if (!matrix)
     return;
 
   size_t n = scheduledFunctions.size();
-
 
   // For each pair (i, j) where i is scheduled after j (c[i] > c[j])
   for (size_t i = 0; i < n; ++i) {
@@ -402,17 +399,13 @@ void SchedulerAnalysis::analyzePreventingFiring(
       StringAttr fj = scheduledFunctions[j];
 
       auto rel = matrix->getRelationship(fi, fj);
-      // llvm::dbgs() << fi << " " << (rel==Relationship::SequentialBefore ? "SB" : 
-      //                              rel==Relationship::Conflict ? "C" :
-      //                              "CF")
-      //   << " " << fj << "\n";
 
       // Check if fi < fj (SequentialBefore) or fj <> fi (Conflict)
-      if (rel == Relationship::SequentialBefore || rel == Relationship::Conflict)  {
+      if (rel == Relationship::SequentialBefore || rel == Relationship::Conflict) {
         // This is a preventing firing: fj scheduled before fi, but fi < fj or fj <> fi
         // Meaning: fi cannot fire because fj needs to fire first or they conflict
-        group.addPreventingFiring(fj, fi, rel);
-      } 
+        step.addPreventingFiring(fj, fi, rel);
+      }
     }
   }
 }

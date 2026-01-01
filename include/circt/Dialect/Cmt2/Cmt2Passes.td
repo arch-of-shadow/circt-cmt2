@@ -96,9 +96,9 @@ def PrintScheduler : Pass<"cmt2-print-scheduler", "cmt2::CircuitOp"> {
     4. Groups functions that must be in the same scheduling group
     5. Computes optimal ordering within each group
 
-    The output shows groups of functions where each group can be scheduled
+    The output shows steps of functions where each step can be scheduled
     independently (conflict-free with other groups), and functions within each
-    group are ordered to satisfy SequentialBefore and precedence constraints.
+    step are ordered to satisfy SequentialBefore and precedence constraints.
   }];
 }
 
@@ -136,13 +136,13 @@ def VerifyCallSequence : Pass<"cmt2-verify-call-sequence", "cmt2::CircuitOp"> {
 //===----------------------------------------------------------------------===//
 
 def CompileInvoke : Pass<"cmt2-compile-invoke", "cmt2::CircuitOp"> {
-  let summary = "Compile proc.invoke operations to groups and enables.";
+  let summary = "Compile proc.invoke operations to steps and enables.";
   let description = [{
     This pass converts `cmt2.proc.invoke` operations in procedural control flow
-    to `cmt2.proc.enable` operations with generated groups.
+    to `cmt2.proc.enable` operations with generated steps.
 
     For each `cmt2.proc.invoke`:
-    1. Creates a new `cmt2.proc.group` containing the equivalent `cmt2.call`
+    1. Creates a new `cmt2.proc.step` containing the equivalent `cmt2.call`
     2. Replaces the `cmt2.proc.invoke` with a `cmt2.proc.enable` referencing
        the generated group
 
@@ -180,7 +180,7 @@ def ProcStmtToAction : Pass<"cmt2-proc-stmt-to-action", "cmt2::CircuitOp"> {
     3. Regular cmt2.rule operations for each state transition
     4. cmt2.value operations for idle/running status
 
-    The proc.group operations are preserved and their content is inlined
+    The proc.step operations are preserved and their content is inlined
     into the generated rules.
 
     This pass must run AFTER TDCC and BEFORE ProcToGAA.

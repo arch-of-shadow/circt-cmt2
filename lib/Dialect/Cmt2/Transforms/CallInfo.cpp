@@ -11,6 +11,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "circt/Dialect/Cmt2/Transforms/CallInfo.h"
+#include "circt/Dialect/Cmt2/Transforms/ConflictMatrix.h"
 #include "mlir/IR/BuiltinOps.h"
 
 using namespace circt;
@@ -25,7 +26,7 @@ CallInfoView::CallInfoView(CircuitOp circuit) : circuit(circuit) {
   }
 }
 
-void CallInfoView::buildModuleCallInfo(ModuleOp module) {
+void CallInfoView::buildModuleCallInfo(cmt2::ModuleOp module) {
   ModuleCallInfo moduleInfo;
   llvm::StringRef moduleName = module.getSymName();
 
@@ -192,4 +193,108 @@ void CallInfoView::print(llvm::raw_ostream &os) const {
       }
     }
   }
+}
+
+//===----------------------------------------------------------------------===//
+// Step Call Collection Utilities
+//===----------------------------------------------------------------------===//
+
+llvm::SmallVector<CallInfo, 4> cmt2::collectStepCalls(mlir::Operation *step,
+                                                        cmt2::ModuleOp module,
+                                                        CircuitOp circuit) {
+  llvm::SmallVector<CallInfo, 4> calls;
+
+  // Walk all operations in the step's body region
+  step->walk([&](CallOp callOp) {
+    mlir::SymbolRefAttr calleeAttr = callOp.getCalleeAttr();
+    mlir::SymbolRefAttr methodOrValueAttr = callOp.getMethodOrValueAttr();
+
+    // Determine call type
+    CallType callType = CallType::MethodCall; // Default
+
+    // Find the target module to determine call type
+    Cmt2ModuleLike targetModule = nullptr;
+
+    if (calleeAttr.getLeafReference().getValue() == "this") {
+      targetModule = module;
+    } else {
+      // Find instance and resolve to its module
+      auto instance = mlir::SymbolTable::lookupNearestSymbolFrom<InstanceOp>(
+          module, calleeAttr);
+      if (instance) {
+        auto moduleNameAttr = instance.getModuleNameAttr().getAttr();
+        if (auto mod = mlir::SymbolTable::lookupNearestSymbolFrom<cmt2::ModuleOp>(
+                circuit, moduleNameAttr)) {
+          targetModule = mod;
+        } else if (auto extMod =
+                       mlir::SymbolTable::lookupNearestSymbolFrom<ExtModuleFirrtlOp>(
+                           circuit, moduleNameAttr)) {
+          targetModule = extMod;
+        }
+      }
+    }
+
+    // Look up callee to determine type
+    if (targetModule) {
+      Cmt2FunctionLike function =
+          targetModule.lookupFunctionLike(methodOrValueAttr.getLeafReference());
+      if (function) {
+        if (function.getFunctionKind() == FunctionKind::Value) {
+          callType = CallType::ValueCall;
+        }
+      }
+    }
+
+    calls.emplace_back(calleeAttr, methodOrValueAttr, callType);
+  });
+
+  return calls;
+}
+
+bool cmt2::stepHasConflictingCalls(mlir::Operation *step, cmt2::ModuleOp module,
+                                   const ModuleConflictMatrix &conflictMatrix) {
+  auto circuit = module->getParentOfType<CircuitOp>();
+  auto calls = collectStepCalls(step, module, circuit);
+
+  // Check if any method call has conflicts with ANY function in the module
+  for (const auto &call : calls) {
+    if (call.callType != CallType::MethodCall)
+      continue;
+
+    // Get all relationships for this call's method
+    auto ctx = module.getContext();
+    for (const auto &[pair, rel] : conflictMatrix.getRelationships()) {
+      // Check if this method is involved in any conflict relationship
+      if (pair.first == call.calleeEntity.getLeafReference() ||
+          pair.second == call.calleeEntity.getLeafReference()) {
+        if (rel == Relationship::Conflict) {
+          return true;
+        }
+      }
+    }
+  }
+
+  return false;
+}
+
+llvm::SmallVector<mlir::StringAttr, 8>
+cmt2::getConcurrentFunctions(mlir::Operation *step, cmt2::ModuleOp module) {
+  llvm::SmallVector<mlir::StringAttr, 8> concurrent;
+
+  // Get all rules and methods in the module
+  for (auto &op : module.getBodyRegion().front()) {
+    if (auto rule = llvm::dyn_cast<RuleOp>(op)) {
+      concurrent.push_back(rule.getSymNameAttr());
+    } else if (auto method = llvm::dyn_cast<MethodOp>(op)) {
+      concurrent.push_back(method.getSymNameAttr());
+    }
+  }
+
+  // Note: A more sophisticated analysis would:
+  // 1. Find which proc rule contains this step
+  // 2. Determine which other functions could fire when this step is active
+  // 3. Filter out functions in strict sequential relationship
+  // For now, we conservatively assume all functions could be concurrent
+
+  return concurrent;
 }

@@ -632,7 +632,7 @@ def MethodOp : Cmt2Op<
 
 def CallOp : Cmt2Op<
   "call", [
-    ParentOneOf<["MethodOp", "RuleOp", "ValueOp", "IfOp", "ProcGroupOp", "ProcStaticGroupOp", "ProcRuleOp", "ProcMethodOp"]>,
+    ParentOneOf<["MethodOp", "RuleOp", "ValueOp", "IfOp", "ProcStepOp", "ProcStaticStepOp", "ProcRuleOp", "ProcMethodOp"]>,
     DeclareOpInterfaceMethods<CallOpInterface>
   ]> {
   let summary = "Call Method/Value.";
@@ -689,7 +689,7 @@ def InterfaceOp : Cmt2Op<
   ]> {
   let summary = "represent a Cmt2 interface.";
   let description = [{
-    The `cmt2.interface` is a container to group methods.
+    The `cmt2.interface` is a container to step methods.
 
     Arguments:
     - `sym_name`: The symbol name of the interface.
@@ -899,32 +899,32 @@ def YieldOp : Cmt2Op<
 /// the trait for now - it can be added via interface if needed later.
 
 
-def ProcGroupOp : Cmt2Op<
-  "proc.group", [
+def ProcStepOp : Cmt2Op<
+  "proc.step", [
     HasParent<"ModuleOp">,
     Symbol,
     SingleBlock,
     NoTerminator,
     NoRegionArguments
   ]> {
-  let summary = "Dynamic group with go-done interface";
+  let summary = "Dynamic step with go-done interface";
   let description = [{
-    A group bundles operations that execute atomically when activated.
+    A step bundles operations that execute atomically when activated.
     Interface:
-    - `go` signal (input): When high, group activates
-    - `done` signal (output): High when group has completed (via group_done)
+    - `go` signal (input): When high, step activates
+    - `done` signal (output): High when step has completed (via step_done)
 
     Groups are the execution units in the procedural layer. Each group
     has an implicit go-done protocol that coordinates with the FSM.
 
     Assembly format:
     ```mlir
-    cmt2.proc.group @compute {
+    cmt2.proc.step @compute {
       %a = cmt2.call @reg_a @read() : () -> !firrtl.uint<32>
       %b = cmt2.call @reg_b @read() : () -> !firrtl.uint<32>
       %sum = firrtl.add %a, %b : (!firrtl.uint<32>, !firrtl.uint<32>) -> !firrtl.uint<33>
       cmt2.call @reg_out @write(%sum) : (!firrtl.uint<33>) -> ()
-      cmt2.proc.group_done %true : !firrtl.uint<1>
+      cmt2.proc.step_done %true : !firrtl.uint<1>
     }
     ```
   }];
@@ -935,26 +935,26 @@ def ProcGroupOp : Cmt2Op<
   }];
 }
 
-def ProcStaticGroupOp : Cmt2Op<
-  "proc.static_group", [
+def ProcStaticStepOp : Cmt2Op<
+  "proc.static_step", [
     HasParent<"ModuleOp">,
     Symbol,
     SingleBlock,
     NoTerminator,
     NoRegionArguments
   ]> {
-  let summary = "Static group with fixed latency";
+  let summary = "Static step with fixed latency";
   let description = [{
-    A static group has a known fixed latency specified at compile time.
-    Unlike dynamic groups, static groups do not need done signals at runtime
+    A static step has a known fixed latency specified at compile time.
+    Unlike dynamic steps, static steps do not need done signals at runtime
     because the completion time is known statically.
 
     Attributes:
-    - `latency`: The fixed number of cycles this group takes to complete.
+    - `latency`: The fixed number of cycles this step takes to complete.
 
     Assembly format:
     ```mlir
-    cmt2.proc.static_group @multiply <4> {
+    cmt2.proc.static_step @multiply <4> {
       // Operations with timing guards...
     }
     ```
@@ -971,13 +971,13 @@ def ProcStaticGroupOp : Cmt2Op<
 
 def ProcAssignOp : Cmt2Op<
   "proc.assign", [
-    HasParent<"ProcGroupOp">
+    HasParent<"ProcStepOp">
   ]> {
   let summary = "Guarded assignment within procedural groups";
   let description = [{
     Assigns a value to a destination when the guard is true.
-    Used in TDCC-generated groups to express state-dependent
-    assignments to FSM registers and group go signals.
+    Used in TDCC-generated steps to express state-dependent
+    assignments to FSM registers and step go signals.
 
     This operation is specific to the procedural layer and should
     NOT be confused with regular cmt2 method calls. Use `cmt2.call`
@@ -999,13 +999,13 @@ def ProcAssignOp : Cmt2Op<
   }];
 }
 
-def ProcGroupDoneOp : Cmt2Op<
-  "proc.group_done", [
-    HasParent<"ProcGroupOp">
+def ProcStepDoneOp : Cmt2Op<
+  "proc.step_done", [
+    HasParent<"ProcStepOp">
   ]> {
-  let summary = "Signal group completion";
+  let summary = "Signal step completion";
   let description = [{
-    Signals that a group has completed execution. The done signal
+    Signals that a step has completed execution. The done signal
     is a 1-bit value that becomes true when the group's work is done.
 
     For single-cycle groups, this is typically a constant true.
@@ -1013,7 +1013,7 @@ def ProcGroupDoneOp : Cmt2Op<
 
     Assembly format:
     ```mlir
-    cmt2.proc.group_done %done : !firrtl.uint<1>
+    cmt2.proc.step_done %done : !firrtl.uint<1>
     ```
   }];
   let arguments = (ins FIRRTLBaseType:$done);
@@ -1151,17 +1151,17 @@ def ProcEnableOp : Cmt2Op<
   ]> {
   let summary = "Enable a group";
   let description = [{
-    Activates a group. Gets a unique NODE_ID during TDCC.
+    Activates a step. Gets a unique NODE_ID during TDCC.
     Generates: group[go] = (fsm == NODE_ID) & !group[done]
 
     Assembly format:
     ```mlir
-    cmt2.proc.enable @groupName
+    cmt2.proc.enable @stepName
     ```
   }];
-  let arguments = (ins FlatSymbolRefAttr:$groupName);
+  let arguments = (ins FlatSymbolRefAttr:$stepName);
   let assemblyFormat = [{
-    $groupName attr-dict
+    $stepName attr-dict
   }];
 }
 
@@ -1180,7 +1180,7 @@ def ProcInvokeOp : Cmt2Op<
     method's FSM returns to idle before proceeding.
 
     CompileInvoke pass converts this to:
-    1. A generated group containing the cmt2.call
+    1. A generated step containing the cmt2.call
     2. A ProcEnableOp referencing the generated group
 
     Assembly format:
