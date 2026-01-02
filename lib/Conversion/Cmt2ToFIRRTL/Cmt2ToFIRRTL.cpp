@@ -1782,29 +1782,30 @@ LogicalResult LowerCmt2ToFIRRTLPass::createExtModules(
     }
 
     // Add ports from bind.value and bind.method operations
-    // Note: Port names are NOT prefixed with method name - they must match
-    // the argNames/bodyResNames in the bind operations exactly
+    // Port names are taken directly from argNames/bodyResNames - they should be unique
     for (auto &bodyOp : extMod.getBodyRegion().front()) {
       if (auto bindValue = dyn_cast<BindValueOp>(bodyOp)) {
         // Value methods: add ready output and result outputs
+
         // Ready port (use readyName if specified)
         if (auto readyName = bindValue.getReadyNameAttr()) {
           ports.push_back({readyName, firrtl::UIntType::get(builder.getContext(), 1),
                            Direction::Out, {}, bindValue.getLoc()});
         }
 
-        // Result outputs - use bodyResNames directly
+        // Result outputs - use names directly from bodyResNames
         auto funcType = bindValue.getFunctionType();
         auto resNames = bindValue.getBodyResNames();
         for (size_t i = 0; i < funcType.getNumResults(); ++i) {
-          StringAttr resNameAttr = i < resNames.size()
-                                       ? cast<StringAttr>(resNames[i])
-                                       : builder.getStringAttr("res" + std::to_string(i));
-          ports.push_back({resNameAttr, funcType.getResult(i),
+          StringRef portName = i < resNames.size()
+                                   ? cast<StringAttr>(resNames[i]).getValue()
+                                   : StringRef("res" + std::to_string(i));
+          ports.push_back({builder.getStringAttr(portName), funcType.getResult(i),
                            Direction::Out, {}, bindValue.getLoc()});
         }
       } else if (auto bindMethod = dyn_cast<BindMethodOp>(bodyOp)) {
         // Action methods: add enable input, ready output, arg inputs, result outputs
+
         // Enable port
         if (auto enableName = bindMethod.getEnableNameAttr()) {
           ports.push_back({enableName, firrtl::UIntType::get(builder.getContext(), 1),
@@ -1817,24 +1818,24 @@ LogicalResult LowerCmt2ToFIRRTLPass::createExtModules(
                            Direction::Out, {}, bindMethod.getLoc()});
         }
 
-        // Argument inputs - use argNames directly
+        // Argument inputs - use names directly from argNames
         auto funcType = bindMethod.getFunctionType();
         auto methodArgNames = bindMethod.getArgNames();
         for (size_t i = 0; i < funcType.getNumInputs(); ++i) {
-          StringAttr argNameAttr = i < methodArgNames.size()
-                                       ? cast<StringAttr>(methodArgNames[i])
-                                       : builder.getStringAttr("arg" + std::to_string(i));
-          ports.push_back({argNameAttr, funcType.getInput(i),
+          StringRef portName = i < methodArgNames.size()
+                                   ? cast<StringAttr>(methodArgNames[i]).getValue()
+                                   : StringRef("arg" + std::to_string(i));
+          ports.push_back({builder.getStringAttr(portName), funcType.getInput(i),
                            Direction::In, {}, bindMethod.getLoc()});
         }
 
-        // Result outputs - use bodyResNames directly
+        // Result outputs - use names directly from bodyResNames
         auto resNames = bindMethod.getBodyResNames();
         for (size_t i = 0; i < funcType.getNumResults(); ++i) {
-          StringAttr resNameAttr = i < resNames.size()
-                                       ? cast<StringAttr>(resNames[i])
-                                       : builder.getStringAttr("res" + std::to_string(i));
-          ports.push_back({resNameAttr, funcType.getResult(i),
+          StringRef portName = i < resNames.size()
+                                   ? cast<StringAttr>(resNames[i]).getValue()
+                                   : StringRef("res" + std::to_string(i));
+          ports.push_back({builder.getStringAttr(portName), funcType.getResult(i),
                            Direction::Out, {}, bindMethod.getLoc()});
         }
       }
