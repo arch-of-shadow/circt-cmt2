@@ -62,8 +62,8 @@ class ExternalModuleBuilder:
         self._args: list[tuple[str, Cmt2Type]] = []
 
         # Pending method bindings (added at finalize time)
-        self._pending_values: list[tuple[str, list, list]] = []  # (name, args, returns)
-        self._pending_methods: list[tuple[str, list, list]] = []  # (name, args, returns)
+        self._pending_values: list[dict] = []  # {name, ready_name, args, returns}
+        self._pending_methods: list[dict] = []  # {name, enable_name, ready_name, args, returns}
 
         # Scheduling constraints
         self._sequence_before: list[tuple[str, str]] = []
@@ -107,43 +107,67 @@ class ExternalModuleBuilder:
     def value(
         self,
         name: str,
+        ready_name: str | None = None,
         args: list[tuple[str, Cmt2Type]] | None = None,
-        returns: list[Cmt2Type] | None = None,
+        returns: list[tuple[str, Cmt2Type]] | None = None,
     ) -> ExternalModuleBuilder:
         """Declare a value method binding.
 
         Value methods are read-only and return data.
 
         Args:
-            name: Method name.
+            name: Value method name (used as symbol).
+            ready_name: Port name for the ready output signal.
             args: Method arguments as (name, type) pairs.
-            returns: Return types.
+            returns: Return values as (name, type) pairs.
 
         Returns:
             self for chaining.
+
+        Example:
+            fifo.value("full", ready_name="full_ready", returns=[("full_data", UInt(1))])
         """
-        self._pending_values.append((name, args or [], returns or []))
+        self._pending_values.append({
+            "name": name,
+            "ready_name": ready_name,
+            "args": args or [],
+            "returns": returns or [],
+        })
         return self
 
     def method(
         self,
         name: str,
+        enable_name: str | None = None,
+        ready_name: str | None = None,
         args: list[tuple[str, Cmt2Type]] | None = None,
-        returns: list[Cmt2Type] | None = None,
+        returns: list[tuple[str, Cmt2Type]] | None = None,
     ) -> ExternalModuleBuilder:
         """Declare an action method binding.
 
         Action methods may have side effects.
 
         Args:
-            name: Method name.
+            name: Method name (used as symbol).
+            enable_name: Port name for the enable input signal.
+            ready_name: Port name for the ready output signal.
             args: Method arguments as (name, type) pairs.
-            returns: Return types.
+            returns: Return values as (name, type) pairs.
 
         Returns:
             self for chaining.
+
+        Example:
+            fifo.method("enq", enable_name="enq_enable", ready_name="enq_ready",
+                        args=[("enq_data", UInt(32))])
         """
-        self._pending_methods.append((name, args or [], returns or []))
+        self._pending_methods.append({
+            "name": name,
+            "enable_name": enable_name,
+            "ready_name": ready_name,
+            "args": args or [],
+            "returns": returns or [],
+        })
         return self
 
     def sequence_before(self, before: str, after: str) -> ExternalModuleBuilder:
@@ -248,36 +272,50 @@ class ExternalModuleBuilder:
         mlir_loc = self._python_loc.to_mlir_location(mlir_ctx)
 
         # Add value bindings
-        for name, args, returns in self._pending_values:
+        for val_info in self._pending_values:
+            name = val_info["name"]
+            ready_name = val_info["ready_name"]
+            args = val_info["args"]
+            returns = val_info["returns"]
+
             with InsertionPoint(self._op.body.blocks[0]):
                 arg_types = [ty.to_firrtl_type(mlir_ctx) for _, ty in args]
-                ret_types = [ty.to_firrtl_type(mlir_ctx) for ty in returns]
+                ret_types = [ty.to_firrtl_type(mlir_ctx) for _, ty in returns]
                 func_type = FunctionType.get(arg_types, ret_types)
 
                 arg_name_attrs = [StringAttr.get(n, context=mlir_ctx) for n, _ in args]
-                res_name_attrs = [StringAttr.get(f"res{i}", context=mlir_ctx) for i in range(len(returns))]
+                res_name_attrs = [StringAttr.get(n, context=mlir_ctx) for n, _ in returns]
 
                 cmt2.BindValueOp(
                     sym_name=StringAttr.get(name, context=mlir_ctx),
                     function_type=TypeAttr.get(func_type),
+                    readyName=StringAttr.get(ready_name, context=mlir_ctx) if ready_name else None,
                     argNames=ArrayAttr.get(arg_name_attrs, context=mlir_ctx),
                     bodyResNames=ArrayAttr.get(res_name_attrs, context=mlir_ctx),
                     loc=mlir_loc,
                 )
 
         # Add method bindings
-        for name, args, returns in self._pending_methods:
+        for meth_info in self._pending_methods:
+            name = meth_info["name"]
+            enable_name = meth_info["enable_name"]
+            ready_name = meth_info["ready_name"]
+            args = meth_info["args"]
+            returns = meth_info["returns"]
+
             with InsertionPoint(self._op.body.blocks[0]):
                 arg_types = [ty.to_firrtl_type(mlir_ctx) for _, ty in args]
-                ret_types = [ty.to_firrtl_type(mlir_ctx) for ty in returns]
+                ret_types = [ty.to_firrtl_type(mlir_ctx) for _, ty in returns]
                 func_type = FunctionType.get(arg_types, ret_types)
 
                 arg_name_attrs = [StringAttr.get(n, context=mlir_ctx) for n, _ in args]
-                res_name_attrs = [StringAttr.get(f"res{i}", context=mlir_ctx) for i in range(len(returns))]
+                res_name_attrs = [StringAttr.get(n, context=mlir_ctx) for n, _ in returns]
 
                 cmt2.BindMethodOp(
                     sym_name=StringAttr.get(name, context=mlir_ctx),
                     function_type=TypeAttr.get(func_type),
+                    enableName=StringAttr.get(enable_name, context=mlir_ctx) if enable_name else None,
+                    readyName=StringAttr.get(ready_name, context=mlir_ctx) if ready_name else None,
                     argNames=ArrayAttr.get(arg_name_attrs, context=mlir_ctx),
                     bodyResNames=ArrayAttr.get(res_name_attrs, context=mlir_ctx),
                     loc=mlir_loc,
@@ -318,30 +356,30 @@ class ExternalModuleBuilder:
 
     def get_value_return_types(self, name: str) -> list[Cmt2Type]:
         """Get the return types for a value method."""
-        for vname, args, returns in self._pending_values:
-            if vname == name:
-                return returns
+        for val_info in self._pending_values:
+            if val_info["name"] == name:
+                return [ty for _, ty in val_info["returns"]]
         return []
 
     def get_method_return_types(self, name: str) -> list[Cmt2Type]:
         """Get the return types for a method."""
-        for mname, args, returns in self._pending_methods:
-            if mname == name:
-                return returns
+        for meth_info in self._pending_methods:
+            if meth_info["name"] == name:
+                return [ty for _, ty in meth_info["returns"]]
         return []
 
     def get_value_arg_types(self, name: str) -> list[Cmt2Type]:
         """Get the argument types for a value method."""
-        for vname, args, returns in self._pending_values:
-            if vname == name:
-                return [ty for _, ty in args]
+        for val_info in self._pending_values:
+            if val_info["name"] == name:
+                return [ty for _, ty in val_info["args"]]
         return []
 
     def get_method_arg_types(self, name: str) -> list[Cmt2Type]:
         """Get the argument types for a method."""
-        for mname, args, returns in self._pending_methods:
-            if mname == name:
-                return [ty for _, ty in args]
+        for meth_info in self._pending_methods:
+            if meth_info["name"] == name:
+                return [ty for _, ty in meth_info["args"]]
         return []
 
     def __enter__(self):
