@@ -413,7 +413,8 @@ int main(int argc, char** argv) {{
         """Generate C++ code for test sequences."""
         from .testbench import (
             ResetOp, WaitOp, DriveOp, ExpectOp,
-            CallMethodOp, WaitReadyOp
+            CallMethodOp, WaitReadyOp, WaitConditionOp,
+            CommentOp, PrintOp
         )
 
         sequence_functions = []
@@ -442,6 +443,24 @@ int main(int argc, char** argv) {{
                 elif isinstance(op, WaitReadyOp):
                     lines.append(f'    // Wait for {op.instance}.{op.method} ready')
                     lines.append(f'    while (!dut->{op.instance}_{op.method}_ready) tick();')
+                elif isinstance(op, WaitConditionOp):
+                    # Wait until condition is true with timeout
+                    lines.append(f'    {{')
+                    lines.append(f'        int timeout = {op.timeout};')
+                    lines.append(f'        while (!({op.condition}) && timeout-- > 0) tick();')
+                    lines.append(f'        if (timeout <= 0) {{')
+                    lines.append(f'            std::cerr << "TIMEOUT waiting for: {op.condition}" << std::endl;')
+                    lines.append(f'            check_passed = false;')
+                    lines.append(f'        }}')
+                    lines.append(f'    }}')
+                elif isinstance(op, CommentOp):
+                    lines.append(f'    // {op.text}')
+                elif isinstance(op, PrintOp):
+                    if op.values:
+                        val_strs = ' << " " << dut->'.join([''] + list(op.values))
+                        lines.append(f'    std::cout << "{op.message}"{val_strs} << std::endl;')
+                    else:
+                        lines.append(f'    std::cout << "{op.message}" << std::endl;')
 
             lines.append('}')
             sequence_functions.append('\n'.join(lines))

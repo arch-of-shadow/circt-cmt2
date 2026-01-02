@@ -338,6 +338,109 @@ class Circuit:
         """
         return self.emit_verilog()
 
+    def debug_pipeline(
+        self,
+        output_dir: str,
+        passes: list[str] | None = None,
+        stop_on_error: bool = True,
+    ) -> dict[str, str]:
+        """Run passes and dump IR after each pass for debugging.
+
+        This is useful for debugging pass pipeline issues. It runs each pass
+        individually and saves the IR to files in the output directory.
+
+        Args:
+            output_dir: Directory to write IR dumps.
+            passes: List of pass strings to run. If None, uses the default
+                   CMT2 compilation pipeline.
+            stop_on_error: If True, stops at first failing pass. Otherwise
+                          continues and logs errors.
+
+        Returns:
+            Dict mapping pass name to the IR after that pass (or error message).
+
+        Example:
+            results = circuit.debug_pipeline("./debug_ir", passes=[
+                "cmt2-compile-invoke",
+                "cmt2-tdcc",
+                "cmt2-proc-stmt-to-action",
+                "cmt2-proc-to-gaa",
+                "lower-cmt2-to-firrtl",
+            ])
+        """
+        import os
+        from circt.passmanager import PassManager
+
+        os.makedirs(output_dir, exist_ok=True)
+
+        # Default passes
+        if passes is None:
+            passes = [
+                # CMT2 passes
+                "cmt2-compile-invoke",
+                "cmt2-tdcc",
+                "cmt2-proc-stmt-to-action",
+                "cmt2-proc-to-gaa",
+                # Lowering to FIRRTL
+                "lower-cmt2-to-firrtl",
+                # FIRRTL passes
+                "firrtl-infer-resets",
+                "firrtl-lower-types",
+                # HW passes
+                "lower-firrtl-to-hw",
+                "lower-seq-to-sv",
+            ]
+
+        results = {}
+        cloned = self._clone_module()
+
+        # Dump initial IR
+        initial_ir = str(cloned)
+        results["00_initial"] = initial_ir
+        with open(os.path.join(output_dir, "00_initial.mlir"), "w") as f:
+            f.write(initial_ir)
+
+        for idx, pass_str in enumerate(passes, start=1):
+            pass_name = f"{idx:02d}_{pass_str.replace('-', '_')}"
+
+            # Build the pass pipeline string
+            # CMT2 passes need cmt2.circuit nesting
+            if pass_str.startswith("cmt2-"):
+                pipeline = f"builtin.module(cmt2.circuit({pass_str}))"
+            elif pass_str.startswith("firrtl-"):
+                pipeline = f"builtin.module(firrtl.circuit({pass_str}))"
+            elif pass_str == "lower-cmt2-to-firrtl":
+                pipeline = f"builtin.module({pass_str})"
+            elif pass_str == "lower-firrtl-to-hw" or pass_str == "lower-seq-to-sv":
+                pipeline = f"builtin.module({pass_str})"
+            else:
+                # Generic pass
+                pipeline = f"builtin.module({pass_str})"
+
+            try:
+                pm = PassManager.parse(pipeline, context=self._ctx.mlir_context)
+                pm.run(cloned.operation)
+
+                ir_after = str(cloned)
+                results[pass_name] = ir_after
+
+                with open(os.path.join(output_dir, f"{pass_name}.mlir"), "w") as f:
+                    f.write(ir_after)
+
+            except Exception as e:
+                error_msg = f"// Pass failed: {pass_str}\n// Error: {e}"
+                results[pass_name] = error_msg
+
+                with open(os.path.join(output_dir, f"{pass_name}_ERROR.mlir"), "w") as f:
+                    f.write(error_msg)
+                    f.write("\n\n// IR before failure:\n")
+                    f.write(str(cloned))
+
+                if stop_on_error:
+                    break
+
+        return results
+
     def _clone_module(self):
         """Clone the MLIR module for pass running.
 

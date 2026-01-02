@@ -186,6 +186,7 @@ class ModuleBuilder:
         from circt.ir import InsertionPoint, StringAttr, FlatSymbolRefAttr
         from circt.dialects import cmt2
         from .external_module import ExternalModuleBuilder
+        from .refs import ExternalInstance, MethodRef, ValueRef
 
         # Resolve instance name
         if name is None:
@@ -199,6 +200,28 @@ class ModuleBuilder:
             for arg_name, _ in module._args:
                 if arg_name in port_connections:
                     port_values.append(port_connections[arg_name].value)
+
+            with InsertionPoint(self._op.body):
+                inst_op = cmt2.InstanceOp(
+                    sym_name=StringAttr.get(name),
+                    module_name=FlatSymbolRefAttr.get(module_name),
+                    args=port_values,
+                    loc=self._circuit._ctx.location,
+                )
+
+            # Build method and value refs for ExternalInstance
+            methods = {}
+            for meth_info in module._pending_methods:
+                mname = meth_info["name"]
+                methods[mname] = MethodRef(None, None, mname)
+            values = {}
+            for val_info in module._pending_values:
+                vname = val_info["name"]
+                values[vname] = ValueRef(None, None, vname)
+
+            inst = ExternalInstance(name, module_name, methods, values, inst_op, ext_module=module)
+            self._instances[name] = inst
+            return inst
         else:
             module_name = module.name
             port_values = [
@@ -207,17 +230,17 @@ class ModuleBuilder:
                 if arg_name in port_connections
             ]
 
-        with InsertionPoint(self._op.body):
-            inst_op = cmt2.InstanceOp(
-                sym_name=StringAttr.get(name),
-                module_name=FlatSymbolRefAttr.get(module_name),
-                args=port_values,
-                loc=self._circuit._ctx.location,
-            )
+            with InsertionPoint(self._op.body):
+                inst_op = cmt2.InstanceOp(
+                    sym_name=StringAttr.get(name),
+                    module_name=FlatSymbolRefAttr.get(module_name),
+                    args=port_values,
+                    loc=self._circuit._ctx.location,
+                )
 
-        inst = Instance(name, module, port_connections, inst_op)
-        self._instances[name] = inst
-        return inst
+            inst = Instance(name, module, port_connections, inst_op)
+            self._instances[name] = inst
+            return inst
 
     # Function-like operations
 

@@ -250,7 +250,7 @@ class ExternalInstance:
     Similar to Instance, but for external FIRRTL modules bound to CMT2.
     """
 
-    __slots__ = ("_name", "_module_name", "_methods", "_values", "_op")
+    __slots__ = ("_name", "_module_name", "_methods", "_values", "_op", "_ext_module")
 
     def __init__(
         self,
@@ -259,12 +259,14 @@ class ExternalInstance:
         methods: dict[str, MethodRef],
         values: dict[str, ValueRef],
         op=None,
+        ext_module=None,
     ):
         self._name = name
         self._module_name = module_name
         self._methods = methods
         self._values = values
         self._op = op
+        self._ext_module = ext_module
 
     @property
     def name(self) -> str:
