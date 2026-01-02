@@ -557,7 +557,18 @@ void TDCCPass::processProcOp(Operation *procOp, cmt2::ModuleOp module) {
       initPreds = calculateStatesRecur(schedule, &op, initPreds, builder, module);
   }
 
-  // Step 3: Realize the schedule as hardware
+  // Step 3: Add transitions from final exits to done state
+  // The done state is maxState + 1, representing completion of the procedural block
+  // NOTE: We push directly to transitions instead of using addTransition() to avoid
+  // updating maxState, since doneState is calculated as maxState + 1 in realizeSchedule
+  uint64_t doneState = schedule.maxState + 1;
+  for (auto &exitPred : initPreds) {
+    schedule.transitions.push_back({exitPred.state, doneState, exitPred.guard});
+    LLVM_DEBUG(llvm::dbgs() << "  Added final transition: " << exitPred.state
+                            << " -> " << doneState << " (done state)\n");
+  }
+
+  // Step 4: Realize the schedule as hardware
   realizeSchedule(schedule, procOp, module, builder);
 }
 

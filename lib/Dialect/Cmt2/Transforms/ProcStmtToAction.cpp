@@ -119,7 +119,8 @@ void ProcStmtToActionPass::generateStateRules(
   if (enablesAttr) {
     for (auto enableAttr : enablesAttr) {
       auto dict = cast<DictionaryAttr>(enableAttr);
-      auto stepRef = dict.getAs<FlatSymbolRefAttr>("group");
+      // TDCC generates enables with "step" attribute, not "group"
+      auto stepRef = dict.getAs<FlatSymbolRefAttr>("step");
       auto stateAttr = dict.getAs<IntegerAttr>("state");
       if (stepRef && stateAttr) {
         stepToState[stepRef.getValue()] = stateAttr.getInt();
@@ -140,17 +141,28 @@ void ProcStmtToActionPass::generateStateRules(
     }
   }
 
-  // For each step, generate a rule
+  // Group steps by state (for parallel blocks, multiple steps share the same state)
+  // We store Operation* to handle both ProcStepOp and ProcStaticStepOp
+  DenseMap<uint64_t, SmallVector<Operation *>> stateToSteps;
   for (auto &op : module.getBodyRegion().front()) {
-    auto step = dyn_cast<ProcStepOp>(op);
-    if (!step)
+    StringRef stepName;
+    if (auto step = dyn_cast<ProcStepOp>(op)) {
+      stepName = step.getSymName();
+    } else if (auto staticStep = dyn_cast<ProcStaticStepOp>(op)) {
+      stepName = staticStep.getSymName();
+    } else {
       continue;
+    }
 
-    auto stateIt = stepToState.find(step.getSymName());
+    auto stateIt = stepToState.find(stepName);
     if (stateIt == stepToState.end())
       continue;
 
-    uint64_t state = stateIt->second;
+    stateToSteps[stateIt->second].push_back(&op);
+  }
+
+  // For each state, generate a single rule that combines all steps
+  for (auto &[state, steps] : stateToSteps) {
     uint64_t nextState = stateTransitions.lookup(state);
 
     // Create rule: @{ruleName}_state{state}
@@ -202,16 +214,28 @@ void ProcStmtToActionPass::generateStateRules(
 
     guardBuilder.create<ReturnOp>(loc, ValueRange{guardResult});
 
-    // Build body region: execute step + write next state
+    // Build body region: execute all steps in this state + write next state
     Block *bodyBlock = new Block();
     stateRule.getBody().push_back(bodyBlock);
     OpBuilder bodyBuilder(bodyBlock, bodyBlock->begin());
 
-    // Clone step body (except step_done)
-    IRMapping bodyMapping;
-    for (auto &stepOp : step.getBody().front()) {
-      if (!isa<ProcStepDoneOp>(stepOp)) {
-        bodyBuilder.clone(stepOp, bodyMapping);
+    // Clone all step bodies (except step_done)
+    // For parallel blocks, all steps execute simultaneously
+    for (auto *stepOp : steps) {
+      IRMapping bodyMapping;
+      Region *bodyRegion = nullptr;
+      if (auto step = dyn_cast<ProcStepOp>(stepOp)) {
+        bodyRegion = &step.getBody();
+      } else if (auto staticStep = dyn_cast<ProcStaticStepOp>(stepOp)) {
+        bodyRegion = &staticStep.getBody();
+      }
+
+      if (bodyRegion && !bodyRegion->empty()) {
+        for (auto &op : bodyRegion->front()) {
+          if (!isa<ProcStepDoneOp>(op)) {
+            bodyBuilder.clone(op, bodyMapping);
+          }
+        }
       }
     }
 
@@ -228,7 +252,7 @@ void ProcStmtToActionPass::generateStateRules(
 
     LLVM_DEBUG(llvm::dbgs() << "Generated rule @" << stateRuleName
                             << " for state " << state << " -> " << nextState
-                            << "\n");
+                            << " with " << steps.size() << " step(s)\n");
   }
 
   // Generate reset rule: when in done state, go back to idle
