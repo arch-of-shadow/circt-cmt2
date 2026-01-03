@@ -3,7 +3,15 @@ add_circt_dialect_library(CIRCTCmt2Transforms
   # InferRules.cpp
   Test.cpp
   CompileInvoke.cpp
+  CompileStatic.cpp
+  ControlCollapsing.cpp
   Diagnostics.cpp
+  SimplifyStaticGuards.cpp
+  StaticFSMAllocation.cpp
+  StaticInference.cpp
+  StaticPromotion.cpp
+  TimingInference.cpp
+  TimingValidation.cpp
   TDCC.cpp
   ProcStmtToAction.cpp
   ProcToGAA.cpp
@@ -31,6 +39,7 @@ add_circt_dialect_library(CIRCTCmt2Transforms
   CIRCTFIRRTL
   CIRCTSupport
   CIRCTCmt2
+  CIRCTCmt2Analysis
   CIRCTCmt2ToFIRRTL
   MLIRIR
   MLIRPass

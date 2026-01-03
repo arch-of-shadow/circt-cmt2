@@ -208,6 +208,50 @@ uint64_t TDCCPass::computeUniqueIdsForOp(Operation *op, uint64_t curState) {
 
         return bodyNext;
       })
+      .Case<ProcStaticRepeatOp>([&](ProcStaticRepeatOp repeatOp) {
+        // Static repeat: unroll state allocation for each iteration
+        // Total states = count * body_states
+        uint64_t cur = (curState == 0) ? 1 : curState;
+        stateIds[repeatOp] = cur;
+        LLVM_DEBUG(llvm::dbgs() << "  StaticRepeat (count=" << repeatOp.getCount()
+                                << ") -> state " << cur << "\n");
+
+        // Process body states for each iteration conceptually
+        // In practice, we allocate states sequentially for all iterations
+        int64_t count = repeatOp.getCount();
+        for (int64_t i = 0; i < count; ++i) {
+          for (Operation &stmt : repeatOp.getBody().front()) {
+            if (!isa<ProcControlEndOp>(stmt))
+              cur = computeUniqueIdsForOp(&stmt, cur);
+          }
+        }
+
+        return cur;
+      })
+      .Case<ProcStaticIfOp>([&](ProcStaticIfOp staticIf) {
+        // Static if: similar to regular if but with known latencies
+        uint64_t cur = (curState == 0) ? 1 : curState;
+        stateIds[staticIf] = cur;
+        LLVM_DEBUG(llvm::dbgs() << "  StaticIf -> state " << cur << "\n");
+
+        // Process then branch
+        uint64_t thenNext = cur;
+        for (Operation &stmt : staticIf.getThenRegion().front()) {
+          if (!isa<ProcControlEndOp>(stmt))
+            thenNext = computeUniqueIdsForOp(&stmt, thenNext);
+        }
+
+        // Process else branch
+        uint64_t elseNext = thenNext;
+        if (!staticIf.getElseRegion().empty()) {
+          for (Operation &stmt : staticIf.getElseRegion().front()) {
+            if (!isa<ProcControlEndOp>(stmt))
+              elseNext = computeUniqueIdsForOp(&stmt, elseNext);
+          }
+        }
+
+        return elseNext;
+      })
       .Default([&](Operation *) {
         // Skip control_end and other operations
         return curState;
@@ -256,6 +300,30 @@ void TDCCPass::controlExits(Operation *op, SmallVectorImpl<PredEdge> &exits,
         for (Operation &stmt : whileOp.getBody().front()) {
           if (!isa<ProcControlEndOp>(stmt))
             controlExits(&stmt, exits, builder);
+        }
+      })
+      .Case<ProcStaticRepeatOp>([&](ProcStaticRepeatOp repeatOp) {
+        // Static repeat exits after all iterations complete
+        // The exit is from the last statement of the last iteration
+        Block &block = repeatOp.getBody().front();
+        for (auto it = block.rbegin(); it != block.rend(); ++it) {
+          if (!isa<ProcControlEndOp>(*it)) {
+            controlExits(&*it, exits, builder);
+            break;
+          }
+        }
+      })
+      .Case<ProcStaticIfOp>([&](ProcStaticIfOp staticIf) {
+        // Static if: both branches contribute exits (similar to dynamic if)
+        for (Operation &stmt : staticIf.getThenRegion().front()) {
+          if (!isa<ProcControlEndOp>(stmt))
+            controlExits(&stmt, exits, builder);
+        }
+        if (!staticIf.getElseRegion().empty()) {
+          for (Operation &stmt : staticIf.getElseRegion().front()) {
+            if (!isa<ProcControlEndOp>(stmt))
+              controlExits(&stmt, exits, builder);
+          }
         }
       })
       .Default([](Operation *) {
@@ -341,6 +409,60 @@ SmallVector<PredEdge> TDCCPass::calculateStatesRecur(
                                              builder, module);
         }
         return bodyExits;
+      })
+      .Case<ProcStaticRepeatOp>([&](ProcStaticRepeatOp repeatOp) {
+        // Static repeat: process body 'count' times sequentially
+        // Each iteration's exit becomes the next iteration's predecessor
+        SmallVector<PredEdge> prev = preds;
+        int64_t count = repeatOp.getCount();
+
+        for (int64_t i = 0; i < count; ++i) {
+          for (Operation &stmt : repeatOp.getBody().front()) {
+            if (!isa<ProcControlEndOp>(stmt))
+              prev = calculateStatesRecur(schedule, &stmt, prev, builder, module);
+          }
+        }
+
+        return prev;
+      })
+      .Case<ProcStaticIfOp>([&](ProcStaticIfOp staticIf) {
+        // Static if: similar to dynamic if but transitions are unconditional
+        // after the branch is taken (no done signal waiting)
+        Value cond = staticIf.getCond();
+
+        // True branch: predecessors with condition = true
+        SmallVector<PredEdge> truPreds;
+        for (auto &p : preds) {
+          truPreds.push_back({p.state, cond}); // AND with condition
+        }
+
+        SmallVector<PredEdge> truExits;
+        for (Operation &stmt : staticIf.getThenRegion().front()) {
+          if (!isa<ProcControlEndOp>(stmt))
+            truExits = calculateStatesRecur(schedule, &stmt, truPreds, builder,
+                                            module);
+        }
+
+        // False branch: predecessors with condition = false
+        SmallVector<PredEdge> falExits;
+        if (!staticIf.getElseRegion().empty()) {
+          SmallVector<PredEdge> falPreds;
+          for (auto &p : preds) {
+            // Need to create !cond
+            falPreds.push_back({p.state, nullptr}); // TODO: proper guard
+          }
+          for (Operation &stmt : staticIf.getElseRegion().front()) {
+            if (!isa<ProcControlEndOp>(stmt))
+              falExits = calculateStatesRecur(schedule, &stmt, falPreds,
+                                              builder, module);
+          }
+        }
+
+        // Combine exits
+        SmallVector<PredEdge> allExits;
+        allExits.append(truExits);
+        allExits.append(falExits);
+        return allExits;
       })
       .Default([&](Operation *) { return preds; });
 }

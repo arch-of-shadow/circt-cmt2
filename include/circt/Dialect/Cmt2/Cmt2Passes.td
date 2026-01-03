@@ -209,6 +209,234 @@ def ProcToGAA : Pass<"cmt2-proc-to-gaa", "cmt2::CircuitOp"> {
   }];
 }
 
+//===----------------------------------------------------------------------===//
+// Static Control Passes
+//===----------------------------------------------------------------------===//
+
+def StaticInference : Pass<"cmt2-static-inference", "cmt2::CircuitOp"> {
+  let summary = "Infer latencies and mark promotable control structures.";
+  let description = [{
+    This pass performs static latency inference on procedural control
+    structures and marks which dynamic control can be promoted to static.
+
+    The algorithm:
+    1. Post-order traversal of modules for invoke latency propagation
+    2. Recursively computes latencies for control structures:
+       - seq: sum of child latencies
+       - par: max of child latencies
+       - if/static_if: max of branch latencies
+       - while: unknown (not promotable) unless @bound attribute
+       - static_repeat: count * body_latency
+       - enable: latency from step's @latency attribute or 1
+
+    3. Marks control with "promotable" attribute and computed latency
+    4. Steps with static_step are automatically promotable
+
+    This pass should run BEFORE StaticPromotion.
+  }];
+}
+
+def StaticPromotion : Pass<"cmt2-static-promotion", "cmt2::CircuitOp"> {
+  let summary = "Promote dynamic control to static when beneficial.";
+  let description = [{
+    This pass converts dynamic procedural control to static control when
+    it meets promotion heuristics and has been marked promotable by
+    StaticInference.
+
+    Promotion heuristics:
+    1. Threshold: Minimum control size (approximate FSM transitions needed)
+    2. Cycle limit: Maximum latency allowed for promotion
+    3. If-diff limit: Maximum latency difference between if-branches
+
+    The pass:
+    1. Identifies promotable control sequences
+    2. Converts proc.seq to static seq (when all children are static)
+    3. Converts proc.par to static par (when all children are static)
+    4. Converts proc.if to proc.static_if (when both branches promotable)
+    5. Converts proc.while with @bound to proc.static_repeat
+
+    This pass should run AFTER StaticInference and BEFORE TDCC.
+  }];
+
+  let options = [
+    Option<"threshold", "threshold", "unsigned", /*default=*/"5",
+           "Minimum control size for promotion">,
+    Option<"cycleLimit", "cycle-limit", "unsigned", /*default=*/"100",
+           "Maximum latency for promotion">,
+    Option<"ifDiffLimit", "if-diff-limit", "unsigned", /*default=*/"10",
+           "Maximum if-branch latency difference">
+  ];
+}
+
+def CompileStatic : Pass<"cmt2-compile-static", "cmt2::CircuitOp"> {
+  let summary = "Compile static control to optimized FSM hardware.";
+  let description = [{
+    This pass compiles static control structures to hardware with
+    optimized FSM implementations.
+
+    The algorithm:
+    1. Flattens nested static control into a single static group
+    2. Computes timing offsets for each assignment
+    3. Builds FSM tree structure tracking parent-child relationships
+    4. Uses graph coloring to minimize FSM registers through sharing
+    5. Generates counter-based FSM with configurable encoding
+
+    Static control handling:
+    - static_seq: concatenated timing with offset accumulation
+    - static_par: parallel assignments at cycle 0 (or colored FSMs)
+    - static_if: conditional capture at cycle 0, guarded branches
+    - static_repeat: body * count with cycle multiplication
+
+    FSM encoding options:
+    - Binary: log2(states) bits, more compact for large FSMs
+    - One-hot: one bit per state, faster transitions
+
+    This pass should run AFTER StaticPromotion and can replace TDCC
+    for fully static control.
+  }];
+
+  let options = [
+    Option<"oneHotThreshold", "one-hot-threshold", "unsigned", /*default=*/"8",
+           "Use one-hot encoding for FSMs with <= this many states">
+  ];
+}
+
+def ControlCollapsing : Pass<"cmt2-control-collapsing", "cmt2::CircuitOp"> {
+  let summary = "Collapse and simplify procedural control structures.";
+  let description = [{
+    This pass simplifies procedural control by collapsing redundant
+    structures and merging compatible operations.
+
+    Transformations:
+    1. Flatten nested seq: seq { seq { A; B }; C } -> seq { A; B; C }
+    2. Flatten nested par: par { par { A; B }; C } -> par { A; B; C }
+    3. Remove empty seq/par
+    4. Merge sequential enables: seq { enable @a; enable @b } -> enable @merged
+       when @a and @b are conflict-free
+    5. Remove single-child seq/par wrappers
+
+    This pass should run AFTER StaticPromotion and BEFORE TDCC.
+  }];
+}
+
+def SimplifyStaticGuards : Pass<"cmt2-simplify-static-guards", "cmt2::CircuitOp"> {
+  let summary = "Simplify timing guards in static control.";
+  let description = [{
+    This pass simplifies complex timing guards in static groups by
+    merging overlapping timing intervals.
+
+    For example:
+    - `(condition) & @[2:8] & @[5:10]` -> `(condition) & @[5:8]`
+    - `@[0:3] & @[0:5]` -> `@[0:3]`
+
+    This reduces the complexity of guard logic in the generated hardware.
+  }];
+}
+
+//===----------------------------------------------------------------------===//
+// Cycle-Precise Timing Passes
+//===----------------------------------------------------------------------===//
+
+def TimingInference : Pass<"cmt2-timing-inference", "cmt2::CircuitOp"> {
+  let summary = "Infer cycle-precise timing for methods and steps.";
+  let description = [{
+    This pass performs cycle-precise timing inference on CMT2 modules.
+    It analyzes method contracts and propagates timing information through
+    the module hierarchy.
+
+    The algorithm:
+    1. Post-order traversal of modules (bottom-up through instance hierarchy)
+    2. For each module:
+       - Collect timing from bound methods (external module contracts)
+       - Infer timing for proc.method ops based on their body
+       - Infer timing for proc.static_step ops based on their calls
+    3. Propagate timing through calls to determine:
+       - Minimum latency required for steps
+       - Whether methods can be promoted to static
+       - Initiation intervals for pipelined operations
+
+    The pass adds/updates timing attributes:
+    - `static_latency` on proc.method ops
+    - `interval` on proc.method and proc.static_step ops
+    - `arg_timing` and `result_timing` on calls (if inferrable)
+
+    This pass should run BEFORE TimingValidation.
+  }];
+
+  let options = [
+    Option<"inferCallTiming", "infer-call-timing", "bool", /*default=*/"true",
+           "Infer timing annotations for calls when missing">,
+    Option<"promoteToStatic", "promote-to-static", "bool", /*default=*/"true",
+           "Add static_latency to methods when timing is deterministic">
+  ];
+}
+
+def TimingValidation : Pass<"cmt2-timing-validation", "cmt2::CircuitOp"> {
+  let summary = "Validate cycle-precise timing constraints.";
+  let description = [{
+    This pass validates that all cycle-precise timing constraints are
+    satisfied throughout the design.
+
+    Validation checks:
+    1. Call-site timing compatibility:
+       - Result timing >= method output latency
+       - Arg timing stable during method input window
+       - All timing within parent step bounds
+    2. Pipelined call spacing:
+       - Calls to same pipelined method respect initiation interval
+    3. Step timing consistency:
+       - Static step latency covers all contained operations
+       - No timing overlaps that violate resource constraints
+
+    The pass emits detailed diagnostics for any violations, including:
+    - Source location of violating operation
+    - Expected vs actual timing values
+    - Suggested fixes when applicable
+
+    This pass should run AFTER TimingInference.
+  }];
+
+  let options = [
+    Option<"strict", "strict", "bool", /*default=*/"false",
+           "Require explicit timing on all calls in static steps">
+  ];
+}
+
+def StaticFSMAllocation : Pass<"cmt2-static-fsm-allocation", "cmt2::CircuitOp"> {
+  let summary = "Allocate FSM states for static control timing.";
+  let description = [{
+    This pass maps cycle-precise timing intervals to FSM states, preparing
+    for hardware code generation.
+
+    The algorithm:
+    1. Walk all static steps in each module
+    2. For each call with timing annotations:
+       - Extract timing intervals (start, end cycles)
+       - Compute which FSM states are "live" for the operation
+       - Build state → assignment map
+    3. Compute FSM bitwidth:
+       - Binary encoding: log2(max_state + 1) bits
+       - One-hot encoding: one bit per state (for small FSMs)
+    4. Optionally perform FSM sharing analysis via graph coloring
+
+    The pass annotates static steps with:
+    - `fsm_states`: Total number of FSM states needed
+    - `fsm_encoding`: Binary or one-hot
+    - `fsm_bitwidth`: Number of bits for FSM register
+    - `state_assignments`: Map from state to active assignments
+
+    This pass should run AFTER TimingInference and TimingValidation,
+    and BEFORE CompileStatic.
+  }];
+
+  let options = [
+    Option<"oneHotCutoff", "one-hot-cutoff", "unsigned", /*default=*/"8",
+           "Use one-hot encoding for FSMs with <= this many states">,
+    Option<"enableSharing", "enable-sharing", "bool", /*default=*/"false",
+           "Enable FSM sharing via graph coloring (experimental)">
+  ];
+}
+
 // def InferRules : Pass<"cmt2-infer-rules", "cmt2::CircuitOp"> {
 //   let summary = "generate all Cmt2::RuleRefOp for a circuit.";
 //   let description = [{
