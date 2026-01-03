@@ -8,6 +8,11 @@ This document outlines the design and implementation plan for four major improve
 2. [PyCMT2 Examples Cleanup and End-to-End Flow](#2-pycmt2-examples-cleanup-and-end-to-end-flow)
 3. [Source Location Tracing](#3-source-location-tracing)
 4. [Debugging Infrastructure](#4-debugging-infrastructure)
+5. [Implementation Roadmap](#5-implementation-roadmap)
+6. [Testing Strategy](#6-testing-strategy)
+7. [Summary](#7-summary)
+8. [Implementation Status](#8-implementation-status)
+9. [Test Suite Issues (TODO)](#9-test-suite-issues-todo)
 
 ---
 
@@ -1248,3 +1253,109 @@ As of 2026-01-02, the following has been implemented:
 | Python Debugger Bindings | ⏳ Pending | Low priority - Python interpreter covers most use cases |
 
 **Total Progress: 98% complete (85/87 tasks)**
+
+---
+
+## 9. Test Suite Issues (TODO)
+
+**Identified:** 2026-01-04
+
+The CMT2 test suite has several failing tests that need attention. These are pre-existing issues unrelated to the cycle-precise timing implementation.
+
+### 9.1 UNRESOLVED Tests (Missing RUN Lines)
+
+These tests have no `RUN:` directive and cannot be executed. They may be example/documentation files not intended as automated tests, or they need RUN lines added.
+
+| Test File | Issue | Priority | Notes |
+|-----------|-------|----------|-------|
+| `virtual-interface.mlir` | No RUN line | Low | May be documentation/example |
+| `mempool.mlir` | No RUN line | Low | May be documentation/example |
+| `mempool_small.mlir` | No RUN line | Low | May be documentation/example |
+| `fifo1-push.mlir` | No RUN line | Low | May be documentation/example |
+
+**TODO:** Determine if these files should be tests or examples. Either add RUN lines or move to examples directory.
+
+### 9.2 Type Mixing Issues
+
+Several tests incorrectly use `hw.constant` with FIRRTL types. `hw.constant` requires HW types (e.g., `i1`, `i32`), not FIRRTL types (e.g., `!firrtl.uint<1>`).
+
+| Test File | Issue | Priority | Fix |
+|-----------|-------|----------|-----|
+| `inline.mlir` | `hw.constant 1 : !firrtl.uint<1>` | High | Change to `firrtl.constant 1 : !firrtl.uint<1>` |
+| `two-counter.mlir` | Similar type mixing | Medium | Audit and fix constant types |
+| `if-test.mlir` | Similar type mixing | Medium | Audit and fix constant types |
+| `value.mlir` | Similar type mixing | Medium | Audit and fix constant types |
+| `instance-graph.mlir` | Similar type mixing | Medium | Audit and fix constant types |
+| `interface-inline.mlir` | Similar type mixing | Medium | Audit and fix constant types |
+| `interface-test.mlir` | Similar type mixing | Medium | Audit and fix constant types |
+| `proc-backpressure.mlir` | Similar type mixing | Medium | Audit and fix constant types |
+
+**TODO:** Audit all failing tests for `hw.constant` usage with FIRRTL types and replace with `firrtl.constant`.
+
+### 9.3 Lowering Issues
+
+The `lower-cmt2-to-firrtl` pass creates duplicate FIRRTL module definitions in some cases.
+
+| Test File | Issue | Priority | Notes |
+|-----------|-------|----------|-------|
+| `hello.mlir` | `Reg32` FIRRTL module created twice | High | Symbol redefinition during lowering |
+| `proc-e2e-simple.mlir` | Similar lowering issue | Medium | Investigate duplicate module creation |
+
+**TODO:** Debug the `Cmt2ToFIRRTL` pass to find why external FIRRTL modules are being duplicated during conversion.
+
+### 9.4 Attribute Parsing Issues
+
+Some tests use outdated attribute syntax for `cmt2.bind.value` operations.
+
+| Test File | Issue | Priority | Notes |
+|-----------|-------|----------|-------|
+| `gcd.mlir` | Invalid attribute syntax in `cmt2.bind.value` | High | `ready = @readReady` should use different syntax |
+
+**TODO:** Update `gcd.mlir` to use correct attribute syntax, or update the parser if the syntax should be supported.
+
+### 9.5 FileCheck Pattern Mismatches
+
+Some tests have FileCheck patterns that don't match the current output.
+
+| Test File | Issue | Priority | Notes |
+|-----------|-------|----------|-------|
+| `proc-to-gaa.mlir` | Output doesn't match CHECK patterns | Medium | Patterns may be outdated after pass changes |
+
+**TODO:** Re-run the pass and update FileCheck patterns to match current output.
+
+### 9.6 Missing Dependencies
+
+Some tests reference files that don't exist.
+
+| Test File | Issue | Priority | Notes |
+|-----------|-------|----------|-------|
+| `proc-conflict-test.mlir` | Missing `proc-conflict-test-script.txt` | High | Test references non-existent script file |
+
+**TODO:** Create the missing script file or update the test to not require it.
+
+### 9.7 Summary
+
+| Category | Count | Priority |
+|----------|-------|----------|
+| Missing RUN lines | 4 | Low |
+| Type mixing (hw vs firrtl) | 8 | High |
+| Lowering duplicates | 2 | High |
+| Attribute parsing | 1 | High |
+| FileCheck mismatches | 1 | Medium |
+| Missing dependencies | 1 | High |
+| **Total** | **17** | |
+
+### 9.8 Recommended Fix Order
+
+1. **High Priority (Blocking Issues)**
+   - Fix `inline.mlir` type mixing (simple fix)
+   - Fix `gcd.mlir` attribute syntax
+   - Fix `hello.mlir` module duplication in lowering
+   - Create missing `proc-conflict-test-script.txt`
+
+2. **Medium Priority (Test Maintenance)**
+   - Audit and fix type mixing in remaining tests
+   - Update `proc-to-gaa.mlir` FileCheck patterns
+
+3. **Low Priority (Cleanup)**
+   - Decide fate of files without RUN lines (tests vs examples)
