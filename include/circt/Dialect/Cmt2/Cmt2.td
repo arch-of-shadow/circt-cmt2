@@ -29,7 +29,7 @@ include "circt/Dialect/HW/HWTypes.td"
 
 include "circt/Dialect/Cmt2/Cmt2OpInterfaces.td"
 include "circt/Dialect/Cmt2/Cmt2Dialect.td"
-// include "circt/Dialect/Cmt2/Cmt2Attributes.td"
+include "circt/Dialect/Cmt2/Cmt2Attributes.td"
 // include "circt/Dialect/Cmt2/Cmt2Types.td"
 include "circt/Dialect/Cmt2/Cmt2Ops.td"
 

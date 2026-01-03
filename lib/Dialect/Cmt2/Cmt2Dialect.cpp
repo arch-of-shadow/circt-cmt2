@@ -11,6 +11,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "circt/Dialect/Cmt2/Cmt2Dialect.h"
+#include "circt/Dialect/Cmt2/Cmt2Attributes.h"
 #include "circt/Dialect/Cmt2/Cmt2Ops.h"
 
 using namespace circt;
@@ -18,10 +19,16 @@ using namespace cmt2;
 // StringRef InstanceOp::instanceName() { return getName(); }
 
 void Cmt2Dialect::initialize() {
+  // Register attributes.
+  registerAttributes();
+
+  // Register types.
   addTypes<
 #define GET_TYPEDEF_LIST
 #include "circt/Dialect/Cmt2/Cmt2Types.cpp.inc"
       >();
+
+  // Register operations.
   addOperations<
 #define GET_OP_LIST
 #include "circt/Dialect/Cmt2/Cmt2.cpp.inc"

@@ -3,10 +3,12 @@ add_circt_dialect_doc(Cmt2 cmt2)
 
 set(LLVM_TARGET_DEFINITIONS Cmt2.td)
 
-# mlir_tablegen(Cmt2Attributes.h.inc -gen-attrdef-decls)
-# mlir_tablegen(Cmt2Attributes.cpp.inc -gen-attrdef-defs)
-# add_public_tablegen_target(CIRCTCmt2AttrsIncGen)
-# add_dependencies(circt-headers CIRCTCmt2AttrsIncGen)
+mlir_tablegen(Cmt2Attributes.h.inc -gen-attrdef-decls -attrdefs-dialect=cmt2)
+mlir_tablegen(Cmt2Attributes.cpp.inc -gen-attrdef-defs -attrdefs-dialect=cmt2)
+mlir_tablegen(Cmt2Enums.h.inc -gen-enum-decls)
+mlir_tablegen(Cmt2Enums.cpp.inc -gen-enum-defs)
+add_public_tablegen_target(CIRCTCmt2AttrsIncGen)
+add_dependencies(circt-headers CIRCTCmt2AttrsIncGen)
 
 set(LLVM_TARGET_DEFINITIONS Cmt2OpInterfaces.td)
 mlir_tablegen(Cmt2OpInterfaces.h.inc -gen-op-interface-decls)
