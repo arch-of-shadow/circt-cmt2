@@ -774,14 +774,155 @@ void ProcRuleOp::getAsmBlockArgumentNames(Region &region,
 //===----------------------------------------------------------------------===//
 
 ParseResult ProcMethodOp::parse(OpAsmParser &parser, OperationState &result) {
-  return parseProcFunctionLikeOp(parser, result, /*hasBodyResNames=*/true);
+  auto builder = parser.getBuilder();
+
+  // Parse the symbol name
+  StringAttr nameAttr;
+  if (parser.parseSymbolName(nameAttr, SymbolTable::getSymbolAttrName(),
+                             result.attributes))
+    return failure();
+
+  // Parse optional `static<latency>`
+  if (succeeded(parser.parseOptionalKeyword("static"))) {
+    if (parser.parseLess())
+      return failure();
+    int64_t latency;
+    if (parser.parseInteger(latency))
+      return failure();
+    if (parser.parseGreater())
+      return failure();
+    result.addAttribute("static_latency", builder.getI64IntegerAttr(latency));
+  }
+
+  // Parse the argument list
+  SmallVector<OpAsmParser::Argument> args;
+  if (parser.parseArgumentList(args, OpAsmParser::Delimiter::OptionalParen,
+                                /*allowType=*/true, /*allowAttrs=*/false))
+    return failure();
+
+  // Extract argument names and types
+  SmallVector<StringRef> argNames;
+  SmallVector<Type> argTypes;
+  for (auto &arg : args) {
+    argNames.push_back(arg.ssaName.name.drop_front());
+    argTypes.push_back(arg.type);
+  }
+
+  // Parse optional `->` and result types
+  SmallVector<Type> resTypes;
+  if (succeeded(parser.parseOptionalArrow())) {
+    if (parser.parseLParen())
+      return failure();
+    if (parser.parseOptionalRParen()) {
+      if (parser.parseTypeList(resTypes) || parser.parseRParen())
+        return failure();
+    }
+  }
+
+  // Store argument names and function type
+  result.addAttribute("argNames", builder.getStrArrayAttr(argNames));
+  auto funcType = builder.getFunctionType(argTypes, resTypes);
+  result.addAttribute("function_type", TypeAttr::get(funcType));
+
+  // Initialize bodyResNames
+  SmallVector<Attribute> resNames;
+  for (size_t i = 0; i < resTypes.size(); ++i)
+    resNames.push_back(builder.getStringAttr("res" + std::to_string(i)));
+  result.addAttribute("bodyResNames", builder.getArrayAttr(resNames));
+
+  // Parse optional attribute dict
+  if (parser.parseOptionalAttrDictWithKeyword(result.attributes))
+    return failure();
+
+  // Parse guard region (with shared arguments)
+  auto *guardRegion = result.addRegion();
+  if (parser.parseRegion(*guardRegion, args))
+    return failure();
+
+  // Parse "control" keyword and control region (no arguments)
+  if (parser.parseKeyword("control"))
+    return failure();
+
+  auto *controlRegion = result.addRegion();
+  if (parser.parseRegion(*controlRegion, {}))
+    return failure();
+
+  // Handle guard region - add implicit terminator if needed
+  OpBuilder opBuilder(builder.getContext());
+  if (guardRegion->empty()) {
+    Block *guardBlock = new Block();
+    guardBlock->addArguments(
+        argTypes, SmallVector<Location>(argTypes.size(), result.location));
+    guardRegion->push_back(guardBlock);
+  }
+  Block &guardBlock = guardRegion->front();
+  if (guardBlock.empty() || !guardBlock.back().hasTrait<OpTrait::IsTerminator>()) {
+    opBuilder.setInsertionPointToEnd(&guardBlock);
+    opBuilder.create<ReturnOp>(result.location);
+  }
+
+  // Handle control region - ensure it's not empty and has a terminator
+  if (controlRegion->empty()) {
+    Block *controlBlock = new Block();
+    controlRegion->push_back(controlBlock);
+  }
+  Block &controlBlock = controlRegion->front();
+  if (controlBlock.empty() || !controlBlock.back().hasTrait<OpTrait::IsTerminator>()) {
+    opBuilder.setInsertionPointToEnd(&controlBlock);
+    opBuilder.create<ProcControlEndOp>(result.location);
+  }
+
+  return success();
 }
 
 void ProcMethodOp::print(OpAsmPrinter &p) {
   p << ' ';
   p.printSymbolName(getSymName());
-  printProcFunctionLikeOp(p, *this, getArgNames(), getFunctionType(),
-                          getGuard(), getControl());
+
+  // Print optional `static<latency>`
+  if (auto latency = getStaticLatency()) {
+    p << " static<" << *latency << ">";
+  }
+
+  auto funcType = getFunctionType();
+  auto argTypes = funcType.getInputs();
+  auto resTypes = funcType.getResults();
+
+  // Print arguments
+  if (!argTypes.empty()) {
+    Block &guardBlock = getGuard().front();
+    p << '(';
+    llvm::interleaveComma(llvm::zip(getArgNames(), guardBlock.getArguments()), p,
+                         [&](auto tuple) {
+                           auto [name, arg] = tuple;
+                           p.printOperand(arg);
+                           p << ": ";
+                           p.printType(arg.getType());
+                         });
+    p << ')';
+  } else {
+    p << "()";
+  }
+
+  // Print result types
+  p << " -> (";
+  llvm::interleaveComma(resTypes, p, [&](Type type) {
+    p.printType(type);
+  });
+  p << ')';
+
+  // Print attributes (excluding those printed specially)
+  SmallVector<StringRef> elidedAttrs = {"sym_name", "function_type", "argNames",
+                                         "bodyResNames", "static_latency"};
+  p.printOptionalAttrDictWithKeyword((*this)->getAttrs(), elidedAttrs);
+
+  // Print guard region
+  p << ' ';
+  p.printRegion(getGuard(), /*printEntryBlockArgs=*/false);
+
+  // Print control keyword and region
+  p << " control ";
+  p.printRegion(getControl(), /*printEntryBlockArgs=*/true);
 }
 
 void ProcMethodOp::getAsmBlockArgumentNames(Region &region,
@@ -847,6 +988,151 @@ LogicalResult IfOp::verify() {
       return failure();
     if (failed(checkYield(getElseRegion(), "else")))
       return failure();
+  }
+
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// ProcStaticRepeatOp
+//===----------------------------------------------------------------------===//
+
+LogicalResult ProcStaticRepeatOp::verify() {
+  // Check that count is positive
+  if (getCount() <= 0) {
+    return emitOpError("count must be greater than 0");
+  }
+
+  // Check that body is not empty
+  if (getBody().empty() || getBody().front().empty()) {
+    return emitOpError("body region must not be empty");
+  }
+
+  // If body_latency is specified, it must be non-negative
+  if (getBodyLatency() && *getBodyLatency() < 0) {
+    return emitOpError("body_latency must be non-negative");
+  }
+
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// ProcStaticIfOp
+//===----------------------------------------------------------------------===//
+
+LogicalResult ProcStaticIfOp::verify() {
+  // Check if the condition type is a 1-bit FIRRTL type
+  auto conditionType = getCond().getType();
+  if (auto uintType = llvm::dyn_cast<circt::firrtl::UIntType>(conditionType)) {
+    if (!uintType.getWidth() || uintType.getWidth().value() != 1) {
+      return emitOpError("condition must be a 1-bit unsigned integer type");
+    }
+  } else if (auto sintType = llvm::dyn_cast<circt::firrtl::SIntType>(conditionType)) {
+    if (!sintType.getWidth() || sintType.getWidth().value() != 1) {
+      return emitOpError("condition must be a 1-bit type");
+    }
+  } else {
+    return emitOpError("condition must be a FIRRTL integer type");
+  }
+
+  // Check that thenRegion is not empty
+  if (getThenRegion().empty() || getThenRegion().front().empty()) {
+    return emitOpError("then region must not be empty");
+  }
+
+  // If latencies are specified, they must be non-negative
+  if (getThenLatency() && *getThenLatency() < 0) {
+    return emitOpError("then_latency must be non-negative");
+  }
+  if (getElseLatency() && *getElseLatency() < 0) {
+    return emitOpError("else_latency must be non-negative");
+  }
+
+  // If both latencies are specified or neither, that's valid
+  // But if only one is specified, that's an error
+  bool hasThenLatency = getThenLatency().has_value();
+  bool hasElseLatency = getElseLatency().has_value();
+  if (hasThenLatency != hasElseLatency) {
+    return emitOpError("must specify both then_latency and else_latency, or neither");
+  }
+
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// CallOp Timing Verification
+//===----------------------------------------------------------------------===//
+
+LogicalResult CallOp::verify() {
+  // Verify arg_timing array size matches inputs
+  if (auto argTiming = getArgTiming()) {
+    if (argTiming->size() != getInputs().size()) {
+      return emitOpError("arg_timing array size (")
+             << argTiming->size() << ") must match number of inputs ("
+             << getInputs().size() << ")";
+    }
+  }
+
+  // Verify result_timing array size matches outputs
+  if (auto resultTiming = getResultTiming()) {
+    if (resultTiming->size() != getOutputs().size()) {
+      return emitOpError("result_timing array size (")
+             << resultTiming->size() << ") must match number of outputs ("
+             << getOutputs().size() << ")";
+    }
+  }
+
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// BindMethodOp Timing Verification
+//===----------------------------------------------------------------------===//
+
+LogicalResult BindMethodOp::verify() {
+  // If static_latency is specified, it must be positive
+  if (auto latency = getStaticLatency()) {
+    if (*latency <= 0) {
+      return emitOpError("static_latency must be positive, got ") << *latency;
+    }
+  }
+
+  // If interval is specified, static_latency must also be specified
+  if (getInterval() && !getStaticLatency()) {
+    return emitOpError("interval requires static_latency to be specified");
+  }
+
+  // If interval is specified, it must be <= static_latency
+  if (auto interval = getInterval()) {
+    if (auto latency = getStaticLatency()) {
+      if (interval->getCycles() > *latency) {
+        return emitOpError("interval (")
+               << interval->getCycles() << ") must be <= static_latency ("
+               << *latency << ")";
+      }
+    }
+  }
+
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// ProcStaticStepOp Timing Verification
+//===----------------------------------------------------------------------===//
+
+LogicalResult ProcStaticStepOp::verify() {
+  // Latency must be positive
+  if (getLatency() <= 0) {
+    return emitOpError("latency must be positive, got ") << getLatency();
+  }
+
+  // If interval is specified, it must be <= latency
+  if (auto interval = getInterval()) {
+    if (interval->getCycles() > getLatency()) {
+      return emitOpError("interval (")
+             << interval->getCycles() << ") must be <= latency ("
+             << getLatency() << ")";
+    }
   }
 
   return success();

@@ -19,6 +19,54 @@ include "mlir/Interfaces/CallInterfaces.td"
 def FIRRTLBaseType : Type<CPred<"llvm::isa<::circt::firrtl::FIRRTLBaseType>($_self)">,
                           "a FIRRTL base type", "::circt::firrtl::FIRRTLBaseType">;
 
+//===----------------------------------------------------------------------===//
+// Timing Attribute Constraints
+//===----------------------------------------------------------------------===//
+
+// Timing interval attribute for call-site timing guards
+def Cmt2_TimingIntervalAttr : Attr<
+  CPred<"llvm::isa<::circt::cmt2::TimingIntervalAttr>($_self)">,
+  "timing interval attribute"> {
+  let storageType = "::circt::cmt2::TimingIntervalAttr";
+  let returnType = "::circt::cmt2::TimingIntervalAttr";
+  let convertFromStorage = "$_self";
+}
+
+// Latency attribute for port timing
+def Cmt2_LatencyAttr : Attr<
+  CPred<"llvm::isa<::circt::cmt2::LatencyAttr>($_self)">,
+  "latency attribute"> {
+  let storageType = "::circt::cmt2::LatencyAttr";
+  let returnType = "::circt::cmt2::LatencyAttr";
+  let convertFromStorage = "$_self";
+}
+
+// Initiation interval attribute for pipelined methods
+def Cmt2_IntervalAttr : Attr<
+  CPred<"llvm::isa<::circt::cmt2::IntervalAttr>($_self)">,
+  "initiation interval attribute"> {
+  let storageType = "::circt::cmt2::IntervalAttr";
+  let returnType = "::circt::cmt2::IntervalAttr";
+  let convertFromStorage = "$_self";
+}
+
+// Port timing attribute (go, done, stable, data)
+def Cmt2_PortTimingAttr : Attr<
+  CPred<"llvm::isa<::circt::cmt2::PortTimingAttr>($_self)">,
+  "port timing attribute"> {
+  let storageType = "::circt::cmt2::PortTimingAttr";
+  let returnType = "::circt::cmt2::PortTimingAttr";
+  let convertFromStorage = "$_self";
+}
+
+// Array of timing interval attributes (for call sites)
+def Cmt2_TimingArrayAttr : TypedArrayAttrBase<Cmt2_TimingIntervalAttr,
+  "array of timing interval attributes">;
+
+// Array of port timing attributes (for method signatures)
+def Cmt2_PortTimingArrayAttr : TypedArrayAttrBase<Cmt2_PortTimingAttr,
+  "array of port timing attributes">;
+
 // MethodSymbol is an attribute constraint. It has the form (instance, method).
 def CircuitOp : Cmt2Op<
   "circuit", [
@@ -207,7 +255,7 @@ def BindMethodOp : Cmt2Op<
   ]> {
   let summary = "Binding a method";
   let description = [{
-    The "cmt2.bind.method" operation binds a method to firrtl.module logic. 
+    The "cmt2.bind.method" operation binds a method to firrtl.module logic.
     The method follows the ready-enable protocol.
 
     Arguments:
@@ -218,16 +266,31 @@ def BindMethodOp : Cmt2Op<
     - `argNames`: Names of the shared input arguments.
     - `bodyResNames`: Names of the body region results.
 
+    Timing attributes (optional, for cycle-precise static methods):
+    - `static_latency`: Total latency in cycles for static methods.
+    - `interval`: Initiation interval for pipelined methods.
+    - `arg_port_timing`: Per-argument port timing attributes (go, data, etc.).
+    - `result_port_timing`: Per-result port timing attributes (done, stable, etc.).
+
     Results: None
 
     Assembly format:
     ```mlir
+    // Dynamic method (no static_latency)
     cmt2.bind.method @methodName : (i1, i32) -> (i1, i32) [
-      enable = %enableSignal,
-      ready = %readySignal,
-      arguments = [%input1, %input2],
-      results = [%output1, %output2]
+      enable = "enableSignal",
+      ready = "readySignal",
+      arguments = ["input1", "input2"],
+      results = ["output1", "output2"]
     ]
+
+    // Static method with 4-cycle latency
+    cmt2.bind.method @multiply static<4> : (!firrtl.uint<32>, !firrtl.uint<32>) -> !firrtl.uint<32> [
+      enable = "go",
+      ready = "done",
+      arguments = ["left", "right"],
+      results = ["out"]
+    ] {interval = #cmt2.interval<3>}
     ```
   }];
 
@@ -239,16 +302,58 @@ def BindMethodOp : Cmt2Op<
     StrArrayAttr:$argNames,
     StrArrayAttr:$bodyResNames,
     OptionalAttr<ArrayAttr>:$arg_attrs,
-    OptionalAttr<ArrayAttr>:$res_attrs
+    OptionalAttr<ArrayAttr>:$res_attrs,
+    // Timing attributes for cycle-precise static methods
+    OptionalAttr<I64Attr>:$static_latency,
+    OptionalAttr<Cmt2_IntervalAttr>:$interval,
+    OptionalAttr<Cmt2_PortTimingArrayAttr>:$arg_port_timing,
+    OptionalAttr<Cmt2_PortTimingArrayAttr>:$result_port_timing
   );
 
   let assemblyFormat = [{
-    $sym_name `:` $function_type `[` 
-      (`enable` `=` $enableName^ `,`)? 
-      (`ready` `=` $readyName^ `,`)? 
-      `arguments` `=` $argNames `,` 
-      `results` `=` $bodyResNames 
+    $sym_name (`static` `<` $static_latency^ `>`)? `:` $function_type `[`
+      (`enable` `=` $enableName^ `,`)?
+      (`ready` `=` $readyName^ `,`)?
+      `arguments` `=` $argNames `,`
+      `results` `=` $bodyResNames
     `]` attr-dict
+  }];
+
+  // Custom builders for backward compatibility (without timing attributes)
+  let builders = [
+    OpBuilder<(ins "::mlir::StringAttr":$sym_name,
+                   "::mlir::TypeAttr":$function_type,
+                   "::mlir::StringAttr":$enableName,
+                   "::mlir::StringAttr":$readyName,
+                   "::mlir::ArrayAttr":$argNames,
+                   "::mlir::ArrayAttr":$bodyResNames,
+                   "::mlir::ArrayAttr":$arg_attrs,
+                   "::mlir::ArrayAttr":$res_attrs), [{
+      build($_builder, $_state, sym_name, function_type, enableName, readyName,
+            argNames, bodyResNames, arg_attrs, res_attrs,
+            /*static_latency=*/nullptr, /*interval=*/nullptr,
+            /*arg_port_timing=*/nullptr, /*result_port_timing=*/nullptr);
+    }]>
+  ];
+
+  let extraClassDeclaration = [{
+    /// Returns true if this method has static timing (known latency)
+    bool isStatic() { return getStaticLatency().has_value(); }
+
+    /// Get the latency or 0 if dynamic
+    int64_t getLatencyOrZero() {
+      return getStaticLatency().value_or(0);
+    }
+
+    /// Returns true if this method is pipelined (has initiation interval)
+    bool isPipelined() { return getInterval().has_value(); }
+
+    /// Get the initiation interval or 1 (fully pipelined by default)
+    int64_t getInitiationInterval() {
+      if (auto interval = getInterval())
+        return interval->getCycles();
+      return 1;
+    }
   }];
 
   let extraClassDefinition = [{
@@ -257,6 +362,7 @@ def BindMethodOp : Cmt2Op<
     }
   }];
 
+  let hasVerifier = 1;
 }
 
 def ModuleOp : Cmt2Op<
@@ -649,13 +755,23 @@ def CallOp : Cmt2Op<
       - `callee`: The symbol name of the instance being called. A special case is the `@this` callee, which refers to the current module itself.
       - `methodOrValue`: The symbol name of the method or value being called.
 
+    Timing attributes (optional, for cycle-precise static steps):
+      - `arg_timing`: Array of timing intervals for when each argument is driven.
+      - `result_timing`: Array of timing intervals for when each result is captured.
+
     Results:
       - `outputs`: The list of output signals (values) returned by the method or value being called.
 
     Assembly format:
 
     ```mlir
+    // Dynamic call (no timing)
     %output1, %output2 = cmt2.call @callee @methodName(%input1, %input2, ...) : <function_type>
+
+    // Static call with timing guards (inside a static_step)
+    %r = cmt2.call @mult @multiply(%a, %b) : (!firrtl.uint<32>, !firrtl.uint<32>) -> !firrtl.uint<32>
+        {arg_timing = [#cmt2.timing<[0, 1]>, #cmt2.timing<[0, 1]>],
+         result_timing = [#cmt2.timing<[4, 5]>]}
     ```
   }];
   let arguments = (ins
@@ -663,19 +779,62 @@ def CallOp : Cmt2Op<
     SymbolRefAttr:$callee,
     SymbolRefAttr:$methodOrValue,
     OptionalAttr<ArrayAttr>:$arg_attrs,
-    OptionalAttr<ArrayAttr>:$res_attrs
+    OptionalAttr<ArrayAttr>:$res_attrs,
+    // Timing guards for cycle-precise static steps
+    OptionalAttr<Cmt2_TimingArrayAttr>:$arg_timing,
+    OptionalAttr<Cmt2_TimingArrayAttr>:$result_timing
   );
   let results = (outs Variadic<FIRRTLBaseType>:$outputs);
   let assemblyFormat = [{
     $callee $methodOrValue `(` $inputs `)` attr-dict `:` functional-type($inputs, results)
   }];
 
+  // Custom builders for backward compatibility (without timing attributes)
+  let builders = [
+    OpBuilder<(ins "::mlir::TypeRange":$resultTypes,
+                   "::mlir::ValueRange":$inputs,
+                   "::mlir::SymbolRefAttr":$callee,
+                   "::mlir::SymbolRefAttr":$methodOrValue,
+                   "::mlir::ArrayAttr":$arg_attrs,
+                   "::mlir::ArrayAttr":$res_attrs), [{
+      build($_builder, $_state, resultTypes, inputs, callee, methodOrValue,
+            arg_attrs, res_attrs, /*arg_timing=*/nullptr, /*result_timing=*/nullptr);
+    }]>
+  ];
+
   let extraClassDeclaration = [{
     /// Get the methodOrValue symbol as the primary callee
     mlir::SymbolRefAttr getMethodOrValueSymbol() {
       return getMethodOrValueAttr();
     }
+
+    /// Returns true if this call has timing guards
+    bool hasTiming() {
+      return getArgTiming().has_value() || getResultTiming().has_value();
+    }
+
+    /// Get timing for a specific argument, or nullptr
+    TimingIntervalAttr getArgTimingAt(unsigned idx) {
+      if (auto timing = getArgTiming()) {
+        auto arr = *timing;
+        if (idx < arr.size())
+          return llvm::dyn_cast<TimingIntervalAttr>(arr[idx]);
+      }
+      return nullptr;
+    }
+
+    /// Get timing for a specific result, or nullptr
+    TimingIntervalAttr getResultTimingAt(unsigned idx) {
+      if (auto timing = getResultTiming()) {
+        auto arr = *timing;
+        if (idx < arr.size())
+          return llvm::dyn_cast<TimingIntervalAttr>(arr[idx]);
+      }
+      return nullptr;
+    }
   }];
+
+  let hasVerifier = 1;
 }
 
 def InterfaceOp : Cmt2Op<
@@ -951,22 +1110,53 @@ def ProcStaticStepOp : Cmt2Op<
 
     Attributes:
     - `latency`: The fixed number of cycles this step takes to complete.
+    - `interval`: Optional initiation interval for pipelined steps.
 
     Assembly format:
     ```mlir
+    // Simple static step
     cmt2.proc.static_step @multiply <4> {
       // Operations with timing guards...
     }
+
+    // Pipelined static step with II=2
+    cmt2.proc.static_step @pipelined <8> {
+      // ...
+    } {interval = #cmt2.interval<2>}
     ```
   }];
   let arguments = (ins
     SymbolNameAttr:$sym_name,
-    I64Attr:$latency
+    I64Attr:$latency,
+    OptionalAttr<Cmt2_IntervalAttr>:$interval
   );
   let regions = (region SizedRegion<1>:$body);
   let assemblyFormat = [{
     $sym_name `<` $latency `>` $body attr-dict
   }];
+
+  // Custom builders for backward compatibility (without interval attribute)
+  let builders = [
+    OpBuilder<(ins "::mlir::StringAttr":$sym_name,
+                   "uint64_t":$latency), [{
+      build($_builder, $_state, sym_name, $_builder.getI64IntegerAttr(latency),
+            /*interval=*/nullptr);
+    }]>
+  ];
+
+  let extraClassDeclaration = [{
+    /// Returns true if this step is pipelined (has initiation interval)
+    bool isPipelined() { return getInterval().has_value(); }
+
+    /// Get the initiation interval or latency (for non-pipelined)
+    int64_t getInitiationInterval() {
+      if (auto ii = getInterval())
+        return ii->getCycles();
+      return getLatency();
+    }
+  }];
+
+  let hasVerifier = 1;
 }
 
 def ProcAssignOp : Cmt2Op<
@@ -1145,9 +1335,132 @@ def ProcWhileOp : Cmt2Op<
   }];
 }
 
+def ProcStaticRepeatOp : Cmt2Op<
+  "proc.static_repeat", [
+    ParentOneOf<["ProcRuleOp", "ProcMethodOp", "ProcSeqOp", "ProcParOp", "ProcIfOp", "ProcWhileOp", "ProcStaticRepeatOp", "ProcStaticIfOp"]>,
+    SingleBlock,
+    NoTerminator,
+    NoRegionArguments
+  ]> {
+  let summary = "Static fixed-iteration loop with known total latency";
+  let description = [{
+    Executes body a fixed number of times with known total latency.
+    Total latency = count * body_latency.
+
+    Unlike dynamic `while` loops:
+    - No loop counter register at runtime
+    - No loop condition evaluation
+    - FSM advances automatically based on static timing
+    - Body must have known static latency
+
+    This is useful for:
+    - Unrolled loops with fixed iterations
+    - Fixed-depth pipeline stages
+    - Matrix operations with known dimensions
+
+    Attributes:
+    - `count`: Number of iterations (must be > 0)
+    - `body_latency`: Optional explicit body latency. If not specified,
+                      inferred from body contents.
+
+    Assembly format:
+    ```mlir
+    cmt2.proc.static_repeat 4 {
+      cmt2.proc.enable @step_3cycle  // latency = 3
+    } // total latency = 4 * 3 = 12 cycles
+    ```
+
+    With explicit body latency:
+    ```mlir
+    cmt2.proc.static_repeat 4 <3> {
+      cmt2.proc.enable @step_3cycle
+    }
+    ```
+  }];
+  let arguments = (ins
+    I64Attr:$count,
+    OptionalAttr<I64Attr>:$body_latency
+  );
+  let regions = (region SizedRegion<1>:$body);
+  let assemblyFormat = [{
+    $count (`<` $body_latency^ `>`)? $body attr-dict
+  }];
+
+  let hasVerifier = 1;
+}
+
+def ProcStaticIfOp : Cmt2Op<
+  "proc.static_if", [
+    ParentOneOf<["ProcRuleOp", "ProcMethodOp", "ProcSeqOp", "ProcParOp", "ProcIfOp", "ProcWhileOp", "ProcStaticRepeatOp", "ProcStaticIfOp"]>,
+    NoRegionArguments,
+    NoTerminator
+  ]> {
+  let summary = "Static conditional with known branch latencies";
+  let description = [{
+    Conditional execution where both branches have known static latencies.
+    Total latency = max(then_latency, else_latency).
+
+    Unlike dynamic `if`:
+    - Both branches have deterministic execution time
+    - No done signal checking at runtime
+    - FSM advances based on static timing
+    - Shorter branch is padded to match longer branch
+
+    This enables efficient scheduling when branch timing is known,
+    eliminating the need for dynamic synchronization.
+
+    Attributes:
+    - `then_latency`: Optional explicit then-branch latency
+    - `else_latency`: Optional explicit else-branch latency
+
+    Assembly format:
+    ```mlir
+    cmt2.proc.static_if %cond : !firrtl.uint<1> {
+      cmt2.proc.enable @branch_a  // latency = 5
+    } else {
+      cmt2.proc.enable @branch_b  // latency = 3
+    } // total latency = max(5, 3) = 5 cycles
+    ```
+
+    With explicit latencies:
+    ```mlir
+    cmt2.proc.static_if %cond : !firrtl.uint<1> <5, 3> {
+      cmt2.proc.enable @branch_a
+    } else {
+      cmt2.proc.enable @branch_b
+    }
+    ```
+  }];
+  let arguments = (ins
+    FIRRTLBaseType:$cond,
+    OptionalAttr<I64Attr>:$then_latency,
+    OptionalAttr<I64Attr>:$else_latency
+  );
+  let regions = (region
+    SizedRegion<1>:$thenRegion,
+    AnyRegion:$elseRegion
+  );
+  let assemblyFormat = [{
+    $cond `:` qualified(type($cond))
+    (`<` $then_latency^ `,` $else_latency `>`)?
+    $thenRegion (`else` $elseRegion^)? attr-dict
+  }];
+
+  let hasVerifier = 1;
+
+  let extraClassDeclaration = [{
+    /// Get the total latency of this static if (max of branch latencies)
+    uint64_t getTotalLatency() {
+      uint64_t thenLat = getThenLatency() ? *getThenLatency() : 0;
+      uint64_t elseLat = getElseLatency() ? *getElseLatency() : 0;
+      return std::max(thenLat, elseLat);
+    }
+  }];
+}
+
 def ProcEnableOp : Cmt2Op<
   "proc.enable", [
-    ParentOneOf<["ProcRuleOp", "ProcMethodOp", "ProcSeqOp", "ProcParOp", "ProcIfOp", "ProcWhileOp"]>
+    ParentOneOf<["ProcRuleOp", "ProcMethodOp", "ProcSeqOp", "ProcParOp", "ProcIfOp", "ProcWhileOp", "ProcStaticRepeatOp", "ProcStaticIfOp"]>
   ]> {
   let summary = "Enable a group";
   let description = [{
@@ -1167,7 +1480,7 @@ def ProcEnableOp : Cmt2Op<
 
 def ProcInvokeOp : Cmt2Op<
   "proc.invoke", [
-    ParentOneOf<["ProcRuleOp", "ProcMethodOp", "ProcSeqOp", "ProcParOp", "ProcIfOp", "ProcWhileOp"]>
+    ParentOneOf<["ProcRuleOp", "ProcMethodOp", "ProcSeqOp", "ProcParOp", "ProcIfOp", "ProcWhileOp", "ProcStaticRepeatOp", "ProcStaticIfOp"]>
   ]> {
   let summary = "Invoke a method on an instance within procedural control";
   let description = [{
@@ -1307,12 +1620,17 @@ def ProcMethodOp : Cmt2Op<
     - `argNames`: Names of shared input arguments.
     - `bodyResNames`: Names of the body region results.
 
+    Timing attributes (optional):
+    - `static_latency`: Total latency for static methods.
+    - `interval`: Initiation interval for pipelined methods.
+
     Regions:
     - `guard`: Guard region returning i1 (ready condition).
     - `control`: Control region with procedural control flow.
 
     Assembly format:
     ```mlir
+    // Dynamic method
     cmt2.proc.method @multiply(%a: !firrtl.uint<32>, %b: !firrtl.uint<32>) -> (!firrtl.uint<32>) {
       %idle = cmt2.call @mult_fsm @isIdle() : () -> !firrtl.uint<1>
       cmt2.return %idle : !firrtl.uint<1>
@@ -1321,6 +1639,13 @@ def ProcMethodOp : Cmt2Op<
         cmt2.proc.enable @start_mult
         cmt2.proc.enable @wait_result
       }
+    }
+
+    // Static method with known latency
+    cmt2.proc.method @fast_mult static<4>(%a: !firrtl.uint<32>, %b: !firrtl.uint<32>) -> (!firrtl.uint<32>) {
+      // ...
+    } control {
+      // ...
     }
     ```
   }];
@@ -1334,14 +1659,48 @@ def ProcMethodOp : Cmt2Op<
     StrArrayAttr:$argNames,
     StrArrayAttr:$bodyResNames,
     OptionalAttr<ArrayAttr>:$arg_attrs,
-    OptionalAttr<ArrayAttr>:$res_attrs
+    OptionalAttr<ArrayAttr>:$res_attrs,
+    // Timing attributes for cycle-precise static methods
+    OptionalAttr<I64Attr>:$static_latency,
+    OptionalAttr<Cmt2_IntervalAttr>:$interval
   );
 
   let hasCustomAssemblyFormat = 1;
 
+  // Custom builders for backward compatibility (without timing attributes)
+  let builders = [
+    OpBuilder<(ins "::mlir::StringAttr":$sym_name,
+                   "::mlir::TypeAttr":$function_type,
+                   "::mlir::ArrayAttr":$argNames,
+                   "::mlir::ArrayAttr":$bodyResNames,
+                   "::mlir::ArrayAttr":$arg_attrs,
+                   "::mlir::ArrayAttr":$res_attrs), [{
+      build($_builder, $_state, sym_name, function_type, argNames, bodyResNames,
+            arg_attrs, res_attrs, /*static_latency=*/nullptr, /*interval=*/nullptr);
+    }]>
+  ];
+
   let extraClassDeclaration = [{
     void getAsmBlockArgumentNames(mlir::Region &region,
                                   mlir::OpAsmSetValueNameFn setNameFn);
+
+    /// Returns true if this method has static timing (known latency)
+    bool isStatic() { return getStaticLatency().has_value(); }
+
+    /// Get the latency or 0 if dynamic
+    int64_t getLatencyOrZero() {
+      return getStaticLatency().value_or(0);
+    }
+
+    /// Returns true if this method is pipelined
+    bool isPipelined() { return getInterval().has_value(); }
+
+    /// Get the initiation interval or latency (for non-pipelined)
+    int64_t getInitiationInterval() {
+      if (auto ii = getInterval())
+        return ii->getCycles();
+      return getLatencyOrZero();
+    }
   }];
 }
 

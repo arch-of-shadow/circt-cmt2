@@ -136,6 +136,76 @@ builtin.module {
                 // CHECK: cmt2.proc.invoke @this @add
                 %result = cmt2.proc.invoke @this @add(%c10, %c20) : (!firrtl.uint<32>, !firrtl.uint<32>) -> !firrtl.uint<32>
             }
+
+            // CHECK: cmt2.proc.rule @static_repeat_test
+            cmt2.proc.rule @static_repeat_test() -> () {
+                %c1 = firrtl.constant 1 : !firrtl.uint<1>
+                cmt2.return %c1 : !firrtl.uint<1>
+            } control {
+                // CHECK: cmt2.proc.static_repeat 4
+                cmt2.proc.static_repeat 4 {
+                    cmt2.proc.enable @multiply
+                }
+            }
+
+            // CHECK: cmt2.proc.rule @static_repeat_with_latency
+            cmt2.proc.rule @static_repeat_with_latency() -> () {
+                %c1 = firrtl.constant 1 : !firrtl.uint<1>
+                cmt2.return %c1 : !firrtl.uint<1>
+            } control {
+                // CHECK: cmt2.proc.static_repeat 3<5>
+                cmt2.proc.static_repeat 3 <5> {
+                    cmt2.proc.enable @multiply
+                }
+            }
+
+            // CHECK: cmt2.proc.rule @static_if_test
+            cmt2.proc.rule @static_if_test() -> () {
+                %c1 = firrtl.constant 1 : !firrtl.uint<1>
+                cmt2.return %c1 : !firrtl.uint<1>
+            } control {
+                %cond = cmt2.call @reg_a @read() : () -> !firrtl.uint<32>
+                %c0 = firrtl.constant 0 : !firrtl.uint<32>
+                %is_zero = firrtl.eq %cond, %c0 : (!firrtl.uint<32>, !firrtl.uint<32>) -> !firrtl.uint<1>
+                // CHECK: cmt2.proc.static_if
+                cmt2.proc.static_if %is_zero : !firrtl.uint<1> {
+                    cmt2.proc.enable @load
+                } else {
+                    cmt2.proc.enable @store
+                }
+            }
+
+            // CHECK: cmt2.proc.rule @static_if_with_latencies
+            cmt2.proc.rule @static_if_with_latencies() -> () {
+                %c1 = firrtl.constant 1 : !firrtl.uint<1>
+                cmt2.return %c1 : !firrtl.uint<1>
+            } control {
+                %cond = cmt2.call @reg_a @read() : () -> !firrtl.uint<32>
+                %c0 = firrtl.constant 0 : !firrtl.uint<32>
+                %is_zero = firrtl.eq %cond, %c0 : (!firrtl.uint<32>, !firrtl.uint<32>) -> !firrtl.uint<1>
+                // CHECK: cmt2.proc.static_if %{{.*}} : !firrtl.uint<1><5, 3>
+                cmt2.proc.static_if %is_zero : !firrtl.uint<1> <5, 3> {
+                    cmt2.proc.enable @load
+                } else {
+                    cmt2.proc.enable @store
+                }
+            }
+
+            // CHECK: cmt2.proc.rule @nested_static_constructs
+            cmt2.proc.rule @nested_static_constructs() -> () {
+                %c1 = firrtl.constant 1 : !firrtl.uint<1>
+                cmt2.return %c1 : !firrtl.uint<1>
+            } control {
+                // CHECK: cmt2.proc.seq
+                cmt2.proc.seq {
+                    cmt2.proc.enable @load
+                    // CHECK: cmt2.proc.static_repeat 2
+                    cmt2.proc.static_repeat 2 {
+                        cmt2.proc.enable @multiply
+                    }
+                    cmt2.proc.enable @store
+                }
+            }
         }
     }
 }

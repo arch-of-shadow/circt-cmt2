@@ -13,6 +13,7 @@
 #define CIRCT_DIALECT_Cmt2_Cmt2OPS_H
 
 // #include "llvm/ADT/Any.h"
+#include "circt/Dialect/Cmt2/Cmt2Attributes.h"
 #include "circt/Dialect/Cmt2/Cmt2Dialect.h"
 #include "circt/Dialect/Cmt2/Cmt2OpInterfaces.h"
 #include "circt/Dialect/FIRRTL/FIRRTLTypes.h"
