@@ -297,6 +297,95 @@ class ControlBuilder:
         nested = ControlBuilder(while_block, self._loc, self._ctx)
         yield nested
 
+    @contextmanager
+    def static_repeat(
+        self, count: int, body_latency: int | None = None
+    ) -> Iterator[ControlBuilder]:
+        """Static fixed-iteration loop with known total latency.
+
+        Unlike dynamic while loops, static_repeat:
+        - Has no loop counter register at runtime
+        - No loop condition evaluation
+        - FSM advances automatically based on static timing
+        - Total latency = count * body_latency
+
+        Args:
+            count: Number of iterations (must be > 0).
+            body_latency: Optional explicit body latency. If not specified,
+                          inferred from body contents.
+
+        Yields:
+            A nested ControlBuilder for the loop body.
+
+        Example:
+            with ctrl.static_repeat(4) as loop:
+                loop.enable(step_3cycle.ref())  # total = 4 * 3 = 12 cycles
+        """
+        from circt.ir import InsertionPoint, Block, IntegerAttr, IntegerType
+        from circt.dialects import cmt2
+
+        if count <= 0:
+            raise ValueError("static_repeat count must be greater than 0")
+
+        with InsertionPoint(self._block):
+            count_attr = IntegerAttr.get(IntegerType.get_signless(64), count)
+            latency_attr = None
+            if body_latency is not None:
+                latency_attr = IntegerAttr.get(
+                    IntegerType.get_signless(64), body_latency
+                )
+            repeat_op = cmt2.ProcStaticRepeatOp(
+                count=count_attr, body_latency=latency_attr, loc=self._loc
+            )
+            body_block = Block.create_at_start(repeat_op.body)
+
+        nested = ControlBuilder(body_block, self._loc, self._ctx)
+        yield nested
+
+    @contextmanager
+    def static_if(
+        self,
+        condition: Signal,
+        then_latency: int | None = None,
+        else_latency: int | None = None,
+    ) -> Iterator[StaticIfControlBuilder]:
+        """Static conditional with known branch latencies.
+
+        Unlike dynamic if:
+        - Both branches have deterministic execution time
+        - No done signal checking at runtime
+        - FSM advances based on static timing
+        - Total latency = max(then_latency, else_latency)
+        - Shorter branch is padded to match longer branch
+
+        Args:
+            condition: Boolean condition for branch selection.
+            then_latency: Optional explicit then-branch latency.
+            else_latency: Optional explicit else-branch latency.
+                          Must specify both or neither.
+
+        Yields:
+            A StaticIfControlBuilder for then/else branches.
+
+        Example:
+            with ctrl.static_if(cond) as sif:
+                with sif.then_() as then_ctrl:
+                    then_ctrl.enable(branch_a.ref())  # 5 cycles
+                with sif.else_() as else_ctrl:
+                    else_ctrl.enable(branch_b.ref())  # 3 cycles
+            # total latency = max(5, 3) = 5 cycles
+        """
+        if (then_latency is None) != (else_latency is None):
+            raise ValueError(
+                "static_if: must specify both then_latency and else_latency, or neither"
+            )
+
+        builder = StaticIfControlBuilder(
+            self, condition, then_latency, else_latency
+        )
+        yield builder
+        builder._finalize()
+
     def enable(self, group: StepRef) -> None:
         """Enable a step.
 
@@ -412,6 +501,78 @@ class IfControlBuilder:
 
     def _finalize(self):
         """Finalize the if operation."""
+        pass
+
+
+class StaticIfControlBuilder:
+    """Builder for static conditional control flow with known branch latencies.
+
+    Static if has deterministic execution time based on the maximum of
+    both branch latencies. The shorter branch is implicitly padded.
+    """
+
+    def __init__(
+        self,
+        parent: ControlBuilder,
+        condition: Signal,
+        then_latency: int | None,
+        else_latency: int | None,
+    ):
+        self._parent = parent
+        self._condition = condition
+        self._then_latency = then_latency
+        self._else_latency = else_latency
+        self._then_builder: ControlBuilder | None = None
+        self._else_builder: ControlBuilder | None = None
+        self._op = None
+
+    @contextmanager
+    def then_(self) -> Iterator[ControlBuilder]:
+        """The 'then' branch of the static if."""
+        from circt.ir import InsertionPoint, Block, IntegerAttr, IntegerType
+        from circt.dialects import cmt2
+
+        with InsertionPoint(self._parent._block):
+            then_latency_attr = None
+            else_latency_attr = None
+            if self._then_latency is not None:
+                then_latency_attr = IntegerAttr.get(
+                    IntegerType.get_signless(64), self._then_latency
+                )
+            if self._else_latency is not None:
+                else_latency_attr = IntegerAttr.get(
+                    IntegerType.get_signless(64), self._else_latency
+                )
+
+            self._op = cmt2.ProcStaticIfOp(
+                self._condition.value,
+                then_latency=then_latency_attr,
+                else_latency=else_latency_attr,
+                loc=self._parent._loc,
+            )
+            then_block = Block.create_at_start(self._op.thenRegion)
+
+        self._then_builder = ControlBuilder(
+            then_block, self._parent._loc, self._parent._ctx
+        )
+        yield self._then_builder
+
+    @contextmanager
+    def else_(self) -> Iterator[ControlBuilder]:
+        """The 'else' branch of the static if (optional)."""
+        from circt.ir import Block
+
+        if self._op is None:
+            raise RuntimeError("Must call then_() before else_()")
+
+        else_block = Block.create_at_start(self._op.elseRegion)
+        self._else_builder = ControlBuilder(
+            else_block, self._parent._loc, self._parent._ctx
+        )
+        yield self._else_builder
+
+    def _finalize(self):
+        """Finalize the static if operation."""
         pass
 
 
