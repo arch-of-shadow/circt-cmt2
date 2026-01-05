@@ -34,6 +34,48 @@ modules:
       output_pattern: "Reg_width${width}_init${init}.mlir"
       cache: true
 
+  - name: "Mem1r1w1c_AReg"
+    type: "chisel"
+    path: "firrtl/mem1r1w1c_areg"
+    description: "1R1W synchronous memory (read and write latency = 1), with address register"
+    parameters:
+      - name: "data_width"
+        type: "integer"
+        default: 32
+        required: false
+      - name: "addr_width"
+        type: "integer"
+        default: 10
+        required: false
+      - name: "depth"
+        type: "integer"
+        default: 1024
+        required: false
+    ports:
+      clock: "!firrtl.clock"
+      reset: "!firrtl.uint<1>"
+    methods:
+      - name: "rd0"
+        ready: false
+        enable: true
+        inputs: ["raddr: !firrtl.uint<${addr_width}>"]
+      - name: "rd1"
+        ready: false
+        enable: false
+        outputs: ["rdata: !firrtl.uint<${data_width}>"]
+      - name: "write"
+        ready: false
+        enable: true
+        inputs: ["wdata: !firrtl.uint<${data_width}>", "waddr: !firrtl.uint<${addr_width}>"]
+    conflict_matrix:
+      - [write, write, "Conflict"]
+      - [rd0, rd0, "Conflict"]
+    build:
+      command: "./build.sh"
+      args: []
+      output_pattern: "Mem1r1w1c_AReg_w${data_width}_a${addr_width}_d${depth}.mlir"
+      cache: true
+
   - name: "Mem1r1w1c"
     type: "chisel"
     path: "firrtl/mem1r1w1c"

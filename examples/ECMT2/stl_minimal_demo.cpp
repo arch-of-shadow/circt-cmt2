@@ -64,8 +64,8 @@ int main() {
   // auto *fifo32Module = STLLibrary::createFIFO1PushModule(32, circuit);
   // llvm::outs() << "✓ Created depth-1 FIFO module (32-bit data)\n";
 
-  auto *fifo32Module = STLLibrary::createFIFO2IModule(32, circuit);
-  llvm::outs() << "✓ Created depth-1 FIFO module (32-bit data)\n";
+  // auto *fifo32Module = STLLibrary::createFIFO2IModule(32, circuit);
+  // llvm::outs() << "✓ Created depth-1 FIFO module (32-bit data)\n";
   // auto *fifo32Inst = mainMod->addInstance("my_fifo", fifo32Module, {} /* {clk.getValue(), rst.getValue()} */);
   // llvm::outs() << "✓ Instantiated FIFO: my_fifo\n";
 
@@ -76,14 +76,13 @@ int main() {
   // llvm::outs() << "✓ Instantiated FIFO: my_fifo\n";
   
   // // 3. Create a memory module (1KB, 32-bit data, 10-bit address)
-  // auto *mainMod = circuit.addModule("STLMinimalDemoModule");
-  // auto loc = mainMod->getLoc();
-  // auto &b = mainMod->getBuilder();
+  auto *mainMod = circuit.addModule("STLMinimalDemoModule");
+  auto loc = mainMod->getLoc();
+  auto &b = mainMod->getBuilder();
 
-  // auto clk = mainMod->addClockArgument("clk");
-  // auto rst = mainMod->addResetArgument("reset");
-  // auto *memModule = STLLibrary::createMem1r1w1cModule( 32, 10, 1024, 
-  //   1, circuit);
+  auto clk = mainMod->addClockArgument("clk");
+  auto rst = mainMod->addResetArgument("reset");
+  auto *memModule = STLLibrary::createMem1r1w1cARegModule( 32, 10, 1024,  circuit);
   // llvm::outs() << "✓ Created 1KB memory module (32-bit data)\n";
   // auto *memInst = mainMod->addInstance("my_memory", memModule, {clk.getValue(), rst.getValue()});
 

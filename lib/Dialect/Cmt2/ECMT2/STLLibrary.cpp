@@ -599,6 +599,29 @@ ExternalModule* STLLibrary::createMem1r1w1cModule( unsigned dataWidth, unsigned 
   return memMod;
 }
 
+ExternalModule* STLLibrary::createMem1r1w1cARegModule( unsigned dataWidth, unsigned addrWidth, unsigned depth, Circuit& circuit) {
+  // Create external memory module with Mem1r1w binding
+  llvm::StringMap<int64_t> params;
+  params["data_width"] = dataWidth;
+  params["addr_width"] = addrWidth;
+  params["depth"] = depth;
+
+  auto *memMod = circuit.hasExternalModule("Mem1r1w1c_AReg", params);
+  if (memMod) {
+    return memMod;
+  }
+  memMod = circuit.addExternalModule("Mem1r1w1c_AReg", params);
+
+  // Bind memory interface
+  memMod->bindClock("clk", "clock")
+        .bindReset("rst", "reset")
+        .bindMethod("rd0", "ren", "", {"raddr"}, {})
+        .bindValue("rd1", "", {}, {"rdata"})
+        .bindMethod("write", "wen", "", {"wdata", "waddr"}, {});
+
+  return memMod;
+}
+
 ExternalModule* STLLibrary::createMem1r1w0cModule( unsigned dataWidth, unsigned addrWidth, unsigned depth, Circuit& circuit) {
   // Create external memory module with Mem1r1w binding
   llvm::StringMap<int64_t> params;
