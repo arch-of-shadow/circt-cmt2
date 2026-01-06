@@ -534,6 +534,17 @@ class RegionBuilder:
                 if not cmt2_return_types and not cmt2_arg_types:
                     cmt2_return_types = instance_module.get_method_return_types(method_name)
                     cmt2_arg_types = instance_module.get_method_arg_types(method_name)
+            elif instance_module is not None:
+                # Look up types from CMT2 module (ModuleBuilder)
+                # Check _values first, then _methods
+                if hasattr(instance_module, "_values") and method_name in instance_module._values:
+                    val_builder = instance_module._values[method_name]
+                    cmt2_return_types = val_builder._return_types
+                    cmt2_arg_types = []  # Values don't have args
+                elif hasattr(instance_module, "_methods") and method_name in instance_module._methods:
+                    meth_builder = instance_module._methods[method_name]
+                    cmt2_return_types = meth_builder._return_types
+                    cmt2_arg_types = [ty for _, ty in meth_builder._arg_types]
 
             result_types = [
                 ty.to_firrtl_type(self._ctx.mlir_context)

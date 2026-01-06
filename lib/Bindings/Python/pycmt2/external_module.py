@@ -61,6 +61,9 @@ class ExternalModuleBuilder:
         self._reset_port: str | None = None
         self._args: list[tuple[str, Cmt2Type]] = []
 
+        # FIRRTL module name (defaults to same as CMT2 module name)
+        self._firrtl_module_name: str | None = None
+
         # Pending method bindings (added at finalize time)
         self._pending_values: list[dict] = []  # {name, ready_name, args, returns}
         self._pending_methods: list[dict] = []  # {name, enable_name, ready_name, args, returns}
@@ -77,6 +80,22 @@ class ExternalModuleBuilder:
     def name(self) -> str:
         """Get the external module name."""
         return self._name
+
+    def set_firrtl_module_name(self, name: str) -> ExternalModuleBuilder:
+        """Set the FIRRTL module name for this external module.
+
+        By default, the FIRRTL module name matches the CMT2 module name.
+        Use this to bind to a differently-named FIRRTL module (e.g., from
+        ModuleLibrary where module names include parameters).
+
+        Args:
+            name: The FIRRTL module name (e.g., "Reg_width32_init0").
+
+        Returns:
+            self for chaining.
+        """
+        self._firrtl_module_name = name
+        return self
 
     def clock(self, name: str = "clk") -> ExternalModuleBuilder:
         """Declare a clock port.
@@ -241,10 +260,13 @@ class ExternalModuleBuilder:
         # Build argument types for the block
         arg_types = [ty.to_firrtl_type(ctx) for _, ty in self._args]
 
+        # Use custom FIRRTL module name if set, otherwise default to CMT2 module name
+        firrtl_name = self._firrtl_module_name if self._firrtl_module_name else self._name
+
         with InsertionPoint(self._circuit._op.body):
             self._op = cmt2.ExtModuleFirrtlOp(
                 sym_name=StringAttr.get(self._name, context=ctx),
-                ext_module_name=FlatSymbolRefAttr.get(self._name, context=ctx),
+                ext_module_name=FlatSymbolRefAttr.get(firrtl_name, context=ctx),
                 argNames=ArrayAttr.get(arg_names, context=ctx),
                 loc=mlir_loc,
             )

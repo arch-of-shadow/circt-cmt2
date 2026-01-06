@@ -209,6 +209,37 @@ class Circuit:
         # TODO: Implement InterfaceBuilder
         raise NotImplementedError("Interfaces not yet implemented")
 
+    def include_library_module(
+        self, library_name: str, params: dict[str, int] | None = None
+    ) -> str | None:
+        """Include a FIRRTL module from the ModuleLibrary.
+
+        This builds the FIRRTL module from Chisel sources (if needed) and
+        includes it in the circuit. The module can then be referenced by
+        cmt2.module.extern.firrtl bindings.
+
+        Args:
+            library_name: Name of the module in the library (e.g., "FIRRTLReg")
+            params: Parameters for the module (e.g., {"width": 32, "init": 0})
+
+        Returns:
+            The actual FIRRTL module name (e.g., "Reg_width32_init0"),
+            or None if the module couldn't be built/included.
+
+        Example:
+            # Include a 32-bit register
+            circuit.include_library_module("FIRRTLReg", {"width": 32, "init": 0})
+        """
+        from .module_library import get_module_library
+
+        if params is None:
+            params = {}
+
+        library = get_module_library()
+        return library.include_module_in_circuit(
+            library_name, params, self._mlir_module
+        )
+
     def emit_mlir(self) -> str:
         """Emit the circuit as MLIR text.
 

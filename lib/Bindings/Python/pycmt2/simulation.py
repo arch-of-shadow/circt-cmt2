@@ -96,10 +96,19 @@ class SimulationWorkspace:
         return self.circuit.name
 
     def _add_stl_rtl(self):
-        """Add STL RTL files from the registry."""
-        from .stl import get_stl_rtl_files
-        for filename, content in get_stl_rtl_files().items():
-            self.add_external_rtl(filename, content)
+        """Add STL RTL files from ModuleLibrary.
+
+        Converts cached FIRRTL modules from ModuleLibrary to Verilog
+        and adds them to the workspace.
+        """
+        from .module_library import get_module_library
+
+        library = get_module_library()
+        verilog_modules = library.get_verilog_for_modules()
+
+        for module_name, verilog_content in verilog_modules.items():
+            filename = f"{module_name}.sv"
+            self.add_external_rtl(filename, verilog_content)
 
     def generate_placeholder(self):
         """Generate workspace with placeholder testbench.

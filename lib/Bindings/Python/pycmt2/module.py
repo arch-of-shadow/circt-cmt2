@@ -469,15 +469,15 @@ class ModuleBuilder:
         self._conflict_free.append((a, b))
         return self
 
-    def precedence(self, *rules: RuleRef) -> ModuleBuilder:
-        """Declare scheduling precedence among rules.
+    def precedence(self, *refs) -> ModuleBuilder:
+        """Declare scheduling precedence among rules, methods, and values.
 
-        Rules listed first have higher priority and will block rules listed later
+        Items listed first have higher priority and will block items listed later
         when both are enabled and conflict.
 
         Args:
-            *rules: RuleRef objects in priority order (highest first).
-                   Use rule.ref() to get a RuleRef from a RuleBuilder or ProcRuleBuilder.
+            *refs: Reference objects (RuleRef, MethodRef, ValueRef) in priority order
+                   (highest first). Use .ref() to get a reference from a builder.
 
         Returns:
             self for chaining.
@@ -485,24 +485,24 @@ class ModuleBuilder:
         Example:
             with mod.rule("div_by_2") as div_rule:
                 ...
-            with mod.proc_rule("incr_loop") as incr_rule:
+            with mod.method("write", args=[("data", UInt(32))]) as write_meth:
                 ...
 
-            # div_by_2 has higher priority than incr_loop
-            mod.precedence(div_rule.ref(), incr_rule.ref())
+            # div_by_2 has higher priority than write
+            mod.precedence(div_rule.ref(), write_meth.ref())
         """
-        if len(rules) < 2:
-            raise ValueError("precedence() requires at least 2 rules")
+        if len(refs) < 2:
+            raise ValueError("precedence() requires at least 2 items")
 
-        # Extract names from RuleRef objects
+        # Extract names from ref objects (RuleRef, MethodRef, or ValueRef)
         names = []
-        for rule in rules:
-            if isinstance(rule, RuleRef):
-                names.append(rule.name)
+        for ref in refs:
+            if isinstance(ref, (RuleRef, MethodRef, ValueRef)):
+                names.append(ref.name)
             else:
                 raise TypeError(
-                    f"precedence() requires RuleRef objects, got {type(rule).__name__}. "
-                    "Use rule.ref() to get a reference."
+                    f"precedence() requires RuleRef, MethodRef, or ValueRef objects, "
+                    f"got {type(ref).__name__}. Use .ref() to get a reference."
                 )
         self._precedence.append(names)
         return self
