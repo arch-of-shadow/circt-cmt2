@@ -1,292 +1,284 @@
-# `cmt2` Dialect Rationale
+# CMT2 Dialect Rationale
 
-This document describes various design points of the Cmt2 dialect. This follows in the spirit of
-other [MLIR Rationale docs](https://mlir.llvm.org/docs/Rationale/).
+Design rationale for the CMT2 dialect, following [MLIR Rationale](https://mlir.llvm.org/docs/Rationale/) conventions.
+
+---
 
 ## Introduction
 
-This dialect is the MLIR implementation of cmt2:
-```
-cmt2: Rule-Based Hardware Description in Rust with Temporal Semantics
-Youwei Xiao, Zizhang Luo, and Yun Liang
-In 5th Workshop on Languages, Tools, and Techniques for Accelerator Design (LATTE’25), 2025
-```
+CMT2 implements **Guarded Atomic Actions (GAA)** semantics for hardware design in MLIR. The dialect provides:
 
-## Operations
+- **One-Rule-At-A-Time (ORAAT)** execution model
+- **Ready-Enable** hardware contract
+- **Automatic scheduling** with conflict detection
+- **Multi-cycle operations** with FSM generation
+- **Cycle-precise timing** for static control
 
-- `cmt2.module`: Define a Cmt2 module. It includes signals for clock/reset, instances, rules, methods, and etc.
-- `cmt2.module.extern.hw`: Bind a `hw.module`
-<!-- - `cmt2.module.extern.firrtl`: Bind a `firrtl.module` -->
-- `cmt2.method`: define an action method
-- `cmt2.value`: define a value method
-- `cmt2.rule`: define a rule
-- `cmt2.instance`: instantiate a module
-  - Provides `getReferencedModule()` method to get the Cmt2ModuleLike operation being instantiated
-- `cmt2.call`: call a method (implements CallOpInterface)
-  - Provides standard call-like operation features: getCallableForCallee(), getArgOperands(), resolveCallable()
-  - Supports argument and result attributes via CallOpInterface
-- `cmt2.return`: return a value to caller
-- `cmt2.interface`: declare an interface comprised of methods.
-- `cmt2.interface.def`: define an interface instance
-- `cmt2.interface.decl`: declare an interface instance
+---
 
-## Interfaces
+## Core Concepts
 
-### Cmt2ModuleLike Interface
+### Guarded Atomic Actions (GAA)
 
-The `Cmt2ModuleLike` interface provides a common abstraction for module-like operations in the Cmt2 dialect (`ModuleOp` and `ExtModuleHwOp`). This interface enables uniform access to methods and values defined within modules, which is essential for analysis passes like CallInfo.
+GAA provides a state-transition based RTL design paradigm where:
 
-**Required Methods:**
-- `lookupFunctionLike(StringAttr name)`: Look up a Cmt2FunctionLike by name
+1. **Rules** define atomic state transitions with boolean guards
+2. **Methods** expose module interfaces with ready-enable protocol
+3. **Values** provide read-only access to internal state
+4. **Scheduling** resolves conflicts between concurrent rules
 
-**Utility Functions:**
-The Cmt2 dialect provides utility functions in `Cmt2OpInterfaces.h`:
-- `isMethodOp(Operation*)`: Check if an operation is a MethodOp
-- `isValueOp(Operation*)`: Check if an operation is a ValueOp
-- `getCalleeType(Operation*)`: Determine the type of a callee (Method or Value)
+### One-Rule-At-A-Time (ORAAT)
 
-These utilities simplify code that needs to distinguish between methods and values, avoiding verbose `isa_and_nonnull` checks throughout the codebase.
+The ORAAT semantics means:
+- In each cycle, pick a rule whose guard is true
+- Execute that rule atomically
+- Commit results before the next cycle
 
-### Cmt2FunctionLike Interface
-
-The `Cmt2FunctionLike` interface provides a common abstraction for function-like operations in the Cmt2 dialect that can be called. This includes:
-- `RuleOp`: Rules that define behavior (two regions: guard and body)
-- `MethodOp`: Action methods that can modify state (two regions: guard and body)
-- `ValueOp`: Value methods that read state (two regions: guard and body)
-- `BindMethodOp`: Bound methods from external hardware modules (no regions)
-- `BindValueOp`: Bound values from external hardware modules (no regions)
-
-This interface enables uniform handling of all callable entities in the Cmt2 dialect, which is essential for analysis passes and transformations.
-
-**Design Philosophy:**
-
-The Cmt2FunctionLike interface provides comprehensive FunctionOpInterface-compatible features while supporting Cmt2's unique two-region design. Unlike MLIR's standard FunctionOpInterface, which requires single-region operations, Cmt2FunctionLike accommodates:
-1. Two-region operations (RuleOp, MethodOp, ValueOp) where guard and body regions share input arguments
-2. No-region operations (BindMethodOp, BindValueOp) that bind to external hardware
-
-**Interface Methods:**
-
-*Symbol Name Handling:*
-- `functionName()`: Get the function name as StringRef
-- `functionNameAttr()`: Get the function name as StringAttr
-
-*Function Kind:*
-- `getFunctionKind()`: Returns a `FunctionKind` enum (Rule, Method, or Value)
-
-*CallableOpInterface Compatibility:*
-- `getCallableRegion()`: Get the callable region (body region for two-region ops, nullptr for bind ops)
-- `getArgumentTypes()`: Get argument types from function type
-- `getResultTypes()`: Get result types from function type
-
-*Type Manipulation:*
-- `setFunctionTypeAttr(TypeAttr)`: Set the function type (unsafe, doesn't update attributes)
-- `cloneTypeWith(TypeRange inputs, TypeRange results)`: Clone function type with new inputs/outputs
-
-*Body and Region Handling:*
-- `isExternal()`: Returns true if operation has no body (always true for BindMethodOp/BindValueOp)
-- `getFunctionBody()`: Return the body region (should not be called for bind ops)
-
-*Argument and Result Counts:*
-- `getNumArguments()`: Returns the number of function arguments
-- `getNumResults()`: Returns the number of function results
-
-*Argument Attributes:*
-- `getAllArgAttrs()`: Return ArrayAttr containing all argument attribute dictionaries
-- `getArgAttrDict(index)`: Return attribute dictionary for argument at index
-- `getArgAttr(index, name)`: Return specified attribute for argument at index
-
-*Result Attributes:*
-- `getAllResAttrs()`: Return ArrayAttr containing all result attribute dictionaries
-- `getResAttrDict(index)`: Return attribute dictionary for result at index
-- `getResAttr(index, name)`: Return specified attribute for result at index
-
-**FunctionKind Enum:**
-
-The `FunctionKind` enum distinguishes between different types of callable entities:
-- `FunctionKind::Rule`: Represents a RuleOp
-- `FunctionKind::Method`: Represents a MethodOp or BindMethodOp
-- `FunctionKind::Value`: Represents a ValueOp or BindValueOp
-
-**Utility Functions:**
-
-The Cmt2 dialect provides utility functions in `Cmt2OpInterfaces.h`:
-- `isRuleOp(Operation*)`: Check if an operation is a RuleOp
-- `getFunctionKind(Operation*)`: Get the FunctionKind of an operation
-
-**Syntax:**
-
-Function-like operations use handshake.func-style syntax with shared arguments for both regions:
-```mlir
-// Method with shared arguments for guard and body
-cmt2.method @start(%a: i32, %b: i32) -> () {
-  // guard region with implicit access to %a, %b
-  %ready = ...
-  cmt2.return %ready : i1
-} {
-  // body region with implicit access to %a, %b
-  cmt2.call @x @write(%a) : (i32) -> ()
-  cmt2.call @y @write(%b) : (i32) -> ()
-}
-
-// Value returning data
-cmt2.value @result() -> (i32) {
-  // guard region
-  cmt2.return %ready : i1
-} {
-  // body region
-  %x = cmt2.call @x @read() : () -> (i32)
-  cmt2.return %x : i32
-}
-
-// Rule with no results
-cmt2.rule @swap() -> i1 {
-  // guard region computing rule condition
-  %can_fire = ...
-  cmt2.return %can_fire : i1
-} {
-  // body region with rule actions
-  ...
-}
-```
-
-These utilities simplify code that needs to distinguish between different types of callable entities, providing a uniform interface for working with rules, methods, and values.
-
-## Appendix
-
-Quotes from [`sequence/gaa`](https://github.com/sequencer/circt/blob/gaa/docs/RationalGAA.md):
-
-```markdown
-## Introduction
-
-[Guarded Atomic Action](https://ieeexplore.ieee.org/document/1560170/) provides
-a state transition based RTL design paradigm. Like any other RTL, it is defined
-by modules, and instantiates modules to construct the hierarchy of circuit. 
-
-### One-Rule-At-A-Time(ORAAT)
-
-The one-rule-at-a-time (ORAAT) semantics of a collection of rules is to pick a
-rule nondeterministically, execute it, and commit its results.
-The process is repeated endlessly, as if exactly one rule executed in each 
-clock cycle: if one rule writes to a register, the next rule observes the newly
-written value. The ORAAT semantics need not produce a deterministic answer 
-because the rules are not required to be confluent.
-
-This also implies: A state is valid, if and only if, the state can be achieved
-via executing a list of rules in sequence.
-
-The ORAAT is the essential semantic of GAA. While FIRRTL using the last-connect 
-semantic, GAA Dialect fundamentally eliminates the multi-write issue in an 
-elegant way: each rule can write to a same port, but won't be enabled together. 
+This eliminates multi-write issues: rules can write to the same port, but won't be enabled together due to scheduling constraints.
 
 ### Hardware Contract
 
-To achieve ORAAT semantics, the contract of GAA is the essence: for all
-hardware ports, `ready` signal should always exist(even it's always asserted).
-The semantic of `ready` is: port can be operated under this state.
-Accesses to different ports will `AND` together those `ready` signals together,
-serving as the implicit condition.
-Besides `ready` signals for each port, `enable` is needed for ports which might
-permute system states. The semantic of `enable` is, after analysing the system
-states(via `ready` signal), assert this signal to trigger permutation on 
-corresponding ports. 
+CMT2 uses the **ready-enable** contract:
+- `ready`: Port can be operated in current state
+- `enable`: Trigger state mutation when asserted
 
-GAA Dialect can and only can provide one contract: `ready`-`enable` contract,
-which means, it's impossible to maintain `ready`-`valid` and `token` contract
-under this Dialect, thus it needs a seamless integration to other Dialect, like
-HW or FIRRTL Dialect.
+For each method:
+- `ready = AND(all_port_ready_signals, explicit_guard)`
+- `enable`: Asserted by scheduler when rule/method fires
 
-### Methods
+---
 
-GAA Dialect borrows ideas from function-call in software, using function-like
-call-return to perform the connect operation. Basically, this idea was derived
-from Bluespec, which can was firstly introduced in "Kernel of Bluespec"(KBS1)
-presented in [Modular compilation of guarded atomic actions](https://ieeexplore.ieee.org/document/6670957).
+## Operations
 
-For each sequential components(register, FIFO, RAM), rather than directly using
-connectable ports, e,g, D/Q for register, enqueue/dequeue for FIFO, read/write
-port to RAM. GAA Dialect regards those components as instances, and call 
-methods on those instance, those call to instance will be passed to the MLIR 
-compiler to analyse the conflict matrix between rules.
+### Top-Level
 
-### Scheduling
-MLIR Compiler will schedule as much as possibles rules in a single cycle. The
-scheduling result is opaque to users, which protects user from dealing with 
-complex control circuits.
+| Operation | Description |
+|-----------|-------------|
+| `cmt2.circuit` | Container for modules |
+| `cmt2.module` | CMT2 module with rules, methods, values |
+| `cmt2.module.extern.firrtl` | External FIRRTL module binding |
 
-Scheduler will analyse from the bottom of instance hierarchy(always being 
-registers, FIFOs and RAMs), based on the call map to those methods, scheduler 
-can construct a conflict matrix among rules. There will be 4 relationships:
-- `r0 /  r1`, Conflict(C): `r0` and `r1` cannot be executed in a same cycle.
-- `r0 <> r1`, Conflict Free(CF): `r0` and `r1` can be executed in a same cycle 
-  in any order.
-- `r0 >  r1`, sequential after(SA): `r0` and `r1` can be executed in a same 
-  cycle, but `r0` should be executed after `r1`.
-- `r0 <  r1`, sequential before(SB): `r0` and `r1` can be executed in a same
-  cycle, but `r0` should be executed before `r1`.
+### Function-Like
 
-After construction to conflict matrix, `enable` signal should be automatically
-constructed by scheduler hardware generator via procedure below:
-1. From circuit bottom to top, gather the information about in the method
-   definition body, this method calls which method on which instance. Gather
-   conflict matrix information to this method.
-2. In the Rule definition, use conflict matrix for each method, generate the 
-   scheduling table, then construct a PLA.
-3. For each method definition, reduce-`AND` together all method `ready` and 
-   explicit `guard` signal as the `ready` signal of this method.
-4. pull all rule `ready` signal to scheduler PLA.
+| Operation | Description |
+|-----------|-------------|
+| `cmt2.rule` | Rule with guard and body regions |
+| `cmt2.method` | Action method with ready-enable |
+| `cmt2.value` | Read-only value method |
 
-## Operators
-- `gaa.module`: Defining a GAA Module.
-  It has a function-like region, inputs are scheduler unrelated signals, which
-  can pass down though the instance hierarchy, this is really useful to give
-  different instance clock/reset domains, and help user embedded their own
-  blackbox under other dialect into GAA Dialect.  
-  `body` of which is used to define the module body, which contains three 
-  different parts: 
-  - module instantiation via `gaa.insatnce`
-  - rule definition via `gaa.rule`
-  - method definition via `gaa.method`
-  attributes:
-  `moduleName`: the global name of this module.
+Each function-like operation has two regions:
+1. **Guard region**: Returns boolean condition
+2. **Body region**: Contains actions when guard is true
 
-- `gaa.module.extern`: Binding a `hw.module` to GAA ExtModule.
-  Like `gaa.module`, this is also a function-like region. However, this is 
-  always used for defining primitive and user operations.
-  `body` of which is used to define the module body, which only contains 
-  `gaa.method` to make a method definition, and `gaa.method` should contain a
-  `gaa.bind`, which is used to bind port of `hw.module` to `gaa.module`, making
-  scheduler being able to infer the conflict matrix.
+```mlir
+cmt2.rule @increment () -> () {
+  // Guard region
+  %ready = firrtl.constant 1 : !firrtl.uint<1>
+  cmt2.return %ready : !firrtl.uint<1>
+} {
+  // Body region
+  %val = cmt2.call @reg @read() : () -> !firrtl.uint<32>
+  %one = firrtl.constant 1 : !firrtl.uint<32>
+  %new = firrtl.add %val, %one : ...
+  cmt2.call @reg @write(%new) : ...
+  cmt2.return
+}
+```
 
-- `gaa.method`: Define a method, can be used in both GAA ExtModule and Module.
-  It defines the interface to interact with this module, in lowering to HW 
-  Dialect flow, this method is used for port generation. Beside pure hardware
-  generation, method is also used for conflict matrix detection: scheduler will
-  collect calling relationship for each method calling, from bottom to up to 
-  collect the calling relationship, and use this to schedule rules to construct
-  the hardware.  
-  For each method, the first output is the `guard` in i1, second return is 
-  optional in any hardware type, representing the return value to user call.
-  the argument of `gaa.method` can is a list, can be empty or multiple values,
-  which represent the input signals to the internal `gaa.method`.
+### Instance and Call
 
-- `gaa.rule`: Define a rule region, only can be used in the GAA Module.
-  Rule is used to define behaviors of a module. Inside rule body, user can use
-  `gaa.call` methods to each instance of this module. and use Comb Dialect to 
-  express the operation to data.
+| Operation | Description |
+|-----------|-------------|
+| `cmt2.instance` | Module instantiation |
+| `cmt2.call` | Method/value invocation |
 
-- `gaa.insatnce`: Instantiate a GAA Module or GAA ExtModule. 
-  It instantiates modules to construct the module hierarchy, this module can 
-  invoke instance module with `gaa.call`.
+### Procedural Control
 
-- `gaa.call`: call a method from an instance.
-  It is used to call a `gaa.method` of an instance in this module, it can be
-  used from the body of `gaa.rule` and `gaa.method`.
+| Operation | Description |
+|-----------|-------------|
+| `cmt2.proc.step` | Dynamic step with done signal |
+| `cmt2.proc.static_step` | Static step with fixed latency |
+| `cmt2.proc.seq` | Sequential composition |
+| `cmt2.proc.par` | Parallel composition |
+| `cmt2.proc.if` | Dynamic conditional |
+| `cmt2.proc.while` | Dynamic loop |
+| `cmt2.proc.static_if` | Static conditional |
+| `cmt2.proc.static_repeat` | Static loop |
+| `cmt2.proc.enable` | Enable a step |
+| `cmt2.proc.rule` | Multi-cycle rule |
+| `cmt2.proc.method` | Multi-cycle method |
 
-- `gaa.return`: return guard and value to caller.
-- `gaa.bind`: Binding signal to method, can only be used in GAA ExtModule.
-  - if `gaa.bind` is in the `gaa.module.extern` region, the binding should be a
-    pure blackbox binding.
-  - if `gaa.bind` is in the `gaa.method` region, the binding should be a 
-    scheduling binding, scheduler generated IO should be bind to blackbox IO.
+### External Binding
+
+| Operation | Description |
+|-----------|-------------|
+| `cmt2.bind.bare` | Bind clock/reset |
+| `cmt2.bind.value` | Bind value method |
+| `cmt2.bind.method` | Bind action method |
+
+### Interface
+
+| Operation | Description |
+|-----------|-------------|
+| `cmt2.interface` | Interface definition |
+| `cmt2.interface.def` | Interface binding |
+| `cmt2.interface.decl` | Interface placeholder |
+
+---
+
+## Interfaces (MLIR Op Interfaces)
+
+### Cmt2ModuleLike
+
+Common abstraction for module-like operations (`ModuleOp`, `ExtModuleFirrtlOp`).
+
+**Methods:**
+- `lookupFunctionLike(StringAttr)`: Look up rule/method/value by name
+
+### Cmt2FunctionLike
+
+Abstraction for callable operations with two-region design.
+
+**Methods:**
+- `functionName()`, `functionNameAttr()`: Get function name
+- `getFunctionKind()`: Returns Rule, Method, or Value
+- `getCallableRegion()`: Get body region
+- `getArgumentTypes()`, `getResultTypes()`: Type accessors
+- `isExternal()`: True for bind ops (no regions)
+
+**FunctionKind enum:**
+- `Rule`: For `RuleOp`, `ProcRuleOp`
+- `Method`: For `MethodOp`, `ProcMethodOp`, `BindMethodOp`
+- `Value`: For `ValueOp`, `BindValueOp`
+
+---
+
+## Scheduling
+
+### Conflict Matrix
+
+The scheduler analyzes method calls to build relationships:
+
+| Relation | Symbol | Meaning |
+|----------|--------|---------|
+| Conflict | `r0 / r1` | Cannot execute together |
+| ConflictFree | `r0 <> r1` | Can execute in any order |
+| SequenceBefore | `r0 < r1` | r0 must precede r1 |
+
+### Scheduling Algorithm
+
+1. **Bottom-up analysis**: Gather method call relationships from instances
+2. **Conflict propagation**: Build conflict matrix for rules
+3. **PLA generation**: Create scheduling logic
+4. **Enable generation**: Compute enable signals from guards and conflicts
+
+---
+
+## Timing System
+
+### Timing Attributes
+
+| Attribute | Description |
+|-----------|-------------|
+| `#cmt2.timing<[s,e]>` | Half-open cycle interval |
+| `#cmt2.latency<n>` | Port latency in cycles |
+| `#cmt2.interval<n>` | Initiation interval |
+| `#cmt2.port<kind,lat>` | Port timing (Go/Done/Data/Stable) |
+
+### Call-Site Timing
+
+```mlir
+cmt2.call @mem @read(%addr) {
+    arg_timing = [#cmt2.timing<[0, 1]>],
+    result_timing = [#cmt2.timing<[2, 3]>]
+} : ...
+```
+
+### Method Timing
+
+```mlir
+cmt2.method @multiply (...) -> (...) attributes {
+    static_latency = 4 : i64,
+    interval = #cmt2.interval<2>
+} { ... }
+```
+
+---
+
+## Compilation Pipeline
 
 ```
+CMT2 IR
+  → cmt2-compile-invoke        // Lower invoke to steps
+  → cmt2-tdcc                   // Generate FSM for control
+  → cmt2-static-inference      // Infer latencies
+  → cmt2-static-promotion      // Promote to static
+  → cmt2-timing-inference      // Infer timing
+  → cmt2-timing-validation     // Validate constraints
+  → cmt2-static-fsm-allocation // Allocate FSM states
+  → cmt2-compile-static        // Generate FSM hardware
+  → cmt2-proc-stmt-to-action   // Convert to action rules
+  → cmt2-proc-to-gaa           // Final GAA conversion
+  → cmt2-to-firrtl             // Convert to FIRRTL
+  → firrtl-to-verilog          // Generate Verilog
+```
+
+---
+
+## Design Decisions
+
+### Two-Region Functions
+
+Unlike MLIR's single-region `FunctionOpInterface`, CMT2 uses two regions:
+- **Guard**: Boolean condition for execution
+- **Body**: Actions when guard is true
+
+This enables:
+- Implicit ready signal computation
+- Guard-body sharing of arguments
+- Clear separation of control and data
+
+### Ready-Enable vs Ready-Valid
+
+CMT2 uses ready-enable (not ready-valid):
+- `ready`: Can operate
+- `enable`: Do operate
+
+This matches GAA semantics where:
+- Guards compute `ready`
+- Scheduler generates `enable`
+
+### Static vs Dynamic Control
+
+CMT2 supports both:
+- **Dynamic**: Runtime-determined completion (`proc.step`, `proc.while`)
+- **Static**: Compile-time known latency (`proc.static_step`, `proc.static_repeat`)
+
+Static control enables:
+- Cycle-precise timing
+- FSM optimization
+- Pipelining
+
+### FIRRTL Backend
+
+CMT2 lowers to FIRRTL (not directly to Verilog):
+- Leverages FIRRTL optimization passes
+- Reuses FIRRTL-to-Verilog pipeline
+- Enables FIRRTL ecosystem integration
+
+---
+
+## References
+
+1. Arvind et al., "A Synthesizable Subset of System Verilog", 2010
+2. Nikhil, "Bluespec System Verilog: Efficient, Correct RTL from High Level Specifications", 2004
+3. Nigam et al., "Calyx: A Language for Hardware Accelerator Generators", 2020
+
+---
+
+## See Also
+
+- [Concepts.md](Concepts.md) - GAA concepts for users
+- [Operations.md](Operations.md) - Complete operation reference
+- [Passes.md](Passes.md) - Transformation passes
+- [MultiCycle.md](MultiCycle.md) - Multi-cycle operations
