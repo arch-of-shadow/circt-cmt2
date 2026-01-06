@@ -381,11 +381,15 @@ class MethodBuilder:
         name: str | None,
         args: list[tuple[str, Cmt2Type]],
         returns: list[Cmt2Type],
+        static_latency: int | None = None,
+        interval: int | None = None,
     ):
         self._module = module
         self._name = name
         self._arg_types = args
         self._return_types = returns
+        self._static_latency = static_latency
+        self._interval = interval
         self._guard_builder: GuardBuilder | None = None
         self._body_builder: BodyBuilder | None = None
         self._op = None
@@ -400,7 +404,7 @@ class MethodBuilder:
 
     def _create_method_op(self):
         """Create the MLIR method operation."""
-        from circt.ir import InsertionPoint, StringAttr, ArrayAttr, Block, FunctionType, TypeAttr
+        from circt.ir import InsertionPoint, StringAttr, ArrayAttr, Block, FunctionType, TypeAttr, IntegerAttr, IntegerType
 
         from circt.dialects import cmt2
 
@@ -418,6 +422,17 @@ class MethodBuilder:
             arg_names = [StringAttr.get(name) for name, _ in self._arg_types]
             body_res_names = [StringAttr.get(f"res{i}") for i in range(len(self._return_types))]
 
+            # Build optional timing attributes
+            method_attrs = {}
+            if self._static_latency is not None:
+                method_attrs["static_latency"] = IntegerAttr.get(
+                    IntegerType.get_signless(64), self._static_latency
+                )
+            if self._interval is not None:
+                method_attrs["interval"] = IntegerAttr.get(
+                    IntegerType.get_signless(64), self._interval
+                )
+
             self._op = cmt2.MethodOp(
                 sym_name=StringAttr.get(self.name),
                 function_type=TypeAttr.get(func_type),
@@ -425,6 +440,10 @@ class MethodBuilder:
                 bodyResNames=ArrayAttr.get(body_res_names),
                 loc=mlir_loc,
             )
+
+            # Set timing attributes after op creation
+            for attr_name, attr_value in method_attrs.items():
+                self._op.attributes[attr_name] = attr_value
 
             # Create guard and body blocks with arguments
             arg_locs = [mlir_loc] * len(arg_mlir_types)

@@ -1214,7 +1214,7 @@ def ProcStepDoneOp : Cmt2Op<
 
 def ProcSeqOp : Cmt2Op<
   "proc.seq", [
-    ParentOneOf<["ProcRuleOp", "ProcMethodOp", "ProcSeqOp", "ProcParOp", "ProcIfOp", "ProcWhileOp"]>,
+    ParentOneOf<["ProcRuleOp", "ProcMethodOp", "ProcSeqOp", "ProcParOp", "ProcIfOp", "ProcWhileOp", "ProcStaticRepeatOp", "ProcStaticIfOp"]>,
     SingleBlock,
     NoTerminator,
     NoRegionArguments
@@ -1244,7 +1244,7 @@ def ProcSeqOp : Cmt2Op<
 
 def ProcParOp : Cmt2Op<
   "proc.par", [
-    ParentOneOf<["ProcRuleOp", "ProcMethodOp", "ProcSeqOp", "ProcParOp", "ProcIfOp", "ProcWhileOp"]>,
+    ParentOneOf<["ProcRuleOp", "ProcMethodOp", "ProcSeqOp", "ProcParOp", "ProcIfOp", "ProcWhileOp", "ProcStaticRepeatOp", "ProcStaticIfOp"]>,
     SingleBlock,
     NoTerminator,
     NoRegionArguments
@@ -1273,7 +1273,7 @@ def ProcParOp : Cmt2Op<
 
 def ProcIfOp : Cmt2Op<
   "proc.if", [
-    ParentOneOf<["ProcRuleOp", "ProcMethodOp", "ProcSeqOp", "ProcParOp", "ProcIfOp", "ProcWhileOp"]>,
+    ParentOneOf<["ProcRuleOp", "ProcMethodOp", "ProcSeqOp", "ProcParOp", "ProcIfOp", "ProcWhileOp", "ProcStaticRepeatOp", "ProcStaticIfOp"]>,
     NoRegionArguments,
     NoTerminator
   ]> {
@@ -1307,7 +1307,7 @@ def ProcIfOp : Cmt2Op<
 
 def ProcWhileOp : Cmt2Op<
   "proc.while", [
-    ParentOneOf<["ProcRuleOp", "ProcMethodOp", "ProcSeqOp", "ProcParOp", "ProcIfOp", "ProcWhileOp"]>,
+    ParentOneOf<["ProcRuleOp", "ProcMethodOp", "ProcSeqOp", "ProcParOp", "ProcIfOp", "ProcWhileOp", "ProcStaticRepeatOp", "ProcStaticIfOp"]>,
     SingleBlock,
     NoTerminator,
     NoRegionArguments

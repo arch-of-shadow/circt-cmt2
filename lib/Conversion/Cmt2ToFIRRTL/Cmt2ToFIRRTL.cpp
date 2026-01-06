@@ -1756,8 +1756,8 @@ LogicalResult LowerCmt2ToFIRRTLPass::createExtModules(
 
     StringRef extModName = extMod.getExtModuleName();
 
-    // Check if already exists
-    if (findFIRRTLExtModule(extModName, firrtlCircuit))
+    // Check if already exists (either as FExtModule or regular FModule)
+    if (findFIRRTLModuleLike(extModName, firrtlCircuit))
       continue;
 
     // Build port list from the external module's arguments and bindings

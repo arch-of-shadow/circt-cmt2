@@ -1071,6 +1071,17 @@ LogicalResult CallOp::verify() {
              << argTiming->size() << ") must match number of inputs ("
              << getInputs().size() << ")";
     }
+
+    // Verify timing bounds: start >= 0 and end > start
+    for (size_t i = 0; i < argTiming->size(); ++i) {
+      if (auto timing = dyn_cast<TimingIntervalAttr>((*argTiming)[i])) {
+        if (timing.getStart() < 0) {
+          return emitOpError("arg_timing[")
+                 << i << "] start (" << timing.getStart()
+                 << ") must be non-negative";
+        }
+      }
+    }
   }
 
   // Verify result_timing array size matches outputs
@@ -1079,6 +1090,46 @@ LogicalResult CallOp::verify() {
       return emitOpError("result_timing array size (")
              << resultTiming->size() << ") must match number of outputs ("
              << getOutputs().size() << ")";
+    }
+
+    // Verify timing bounds: start >= 0 and end > start
+    for (size_t i = 0; i < resultTiming->size(); ++i) {
+      if (auto timing = dyn_cast<TimingIntervalAttr>((*resultTiming)[i])) {
+        if (timing.getStart() < 0) {
+          return emitOpError("result_timing[")
+                 << i << "] start (" << timing.getStart()
+                 << ") must be non-negative";
+        }
+      }
+    }
+  }
+
+  // If inside a static step, verify timing is within step bounds
+  if (auto staticStep = getOperation()->getParentOfType<ProcStaticStepOp>()) {
+    int64_t stepLatency = staticStep.getLatency();
+
+    if (auto argTiming = getArgTiming()) {
+      for (size_t i = 0; i < argTiming->size(); ++i) {
+        if (auto timing = dyn_cast<TimingIntervalAttr>((*argTiming)[i])) {
+          if (timing.getEnd() > stepLatency) {
+            return emitOpError("arg_timing[")
+                   << i << "] end (" << timing.getEnd()
+                   << ") exceeds step latency (" << stepLatency << ")";
+          }
+        }
+      }
+    }
+
+    if (auto resultTiming = getResultTiming()) {
+      for (size_t i = 0; i < resultTiming->size(); ++i) {
+        if (auto timing = dyn_cast<TimingIntervalAttr>((*resultTiming)[i])) {
+          if (timing.getEnd() > stepLatency) {
+            return emitOpError("result_timing[")
+                   << i << "] end (" << timing.getEnd()
+                   << ") exceeds step latency (" << stepLatency << ")";
+          }
+        }
+      }
     }
   }
 

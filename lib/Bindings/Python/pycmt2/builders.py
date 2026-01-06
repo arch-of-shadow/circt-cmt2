@@ -464,6 +464,8 @@ class RegionBuilder:
         target,
         method_or_value,
         *args: Signal,
+        arg_timing: list[tuple[int, int]] | None = None,
+        result_timing: list[tuple[int, int]] | None = None,
     ) -> tuple[Signal, ...] | Signal | None:
         """Call a method or value on an instance.
 
@@ -471,10 +473,21 @@ class RegionBuilder:
             target: The instance to call on (Instance object), or None for @this.
             method_or_value: A MethodRef, ValueRef, or string method name.
             *args: Arguments to pass.
+            arg_timing: Optional list of (start, end) cycle timing for each argument.
+                        Each tuple specifies a half-open interval [start, end).
+                        Example: [(0, 1), (0, 1)] means both args driven at cycle 0.
+            result_timing: Optional list of (start, end) cycle timing for each result.
+                           Example: [(4, 5)] means result captured at cycle 4.
 
         Returns:
             The return values as a tuple of Signals, a single Signal,
             or None if there are no return values.
+
+        Example with timing (for static steps):
+            with mod.static_step(6, "compute") as step:
+                result = step.call(mult, "multiply", a, b,
+                    arg_timing=[(0, 1), (0, 1)],   # args at cycle 0
+                    result_timing=[(4, 5)])        # result at cycle 4
         """
         from circt.ir import InsertionPoint, FlatSymbolRefAttr, StringAttr
         from circt.dialects import cmt2
@@ -538,6 +551,29 @@ class RegionBuilder:
 
             # Create the call
             input_values = [arg.value for arg in converted_args]
+
+            # Build timing attributes if provided
+            call_attrs = {}
+            if arg_timing is not None:
+                from circt.ir import ArrayAttr, Attribute
+                timing_attrs = []
+                for start, end in arg_timing:
+                    # Parse the timing attribute from string representation
+                    attr_str = f"#cmt2.timing<[{start}, {end}]>"
+                    attr = Attribute.parse(attr_str, self._ctx.mlir_context)
+                    timing_attrs.append(attr)
+                call_attrs["arg_timing"] = ArrayAttr.get(timing_attrs)
+
+            if result_timing is not None:
+                from circt.ir import ArrayAttr, Attribute
+                timing_attrs = []
+                for start, end in result_timing:
+                    # Parse the timing attribute from string representation
+                    attr_str = f"#cmt2.timing<[{start}, {end}]>"
+                    attr = Attribute.parse(attr_str, self._ctx.mlir_context)
+                    timing_attrs.append(attr)
+                call_attrs["result_timing"] = ArrayAttr.get(timing_attrs)
+
             call_op = cmt2.CallOp(
                 result_types,
                 input_values,
@@ -545,6 +581,10 @@ class RegionBuilder:
                 method_sym,
                 loc=self._loc,
             )
+
+            # Set timing attributes after op creation
+            for attr_name, attr_value in call_attrs.items():
+                call_op.attributes[attr_name] = attr_value
 
             # Wrap results
             if len(call_op.results) == 0:
