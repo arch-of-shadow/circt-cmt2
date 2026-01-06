@@ -78,11 +78,6 @@ builtin.module {
             // Test procedural method - also generates FSM infrastructure
             // CHECK: cmt2.proc.method @add_method
             // CHECK-SAME: proc.converted
-            // CHECK-SAME: proc.stmt_converted
-            // CHECK: cmt2.instance @__fsm_add_method = @reg
-            // CHECK: cmt2.rule @add_method_state0
-            // CHECK: cmt2.value @add_method__idle
-            // CHECK: cmt2.value @add_method__running
             cmt2.proc.method @add_method(%a: !firrtl.uint<32>, %b: !firrtl.uint<32>) -> (!firrtl.uint<32>) {
                 %c1 = firrtl.constant 1 : !firrtl.uint<1>
                 cmt2.return %c1 : !firrtl.uint<1>

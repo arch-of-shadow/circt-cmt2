@@ -1,5 +1,14 @@
 // RUN: circt-opt %s | FileCheck %s
 
+// CHECK-LABEL: cmt2.circuit
+// CHECK: cmt2.module.extern.firrtl @reg
+// CHECK: cmt2.module @gcd
+// CHECK: cmt2.value @doing
+// CHECK: cmt2.rule @swap
+// CHECK: cmt2.rule @sub
+// CHECK: cmt2.method @start
+// CHECK: cmt2.value @result
+
 builtin.module {
     firrtl.circuit "Reg32" {
         firrtl.module @Reg32(in %write: !firrtl.uint<32>, in %writeEnable: !firrtl.uint<1>,
@@ -25,13 +34,13 @@ builtin.module {
             cmt2.bind.bare %clk, @clock : !firrtl.clock
             cmt2.bind.bare %rst, @reset : !firrtl.uint<1>
 
-            cmt2.bind.value @read : (!firrtl.uint<1>) -> (!firrtl.uint<32>) [ ready = @readReady, data = [@read]]
+            cmt2.bind.value @read : (!firrtl.uint<1>) -> (!firrtl.uint<32>) [ ready = "readReady", arguments = [], results = ["read"]]
 
             cmt2.bind.method @write : (!firrtl.uint<1>, !firrtl.uint<32>) -> (!firrtl.uint<1>) [
-                enable = @writeEnable,
-                ready = @writeReady,
-                inputs = [@write],
-                outputs = []
+                enable = "writeEnable",
+                ready = "writeReady",
+                arguments = ["write"],
+                results = []
             ]
         } {
             conflict = [[@write, @write]],

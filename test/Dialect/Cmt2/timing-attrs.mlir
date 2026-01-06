@@ -84,9 +84,9 @@ builtin.module {
         cmt2.module @StaticPipeline(%clk: !firrtl.clock, %rst: !firrtl.uint<1>) {
             cmt2.instance @mult_unit = @mult (%clk) : !firrtl.clock
 
-            // Static step with 4-cycle latency
-            // CHECK: cmt2.proc.static_step @do_multiply<4>
-            cmt2.proc.static_step @do_multiply <4> {
+            // Static step with 5-cycle latency (result available at cycle 4)
+            // CHECK: cmt2.proc.static_step @do_multiply<5>
+            cmt2.proc.static_step @do_multiply <5> {
                 %c10 = firrtl.constant 10 : !firrtl.uint<32>
                 %c20 = firrtl.constant 20 : !firrtl.uint<32>
                 // Call with timing guards

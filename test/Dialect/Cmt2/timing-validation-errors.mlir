@@ -2,6 +2,8 @@
 
 // Tests for TimingValidation pass error detection.
 // These tests verify that the pass correctly rejects invalid timing.
+// Note: Basic bounds checking (start >= 0, end <= step latency) is done
+// by the CallOp verifier. This file tests pass-level semantic validation.
 
 builtin.module {
     firrtl.circuit "PipelinedMult" {
@@ -32,7 +34,8 @@ builtin.module {
             conflictFree = []
         }
 
-        // Test 1: Result timing before method completes (error)
+        // Test 1: Result timing before method completes
+        // The method has latency 4, but we try to capture result at cycle 2
         cmt2.module @ResultTooEarly(%clk: !firrtl.clock, %rst: !firrtl.uint<1>) {
             cmt2.instance @mult_unit = @mult (%clk) : !firrtl.clock
 
@@ -51,30 +54,12 @@ builtin.module {
             }
         }
 
-        // Test 2: Arg timing exceeds step bounds (error)
-        cmt2.module @ArgOutOfBounds(%clk: !firrtl.clock, %rst: !firrtl.uint<1>) {
-            cmt2.instance @mult_unit = @mult (%clk) : !firrtl.clock
-
-            cmt2.proc.static_step @oob_step <4> {
-                %c10 = firrtl.constant 10 : !firrtl.uint<32>
-                %c20 = firrtl.constant 20 : !firrtl.uint<32>
-                // expected-error @+1 {{arg 0 timing [5, 6) extends beyond step latency (4)}}
-                %result = cmt2.call @mult_unit @multiply(%c10, %c20) {arg_timing = [#cmt2.timing<[5, 6]>, #cmt2.timing<[0, 1]>], result_timing = [#cmt2.timing<[4, 5]>]} : (!firrtl.uint<32>, !firrtl.uint<32>) -> !firrtl.uint<32>
-            }
-
-            cmt2.proc.rule @run() -> () {
-                %c1 = firrtl.constant 1 : !firrtl.uint<1>
-                cmt2.return %c1 : !firrtl.uint<1>
-            } control {
-                cmt2.proc.enable @oob_step
-            }
-        }
-
-        // Test 3: Pipelined calls with spacing < II (error)
+        // Test 2: Pipelined calls with spacing < II
+        // The method has II=3, but we try to call again after only 2 cycles
         cmt2.module @PipelineSpacingError(%clk: !firrtl.clock, %rst: !firrtl.uint<1>) {
             cmt2.instance @mult_unit = @mult (%clk) : !firrtl.clock
 
-            cmt2.proc.static_step @bad_pipeline_step <8> {
+            cmt2.proc.static_step @bad_pipeline_step <10> {
                 %c1 = firrtl.constant 1 : !firrtl.uint<32>
                 %c2 = firrtl.constant 2 : !firrtl.uint<32>
                 %c3 = firrtl.constant 3 : !firrtl.uint<32>

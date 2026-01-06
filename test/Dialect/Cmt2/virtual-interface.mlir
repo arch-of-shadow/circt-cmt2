@@ -1,3 +1,10 @@
+// RUN: circt-opt %s | FileCheck %s
+
+// CHECK-LABEL: cmt2.circuit
+// CHECK: cmt2.interface @OuterInterface
+// CHECK: cmt2.module @ModuleB
+// CHECK: cmt2.module @ModuleA
+
 module {
   cmt2.circuit {
     cmt2.interface @OuterInterface {

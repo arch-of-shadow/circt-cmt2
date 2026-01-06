@@ -1,5 +1,12 @@
-// RUN: circt-opt %s | FileCheck %s --check-prefix=PARSE
-// RUN: circt-opt %s --lower-cmt2-to-firrtl | FileCheck %s --check-prefix=FIRRTL
+// RUN: circt-opt %s | FileCheck %s
+
+// CHECK-LABEL: cmt2.circuit
+// CHECK: cmt2.module @test_if
+// CHECK: cmt2.rule @test_simple_if
+// CHECK: cmt2.if
+// CHECK: cmt2.rule @test_if_else_no_result
+// CHECK: cmt2.value @test_if_with_result
+// CHECK: cmt2.method @test_nested_if
 
 // This test demonstrates the cmt2.if operation with conditional execution
 

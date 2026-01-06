@@ -1,5 +1,5 @@
 // RUN: circt-opt %s | FileCheck %s
-// RUN: circt-opt %s -cmt2-print-call-info | FileCheck %s --check-prefix=CALLINFO
+// RUN: circt-opt %s -cmt2-print-call-info 2>&1 | FileCheck %s --check-prefix=CALLINFO
 
 // Test the interface mechanism with various operations
 
@@ -43,15 +43,16 @@ builtin.module {
         cmt2.module.extern.firrtl @storage : @Storage(%clk: !firrtl.clock, %rst: !firrtl.uint<1>) {
             cmt2.bind.bare %clk, @clock : !firrtl.clock
             cmt2.bind.bare %rst, @reset : !firrtl.uint<1>
-            cmt2.bind.value @read : () -> (!firrtl.uint<32>) [
-                ready = @readReady,
-                data = [@data]
+            cmt2.bind.value @read : (!firrtl.uint<1>) -> (!firrtl.uint<32>) [
+                ready = "readReady",
+                arguments = [],
+                results = ["data"]
             ]
-            cmt2.bind.method @write : (!firrtl.uint<32>) -> (!firrtl.uint<1>) [
-                enable = @writeEnable,
-                ready = @writeReady,
-                inputs = [@writeData],
-                outputs = []
+            cmt2.bind.method @write : (!firrtl.uint<1>, !firrtl.uint<32>) -> (!firrtl.uint<1>) [
+                enable = "writeEnable",
+                ready = "writeReady",
+                arguments = ["writeData"],
+                results = []
             ]
         } {
             conflict = [[@write, @write]],
@@ -69,7 +70,7 @@ builtin.module {
             cmt2.instance @store = @storage(%clk, %rst) : !firrtl.clock, !firrtl.uint<1>
 
             // Rule that calls through the interface
-            cmt2.rule @processData() {
+            cmt2.rule @processData () -> () {
                 cmt2.return
             } {
                 // Call getData through the interface
@@ -115,7 +116,7 @@ builtin.module {
                 [@DataSource1, @dataSource]
             ]
 
-            cmt2.rule @produceData() {
+            cmt2.rule @produceData () -> () {
                 %r2 = cmt2.call @reg2 @read() : () -> (!firrtl.uint<32>)
                 %c1_ui32 = firrtl.constant 1 : !firrtl.uint<32>
                 %c0_ui32 = firrtl.constant 0 : !firrtl.uint<32>
@@ -149,7 +150,8 @@ builtin.module {
 
 // CALLINFO: CallInfoView:
 // CALLINFO: Module: consumer
-// CALLINFO: Entity: @processData
-// CALLINFO: Entity: @updateData
+// CALLINFO-DAG: Entity: @processData
+// CALLINFO-DAG: Entity: @updateData
 // CALLINFO: Module: provider
-// CALLINFO: Entity: @produceData
+// CALLINFO-DAG: Entity: @produceData
+// CALLINFO-DAG: Entity: @get

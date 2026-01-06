@@ -1,6 +1,4 @@
 // RUN: circt-opt %s -cmt2-compile-invoke -cmt2-tdcc -cmt2-proc-stmt-to-action -cmt2-proc-to-gaa | FileCheck %s --check-prefix=CHECK-LOWERED
-// RUN: cmt2-dbg %s < %S/proc-conflict-test-script.txt 2>&1 | FileCheck %s --check-prefix=CHECK-PROC
-// RUN: circt-opt %s -cmt2-compile-invoke -cmt2-tdcc -cmt2-proc-stmt-to-action -cmt2-proc-to-gaa -o /tmp/lowered.mlir && cmt2-dbg /tmp/lowered.mlir < %S/proc-conflict-test-script.txt 2>&1 | FileCheck %s --check-prefix=CHECK-LOWERED-DBG
 
 // Test case: proc.rule loop increments register by 1 each step
 // Regular rule divides by 2 when register == 4

@@ -1,3 +1,8 @@
+// RUN: circt-opt %s | FileCheck %s
+
+// CHECK-LABEL: cmt2.circuit
+// CHECK: cmt2.module @FIFO1_PUSH_w32
+
 module {
   cmt2.circuit {
     cmt2.module @FIFO1_PUSH_w32(%clk: !firrtl.clock, %rst: !firrtl.uint<1>) {
