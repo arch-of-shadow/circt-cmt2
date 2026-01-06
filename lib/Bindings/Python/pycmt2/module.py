@@ -274,6 +274,8 @@ class ModuleBuilder:
         name: str | None = None,
         args: list[tuple[str, Cmt2Type]] | None = None,
         returns: list[Cmt2Type] | None = None,
+        static_latency: int | None = None,
+        interval: int | None = None,
     ) -> Iterator[MethodBuilder]:
         """Define an action method.
 
@@ -281,13 +283,27 @@ class ModuleBuilder:
             name: Optional method name.
             args: Method arguments as (name, type) pairs.
             returns: Return types.
+            static_latency: Optional fixed latency in cycles. If specified,
+                            the method has static timing and doesn't need
+                            a done signal at runtime.
+            interval: Optional initiation interval for pipelined methods.
+                      Specifies minimum cycles between consecutive calls.
 
         Yields:
             A MethodBuilder for defining guard and body.
+
+        Example with static timing:
+            with mod.method("multiply", args=[("a", UInt(32)), ("b", UInt(32))],
+                           returns=[UInt(32)], static_latency=4, interval=3) as m:
+                # Method takes 4 cycles, can start new call every 3 cycles
+                ...
         """
         from .function_builders import MethodBuilder
 
-        builder = MethodBuilder(self, name, args or [], returns or [])
+        builder = MethodBuilder(
+            self, name, args or [], returns or [],
+            static_latency=static_latency, interval=interval
+        )
         yield builder
         builder._finalize()
         self._methods[builder.name] = builder
@@ -376,20 +392,32 @@ class ModuleBuilder:
 
     @contextmanager
     def static_step(
-        self, latency: int, name: str | None = None
+        self, latency: int, name: str | None = None, interval: int | None = None
     ) -> Iterator[StepBuilder]:
         """Define a static latency step.
 
         Args:
             latency: Fixed latency in cycles.
             name: Optional step name.
+            interval: Optional initiation interval for pipelined steps.
+                      If provided, the step can accept new invocations every
+                      `interval` cycles (pipeline II). Must be <= latency.
 
         Yields:
             A StaticStepBuilder for defining step body.
+
+        Example:
+            # Simple static step (4 cycles, non-pipelined)
+            with mod.static_step(4, "multiply") as step:
+                step.call(mult, "start", a, b)
+
+            # Pipelined static step (8 cycles latency, II=2)
+            with mod.static_step(8, "pipeline", interval=2) as step:
+                step.call(pipe, "process", data)
         """
         from .proc_builders import StaticStepBuilder
 
-        builder = StaticStepBuilder(self, name, latency)
+        builder = StaticStepBuilder(self, name, latency, interval=interval)
         yield builder
         builder._finalize()
         self._steps[builder.name] = builder

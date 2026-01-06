@@ -122,12 +122,23 @@ class StaticStepBuilder(RegionBuilder):
         with mod.static_step(4, "multiply") as mult:
             # Operations with fixed 4-cycle latency
             mult.call(multiplier, multiplier.start, a, b)
+
+        # Pipelined static step (8 cycles latency, II=2)
+        with mod.static_step(8, "pipeline", interval=2) as step:
+            step.call(pipe, "process", data)
     """
 
-    def __init__(self, module: ModuleBuilder, name: str | None, latency: int):
+    def __init__(
+        self,
+        module: ModuleBuilder,
+        name: str | None,
+        latency: int,
+        interval: int | None = None,
+    ):
         self._module = module
         self._name = name
         self._latency = latency
+        self._interval = interval
         self._op = None
 
         # Capture Python source location for debugging
@@ -156,10 +167,18 @@ class StaticStepBuilder(RegionBuilder):
             self._module._circuit._ctx.mlir_context
         )
 
+        # Build interval attribute if provided
+        interval_attr = None
+        if self._interval is not None:
+            interval_attr = cmt2.IntervalAttr.get(
+                self._module._circuit._ctx.mlir_context, self._interval
+            )
+
         with InsertionPoint(self._module._op.body):
             self._op = cmt2.ProcStaticStepOp(
                 sym_name=StringAttr.get(self.name),
                 latency=IntegerAttr.get(IntegerType.get_signless(64), self._latency),
+                interval=interval_attr,
                 loc=mlir_loc,
             )
             # Create body block
