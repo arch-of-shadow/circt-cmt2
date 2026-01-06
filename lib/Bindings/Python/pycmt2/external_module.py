@@ -110,6 +110,7 @@ class ExternalModuleBuilder:
         ready_name: str | None = None,
         args: list[tuple[str, Cmt2Type]] | None = None,
         returns: list[tuple[str, Cmt2Type]] | None = None,
+        static_latency: int | None = None,
     ) -> ExternalModuleBuilder:
         """Declare a value method binding.
 
@@ -120,18 +121,22 @@ class ExternalModuleBuilder:
             ready_name: Port name for the ready output signal.
             args: Method arguments as (name, type) pairs.
             returns: Return values as (name, type) pairs.
+            static_latency: Optional fixed latency in cycles for static scheduling.
 
         Returns:
             self for chaining.
 
         Example:
             fifo.value("full", ready_name="full_ready", returns=[("full_data", UInt(1))])
+            # With static latency for pipelined access
+            mem.value("read", static_latency=2, returns=[("data", UInt(32))])
         """
         self._pending_values.append({
             "name": name,
             "ready_name": ready_name,
             "args": args or [],
             "returns": returns or [],
+            "static_latency": static_latency,
         })
         return self
 
@@ -142,6 +147,8 @@ class ExternalModuleBuilder:
         ready_name: str | None = None,
         args: list[tuple[str, Cmt2Type]] | None = None,
         returns: list[tuple[str, Cmt2Type]] | None = None,
+        static_latency: int | None = None,
+        interval: int | None = None,
     ) -> ExternalModuleBuilder:
         """Declare an action method binding.
 
@@ -153,6 +160,10 @@ class ExternalModuleBuilder:
             ready_name: Port name for the ready output signal.
             args: Method arguments as (name, type) pairs.
             returns: Return values as (name, type) pairs.
+            static_latency: Optional fixed latency in cycles for static scheduling.
+            interval: Optional initiation interval for pipelined methods.
+                      If provided, the method can accept new calls every
+                      `interval` cycles. Must be <= static_latency.
 
         Returns:
             self for chaining.
@@ -160,6 +171,11 @@ class ExternalModuleBuilder:
         Example:
             fifo.method("enq", enable_name="enq_enable", ready_name="enq_ready",
                         args=[("enq_data", UInt(32))])
+
+            # Pipelined method (8-cycle latency, can start new call every 2 cycles)
+            mult.method("multiply", static_latency=8, interval=2,
+                       args=[("a", UInt(32)), ("b", UInt(32))],
+                       returns=[("result", UInt(64))])
         """
         self._pending_methods.append({
             "name": name,
@@ -167,6 +183,8 @@ class ExternalModuleBuilder:
             "ready_name": ready_name,
             "args": args or [],
             "returns": returns or [],
+            "static_latency": static_latency,
+            "interval": interval,
         })
         return self
 
@@ -265,7 +283,7 @@ class ExternalModuleBuilder:
 
     def _add_bind_operations(self):
         """Add bind.value and bind.method operations."""
-        from circt.ir import InsertionPoint, StringAttr, ArrayAttr, Block, FunctionType, TypeAttr
+        from circt.ir import InsertionPoint, StringAttr, ArrayAttr, Block, FunctionType, TypeAttr, IntegerAttr, IntegerType
         from circt.dialects import cmt2
 
         mlir_ctx = self._circuit._ctx.mlir_context
@@ -277,6 +295,7 @@ class ExternalModuleBuilder:
             ready_name = val_info["ready_name"]
             args = val_info["args"]
             returns = val_info["returns"]
+            static_latency = val_info.get("static_latency")
 
             with InsertionPoint(self._op.body.blocks[0]):
                 arg_types = [ty.to_firrtl_type(mlir_ctx) for _, ty in args]
@@ -286,7 +305,14 @@ class ExternalModuleBuilder:
                 arg_name_attrs = [StringAttr.get(n, context=mlir_ctx) for n, _ in args]
                 res_name_attrs = [StringAttr.get(n, context=mlir_ctx) for n, _ in returns]
 
-                cmt2.BindValueOp(
+                # Build static_latency attribute if provided
+                static_latency_attr = None
+                if static_latency is not None:
+                    static_latency_attr = IntegerAttr.get(
+                        IntegerType.get_signless(64), static_latency
+                    )
+
+                op = cmt2.BindValueOp(
                     sym_name=StringAttr.get(name, context=mlir_ctx),
                     function_type=TypeAttr.get(func_type),
                     readyName=StringAttr.get(ready_name, context=mlir_ctx) if ready_name else None,
@@ -294,6 +320,9 @@ class ExternalModuleBuilder:
                     bodyResNames=ArrayAttr.get(res_name_attrs, context=mlir_ctx),
                     loc=mlir_loc,
                 )
+                # Add static_latency as attribute if provided
+                if static_latency_attr is not None:
+                    op.attributes["static_latency"] = static_latency_attr
 
         # Add method bindings
         for meth_info in self._pending_methods:
@@ -302,6 +331,8 @@ class ExternalModuleBuilder:
             ready_name = meth_info["ready_name"]
             args = meth_info["args"]
             returns = meth_info["returns"]
+            static_latency = meth_info.get("static_latency")
+            interval = meth_info.get("interval")
 
             with InsertionPoint(self._op.body.blocks[0]):
                 arg_types = [ty.to_firrtl_type(mlir_ctx) for _, ty in args]
@@ -311,13 +342,26 @@ class ExternalModuleBuilder:
                 arg_name_attrs = [StringAttr.get(n, context=mlir_ctx) for n, _ in args]
                 res_name_attrs = [StringAttr.get(n, context=mlir_ctx) for n, _ in returns]
 
-                cmt2.BindMethodOp(
+                # Build timing attributes if provided
+                static_latency_attr = None
+                if static_latency is not None:
+                    static_latency_attr = IntegerAttr.get(
+                        IntegerType.get_signless(64), static_latency
+                    )
+
+                interval_attr = None
+                if interval is not None:
+                    interval_attr = cmt2.IntervalAttr.get(mlir_ctx, interval)
+
+                op = cmt2.BindMethodOp(
                     sym_name=StringAttr.get(name, context=mlir_ctx),
                     function_type=TypeAttr.get(func_type),
                     enableName=StringAttr.get(enable_name, context=mlir_ctx) if enable_name else None,
                     readyName=StringAttr.get(ready_name, context=mlir_ctx) if ready_name else None,
                     argNames=ArrayAttr.get(arg_name_attrs, context=mlir_ctx),
                     bodyResNames=ArrayAttr.get(res_name_attrs, context=mlir_ctx),
+                    static_latency=static_latency_attr,
+                    interval=interval_attr,
                     loc=mlir_loc,
                 )
 
