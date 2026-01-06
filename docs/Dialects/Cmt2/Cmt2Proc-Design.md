@@ -545,10 +545,42 @@ def StepOp : Cmt2Op<"proc.step", [Symbol, SingleBlock, NoTerminator]> {
 
 ```mlir
 cmt2.proc.static_step @multiply <4> {
-  %a = cmt2.call @reg_a @read() : () -> i32 {guard = #cmt2.timing_guard<0, 1>}
-  %b = cmt2.call @reg_b @read() : () -> i32 {guard = #cmt2.timing_guard<0, 1>}
-  %prod = cmt2.call @mult @compute(%a, %b) {guard = #cmt2.timing_guard<1, 4>}
-  cmt2.call @reg_out @write(%prod) {guard = #cmt2.timing_guard<3, 4>}
+  %a = cmt2.call @reg_a @read() : () -> i32 {arg_timing = [], result_timing = [#cmt2.timing<[0, 1]>]}
+  %b = cmt2.call @reg_b @read() : () -> i32 {arg_timing = [], result_timing = [#cmt2.timing<[0, 1]>]}
+  %prod = cmt2.call @mult @compute(%a, %b) {arg_timing = [#cmt2.timing<[0, 1]>, #cmt2.timing<[0, 1]>], result_timing = [#cmt2.timing<[3, 4]>]}
+  cmt2.call @reg_out @write(%prod) {arg_timing = [#cmt2.timing<[3, 4]>], result_timing = []}
+}
+```
+
+#### Timing Attributes
+
+Static steps use timing attributes to specify when values are driven and captured:
+
+| Attribute | Syntax | Description |
+|-----------|--------|-------------|
+| `#cmt2.timing<[start, end]>` | Half-open interval [start, end) | When a signal is valid |
+| `arg_timing` | Array on CallOp | When each argument is driven |
+| `result_timing` | Array on CallOp | When each result is captured |
+| `static_latency` | Integer on MethodOp | Total method latency in cycles |
+| `interval` | Integer on MethodOp | Initiation interval for pipelining |
+
+**Example with Pipelining:**
+```mlir
+// Method with 4-cycle latency, can accept new call every 3 cycles
+cmt2.method @multiply(...) -> ... attributes {static_latency = 4, interval = 3} { ... }
+
+// Pipelined calls inside static step
+cmt2.proc.static_step @pipeline <10> {
+  // Call 1: args at cycle 0, result at cycle 4
+  %r1 = cmt2.call @mult @multiply(%a, %b) {
+    arg_timing = [#cmt2.timing<[0, 1]>, #cmt2.timing<[0, 1]>],
+    result_timing = [#cmt2.timing<[4, 5]>]
+  }
+  // Call 2: args at cycle 3 (respects II=3), result at cycle 7
+  %r2 = cmt2.call @mult @multiply(%c, %d) {
+    arg_timing = [#cmt2.timing<[3, 4]>, #cmt2.timing<[3, 4]>],
+    result_timing = [#cmt2.timing<[7, 8]>]
+  }
 }
 ```
 
@@ -663,7 +695,49 @@ def InvokeOp : Cmt2Op<"proc.invoke", [ControlLike]> {
   );
   let results = (outs Variadic<AnyType>:$outputs);
 }
+
+// Static control operations
+
+def StaticRepeatOp : Cmt2Op<"proc.static_repeat", [SingleBlock, NoTerminator, ControlLike]> {
+  let summary = "Static fixed-iteration loop";
+  let description = [{
+    Executes body a fixed number of times. Unlike while loops:
+    - No runtime loop condition evaluation
+    - Total latency = count * body_latency
+    - FSM advances automatically based on static timing
+  }];
+  let arguments = (ins I64Attr:$count, OptionalAttr<I64Attr>:$body_latency);
+  let regions = (region SizedRegion<1>:$body);
+}
+
+def StaticIfOp : Cmt2Op<"proc.static_if", [ControlLike]> {
+  let summary = "Static conditional with known branch latencies";
+  let description = [{
+    Conditional execution with deterministic timing:
+    - Both branches have known latencies at compile time
+    - Total latency = max(then_latency, else_latency)
+    - Shorter branch is implicitly padded
+    - No runtime done signal checking
+  }];
+  let arguments = (ins
+    I1:$cond,
+    OptionalAttr<I64Attr>:$then_latency,
+    OptionalAttr<I64Attr>:$else_latency
+  );
+  let regions = (region SizedRegion<1>:$thenRegion, AnyRegion:$elseRegion);
+}
 ```
+
+#### Static Control Summary
+
+| Control | Dynamic | Static | Latency |
+|---------|---------|--------|---------|
+| Sequential | `seq { ... }` | auto-promoted | Sum of children |
+| Parallel | `par { ... }` | auto-promoted | Max of children |
+| Conditional | `if (%c) { ... }` | `static_if (%c) <N, M> { ... }` | max(N, M) |
+| Loop | `while (%c) { ... }` | `static_repeat N { ... }` | N × body |
+
+**Promotion:** The StaticInference pass automatically promotes `seq` and `par` to static when all children are static steps.
 
 ### 4. Procedural Rule Integration
 
@@ -2460,6 +2534,292 @@ cmt2.proc.step @tdcc {
   cmt2.proc.step_done %s4
 }
 ```
+
+## Compilation Pipelines
+
+CMT2-proc supports both **static** (fixed-latency) and **dynamic** (variable-latency) control within the same program. Following Calyx's architecture, static control is first compiled into dynamic-style constructs, then the entire program is handled uniformly by TDCC.
+
+### Pipeline Overview: Static and Dynamic Merge
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         CMT2-Proc Unified Pipeline                           │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│  Input: proc.rule with mixed static/dynamic control                          │
+│  ═══════════════════════════════════════════════════                         │
+│                                                                              │
+│  control {                                                                   │
+│    seq {                                                                     │
+│      enable @init;                   // dynamic step                         │
+│      while cond {                    // dynamic control                      │
+│        static_seq<8> {               // STATIC: 8-cycle fixed latency        │
+│          enable @multiply;           // timing: cycles 0-4                   │
+│          enable @accumulate;         // timing: cycles 4-8                   │
+│        }                                                                     │
+│      }                                                                       │
+│      enable @finish;                 // dynamic step                         │
+│    }                                                                         │
+│  }                                                                           │
+│                                                                              │
+│                              │                                               │
+│                              ▼                                               │
+│  ┌─────────────────────────────────────────────────────────────────────────┐ │
+│  │                  PHASE 1: Static Compilation                            │ │
+│  │         (Process static islands FIRST, convert to dynamic)             │ │
+│  └─────────────────────────────────────────────────────────────────────────┘ │
+│                              │                                               │
+│                              ▼                                               │
+│  ┌──────────────────┐                                                        │
+│  │ TimingInference  │  Infer timing from method signatures                   │
+│  └────────┬─────────┘  Propagate latencies through static regions            │
+│           ▼                                                                  │
+│  ┌──────────────────┐                                                        │
+│  │ TimingValidation │  Validate call timing vs method contracts              │
+│  └────────┬─────────┘  Error if timing constraints violated                  │
+│           ▼                                                                  │
+│  ┌──────────────────┐                                                        │
+│  │ StaticInliner    │  Flatten nested static control                         │
+│  └────────┬─────────┘  Adjust timing offsets for composition                 │
+│           ▼                                                                  │
+│  ┌──────────────────┐                                                        │
+│  │ StaticFSM        │  Allocate FSM states for timing                        │
+│  │ Allocation       │  Graph coloring for FSM sharing                        │
+│  └────────┬─────────┘                                                        │
+│           ▼                                                                  │
+│  ┌──────────────────┐   ┌─────────────────────────────────────────────────┐  │
+│  │ CompileStatic    │──►│  Converts static_seq<8> to WRAPPER dynamic step │  │
+│  └────────┬─────────┘   │                                                 │  │
+│           │             │  Creates:                                       │  │
+│           │             │  • Internal FSM register (cycles 0-7)           │  │
+│           │             │  • Timing-guarded enables for @multiply, @acc   │  │
+│           │             │  • Done signal (asserted when FSM == 7)         │  │
+│           │             │  • Wrapper group with go/done protocol          │  │
+│           │             └─────────────────────────────────────────────────┘  │
+│           ▼                                                                  │
+│  ┌─────────────────────────────────────────────────────────────────────────┐ │
+│  │  Static islands now appear as dynamic steps with internal FSMs          │ │
+│  │  The timing is preserved INSIDE the wrapper, but from outside           │ │
+│  │  they look like regular dynamic steps with go/done signals              │ │
+│  └─────────────────────────────────────────────────────────────────────────┘ │
+│                              │                                               │
+│                              ▼                                               │
+│  ┌─────────────────────────────────────────────────────────────────────────┐ │
+│  │                  PHASE 2: Dynamic Compilation                           │ │
+│  │          (TDCC handles everything uniformly as dynamic)                 │ │
+│  └─────────────────────────────────────────────────────────────────────────┘ │
+│                              │                                               │
+│                              ▼                                               │
+│  ┌──────────────────┐                                                        │
+│  │ CompileInvoke    │  Convert invoke → step + enable                        │
+│  └────────┬─────────┘                                                        │
+│           ▼                                                                  │
+│  ┌──────────────────┐   ┌─────────────────────────────────────────────────┐  │
+│  │ TDCC             │──►│  Sees ALL steps as dynamic (including wrapped)  │  │
+│  └────────┬─────────┘   │  Computes unified FSM state assignment          │  │
+│           │             │  Builds schedule: enables + transitions          │  │
+│           │             └─────────────────────────────────────────────────┘  │
+│           ▼                                                                  │
+│  ┌──────────────────┐                                                        │
+│  │ ProcStmtToAction │  Generate outer FSM + GAA rules                        │
+│  └────────┬─────────┘  One rule per state transition                         │
+│           ▼                                                                  │
+│  ┌──────────────────┐                                                        │
+│  │ ProcToGAA        │  Clean up proc wrapper, mark converted                 │
+│  └────────┬─────────┘                                                        │
+│           ▼                                                                  │
+│  ┌─────────────────────────────────────────────────────────────────────────┐ │
+│  │                        GAA Rules + Methods                              │ │
+│  │  • Outer FSM manages control flow (seq, while, etc.)                    │ │
+│  │  • Inner FSMs (from CompileStatic) manage timing within static steps    │ │
+│  └─────────────────────────────────────────────────────────────────────────┘ │
+│                              │                                               │
+│                              ▼                                               │
+│                    lower-cmt2-to-firrtl → FIRRTL → Verilog                   │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Key Insight: CompileStatic Converts Static → Dynamic
+
+Following Calyx's design, **CompileStatic does NOT just add metadata** - it **transforms static control into dynamic-style constructs**:
+
+```
+BEFORE CompileStatic:
+├─ static_seq<8> {
+│    enable @multiply;   // timing [0,4]
+│    enable @accumulate; // timing [4,8]
+│  }
+
+AFTER CompileStatic:
+├─ step @__static_wrapper_0 {      // Dynamic wrapper
+│    instance @__timing_fsm = Reg<4>  // Internal FSM
+│    rule @__timing_tick { ... }      // FSM increment
+│    ... timing-guarded enables ...
+│  }
+│  done = @__timing_fsm.read() == 7   // Done signal
+```
+
+The static timing is **preserved inside the wrapper**, but from TDCC's perspective, this is just another dynamic step with go/done.
+
+### Phase 1: Static Compilation Passes
+
+| Pass | Purpose |
+|------|---------|
+| `TimingInference` | Infer timing from method signatures, propagate to calls |
+| `TimingValidation` | Verify call timing matches method contracts |
+| `StaticInliner` | Flatten `static_seq { static_seq { ... } }` into single static region |
+| `StaticFSMAllocation` | Allocate FSM states, graph coloring for sharing |
+| `CompileStatic` | **Convert static → dynamic wrapper with internal FSM** |
+
+### Phase 2: Dynamic Compilation Passes
+
+| Pass | Purpose |
+|------|---------|
+| `CompileInvoke` | Convert `invoke` → `step` + `enable` |
+| `TDCC` | Build unified FSM schedule for all dynamic control |
+| `ProcStmtToAction` | Generate outer FSM register + GAA rules |
+| `ProcToGAA` | Mark proc.rule as converted, cleanup |
+
+### Why This Architecture?
+
+**Calyx's insight**: Static and dynamic are just different *input formats* for describing hardware behavior. Both compile down to the same thing: **FSMs + combinational logic + registers**.
+
+| Aspect | Static Input | Dynamic Input |
+|--------|--------------|---------------|
+| **Latency** | Known at compile time | Determined at runtime |
+| **Optimization** | Aggressive: one-hot, pipelining | Conservative: wait for done |
+| **FSM behavior** | Ticks every cycle | Transitions on done signals |
+| **From TDCC's view** | Just another step with done | Native handling |
+
+### Example: Mixed Static/Dynamic
+
+```mlir
+cmt2.proc.rule @compute() {
+  cmt2.return %ready : !firrtl.uint<1>
+} control {
+  seq {
+    enable @load_data;                    // dynamic
+    static_repeat<4> {                    // STATIC: 4 iterations × 8 cycles
+      static_seq<8> {
+        enable @multiply;                 // timing [0,4]
+        enable @accumulate;               // timing [4,8]
+      }
+    }
+    enable @store_result;                 // dynamic
+  }
+}
+```
+
+**After CompileStatic** (static_repeat becomes wrapper with iteration counter):
+```mlir
+cmt2.proc.rule @compute() {
+  // Instance for iteration counter
+  cmt2.instance @__iter_reg = @Reg<2>
+  // Instance for timing FSM
+  cmt2.instance @__timing_fsm = @Reg<4>
+
+  // Wrapper step (appears dynamic to TDCC)
+  cmt2.proc.step @__static_wrapper {
+    // ... internal timing logic ...
+  }
+
+  cmt2.return %ready : !firrtl.uint<1>
+} control {
+  seq {
+    enable @load_data;
+    enable @__static_wrapper;    // <-- now dynamic!
+    enable @store_result;
+  }
+}
+```
+
+**After TDCC** (unified FSM for control flow):
+```
+FSM states:
+  0: idle
+  1: load_data active
+  2: __static_wrapper active (internal FSM handles timing)
+  3: store_result active
+  4: done
+```
+
+### Current Implementation Status
+
+| Component | Status | Notes |
+|-----------|--------|-------|
+| TimingInference | ✅ Implemented | Propagates latencies |
+| TimingValidation | ✅ Implemented | Checks contracts |
+| StaticInliner | ⚠️ Partial | Basic flattening |
+| StaticFSMAllocation | ✅ Implemented | State allocation |
+| **CompileStatic** | ❌ **Incomplete** | Adds metadata, but doesn't create wrapper |
+| CompileInvoke | ✅ Implemented | invoke → step + enable |
+| TDCC | ✅ Implemented | Unified scheduling |
+| ProcStmtToAction | ✅ Implemented | FSM + GAA rules |
+
+**The Gap**: CompileStatic currently generates FSM metadata as attributes, but doesn't transform static control into dynamic wrapper steps. This is what needs to be implemented to complete the pipeline.
+
+### Completing CompileStatic
+
+The pass should transform `static_seq<N>` into:
+
+1. **Create internal FSM register** for timing (N cycles)
+2. **Create wrapper step** that contains:
+   - FSM tick rule (increment each cycle)
+   - Timing-guarded enables for each sub-step
+3. **Create done signal** (FSM == N-1)
+4. **Replace static_seq with enable of wrapper** in control
+
+```cpp
+void CompileStatic::processStaticSeq(StaticSeqOp seq) {
+  unsigned latency = seq.getLatency();
+
+  // 1. Create timing FSM register
+  auto fsmReg = createTimingFSM(latency);
+
+  // 2. Create wrapper step
+  auto wrapper = createWrapperStep();
+
+  // 3. Add timing-guarded enables inside wrapper
+  for (auto [enable, timing] : seq.getEnables()) {
+    // Guard: fsm >= start && fsm < end
+    addGuardedEnable(wrapper, enable, timing);
+  }
+
+  // 4. Create FSM tick rule (inside wrapper)
+  createTickRule(wrapper, fsmReg);
+
+  // 5. Replace static_seq with wrapper enable
+  replaceWithWrapperEnable(seq, wrapper);
+}
+```
+
+### Complete Pass Ordering
+
+```bash
+circt-opt input.mlir \
+  # Phase 1: Static → Dynamic
+  -cmt2-timing-inference \
+  -cmt2-timing-validation \
+  -cmt2-static-inliner \
+  -cmt2-static-fsm-allocation \
+  -cmt2-compile-static \        # Converts static → dynamic wrappers
+  # Phase 2: Unified Dynamic
+  -cmt2-compile-invoke \
+  -cmt2-tdcc \                  # Handles ALL control uniformly
+  -cmt2-proc-stmt-to-action \
+  -cmt2-proc-to-gaa \
+  # Phase 3: Lower to hardware
+  -cmt2-to-firrtl
+```
+
+### Current Workaround
+
+Until CompileStatic is completed:
+
+1. Use pure dynamic control (`seq`, `par`, `enable`) instead of `static_seq`
+2. The dynamic path through TDCC works end-to-end
+3. Timing is implicit from method latencies (less optimized but functional)
 
 ## References
 

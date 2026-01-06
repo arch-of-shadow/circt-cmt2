@@ -143,7 +143,68 @@ with m.proc_rule("compute") as rule:
 | `ctrl.par()` | Parallel composition |
 | `ctrl.if_(cond)` | Conditional with `.then_()` and `.else_()` |
 | `ctrl.while_(cond)` | While loop |
+| `ctrl.static_if(cond, then_lat, else_lat)` | Static conditional with known branch latencies |
+| `ctrl.static_repeat(count, body_lat)` | Static loop with fixed iterations |
 | `ctrl.enable(step_ref)` | Enable a step |
+| `ctrl.invoke(instance, method, *args)` | Invoke method within control |
+
+### Static Timing Features
+
+PyCMT2 supports cycle-precise timing for static control:
+
+#### Methods with Static Timing
+
+```python
+# Method with 4-cycle latency, can accept new call every 3 cycles (pipelined)
+with m.method("multiply",
+              args=[("a", UInt(32)), ("b", UInt(32))],
+              returns=[UInt(32)],
+              static_latency=4,
+              interval=3) as meth:
+    with meth.guard() as g:
+        g.always()
+    with meth.body() as body:
+        body.returns(body.mul(body.arg("a"), body.arg("b")))
+```
+
+#### Calls with Timing Annotations
+
+```python
+with m.static_step(6, "compute") as step:
+    # Specify when args are driven and result is captured
+    result = step.call(mult, "multiply", a, b,
+                       arg_timing=[(0, 1), (0, 1)],    # args at cycle 0
+                       result_timing=[(4, 5)])         # result at cycle 4
+```
+
+#### Static Control Flow
+
+```python
+with rule.control() as ctrl:
+    with ctrl.seq():
+        # Fixed 4-iteration loop
+        with ctrl.static_repeat(4, body_latency=3) as loop:
+            loop.enable(step_3cycle.ref())  # total = 4 * 3 = 12 cycles
+
+        # Static conditional with known branch latencies
+        with ctrl.static_if(cond, then_latency=5, else_latency=3) as sif:
+            with sif.then_() as then_ctrl:
+                then_ctrl.enable(branch_a.ref())
+            with sif.else_() as else_ctrl:
+                else_ctrl.enable(branch_b.ref())
+        # Total latency = max(5, 3) = 5 cycles
+```
+
+#### Timing Summary
+
+| Feature | API | Effect |
+|---------|-----|--------|
+| Method latency | `method(..., static_latency=N)` | Method takes N cycles |
+| Pipeline interval | `method(..., interval=M)` | New call every M cycles |
+| Arg timing | `call(..., arg_timing=[(s,e)])` | Args driven at cycles [s,e) |
+| Result timing | `call(..., result_timing=[(s,e)])` | Results captured at [s,e) |
+| Static loop | `static_repeat(N, body_lat=L)` | Total = N × L cycles |
+| Static if | `static_if(c, then_lat=T, else_lat=E)` | Total = max(T, E) cycles |
 
 ### External Modules
 
