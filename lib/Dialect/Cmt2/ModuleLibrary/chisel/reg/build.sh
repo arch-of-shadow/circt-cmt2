@@ -82,8 +82,8 @@ if [ ! -f "$OUTPUT_FILE" ]; then
 module {
   firrtl.circuit "${MODULE_NAME}" {
     firrtl.module @${MODULE_NAME}(
-      in %clock: !firrtl.clock,
-      in %reset: !firrtl.uint<1>,
+      in %clk: !firrtl.clock,
+      in %rst: !firrtl.uint<1>,
       in %write_enable: !firrtl.uint<1>,
       in %write_data: !firrtl.uint<${WIDTH}>,
       out %read_ready: !firrtl.uint<1>,
@@ -92,7 +92,7 @@ module {
     ) {
       // Internal register with reset
       %c${INIT}_ui${WIDTH} = firrtl.constant ${INIT} : !firrtl.uint<${WIDTH}>
-      %reg = firrtl.regreset %clock, %reset, %c${INIT}_ui${WIDTH} : !firrtl.clock, !firrtl.uint<1>, !firrtl.uint<${WIDTH}>, !firrtl.uint<${WIDTH}>
+      %reg = firrtl.regreset %clk, %rst, %c${INIT}_ui${WIDTH} : !firrtl.clock, !firrtl.uint<1>, !firrtl.uint<${WIDTH}>, !firrtl.uint<${WIDTH}>
 
       // Read is always ready, returns current register value
       %c1_ui1 = firrtl.constant 1 : !firrtl.uint<1>

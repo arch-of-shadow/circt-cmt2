@@ -50,8 +50,8 @@ cat > "$OUTPUT_FILE" << EOF
 module {
   firrtl.circuit "${MODULE_NAME}" {
     firrtl.module @${MODULE_NAME}(
-      in %clock: !firrtl.clock,
-      in %reset: !firrtl.uint<1>,
+      in %clk: !firrtl.clock,
+      in %rst: !firrtl.uint<1>,
       in %en: !firrtl.uint<1>,
       in %raddr: !firrtl.uint<${ADDR_WIDTH}>,
       out %rd1_valid: !firrtl.uint<1>,
@@ -61,7 +61,7 @@ module {
       in %wdata: !firrtl.uint<${DATA_WIDTH}>
     ) {
       // Register to track read enable (for rd1_valid)
-      %r = firrtl.reg %clock : !firrtl.clock, !firrtl.uint<1>
+      %r = firrtl.reg %clk : !firrtl.clock, !firrtl.uint<1>
       firrtl.matchingconnect %r, %en : !firrtl.uint<1>
       firrtl.matchingconnect %rd1_valid, %r : !firrtl.uint<1>
 
@@ -82,7 +82,7 @@ module {
 
       firrtl.matchingconnect %r_addr, %raddr : !firrtl.uint<${ADDR_WIDTH}>
       firrtl.matchingconnect %r_en, %en : !firrtl.uint<1>
-      firrtl.matchingconnect %r_clk, %clock : !firrtl.clock
+      firrtl.matchingconnect %r_clk, %clk : !firrtl.clock
       firrtl.matchingconnect %rdata, %r_data : !firrtl.uint<${DATA_WIDTH}>
 
       // Write port connections
@@ -94,7 +94,7 @@ module {
 
       firrtl.matchingconnect %w_addr, %waddr : !firrtl.uint<${ADDR_WIDTH}>
       firrtl.matchingconnect %w_en, %wen : !firrtl.uint<1>
-      firrtl.matchingconnect %w_clk, %clock : !firrtl.clock
+      firrtl.matchingconnect %w_clk, %clk : !firrtl.clock
       firrtl.matchingconnect %w_data, %wdata : !firrtl.uint<${DATA_WIDTH}>
 
       // Write mask is always all 1s (full word write)
