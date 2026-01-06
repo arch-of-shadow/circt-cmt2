@@ -13,128 +13,137 @@ ninja
 
 ## Running Examples
 
-### Option 1: Run Individual Examples
-
 ```bash
 cd circt-cmt2/build
-PYTHONPATH=tools/circt/python_packages/circt_core python3 ../examples/PyCMT2/counter_example.py
-PYTHONPATH=tools/circt/python_packages/circt_core python3 ../examples/PyCMT2/proc_example.py
+PYTHONPATH=tools/circt/python_packages/circt_core python3 ../examples/PyCMT2/<name>.py
 ```
 
-### Option 2: Run All Examples
+## Examples by Category
 
-```bash
-cd circt-cmt2/build
-PYTHONPATH=tools/circt/python_packages/circt_core python3 ../examples/PyCMT2/run_examples.py
-```
+### Basic Examples
 
-## Examples
-
-### counter_example.py
-
-A simple counter module demonstrating:
-- Circuit and module creation with JIT naming
-- Clock and reset ports
-- Input ports with custom types
-- Rules with guards and bodies
-- Value methods for reading state
-
-### proc_example.py
-
-A multi-cycle ALU demonstrating procedural control:
-- Groups for atomic operations
-- Static latency groups
-- Procedural rules with control flow
-- Sequential control composition
-
-## API Overview
-
-### Circuit
-
-```python
-from circt.pycmt2 import Circuit
-
-# Create circuit (name inferred from variable or explicit)
-circuit = Circuit("MyCircuit")
-
-# Create modules
-with circuit.module("Counter") as mod:
-    clk = mod.clock("clk")
-    rst = mod.reset("rst")
-    # ...
-
-# Emit MLIR IR
-print(circuit.emit_mlir())
-```
-
-### Types
-
-```python
-from circt.pycmt2 import UInt, SInt, Clock, Reset, Bundle, Vector
-
-# Integer types
-data = UInt(32)      # 32-bit unsigned
-signed = SInt(16)    # 16-bit signed
-
-# Clock and reset
-clock = Clock        # Clock type
-reset = Reset        # Reset type (1-bit uint)
-
-# Composite types
-bundle = Bundle([("valid", UInt(1)), ("data", UInt(32))])
-vector = Vector(UInt(8), 4)  # 4-element vector of UInt(8)
-```
-
-### Rules
-
-```python
-with mod.rule("increment") as rule:
-    with rule.guard() as g:
-        g.always()  # or g.returns(condition)
-    with rule.body() as b:
-        # Perform actions
-        pass
-```
-
-### Methods and Values
-
-```python
-# Action method (can modify state)
-with mod.method("write", args=[("data", UInt(32))]) as meth:
-    with meth.guard() as g:
-        g.always()
-    with meth.body() as b:
-        data = b.arg("data")
-        # ...
-
-# Value method (read-only)
-with mod.value("read", returns=[UInt(32)]) as val:
-    with val.guard() as g:
-        g.always()
-    with val.body() as b:
-        result = b.const(0, 32)
-        b.returns(result)
-```
+| File | Description |
+|------|-------------|
+| `counter.py` | Simple counter - module creation, rules, values |
+| `gcd.py` | GCD algorithm with Verilator simulation |
+| `alu.py` | Multi-cycle ALU with Verilator simulation |
 
 ### Procedural Control
 
+| File | Description |
+|------|-------------|
+| `proc.py` | Complete procedural control - steps, seq/par, if/while |
+| `proc_conflict.py` | Rule conflict detection and resolution |
+| `timing.py` | Static timing annotations for steps |
+| `static_proc.py` | **End-to-end** static proc with pipelined accumulator |
+
+### Hardware Generators
+
+| File | Description |
+|------|-------------|
+| `systolic.py` | **End-to-end** systolic array generator for matrix multiply |
+
+### Simulation & Testing
+
+| File | Description |
+|------|-------------|
+| `simulation_workspace.py` | **Start here** - Verilator workspace generation |
+| `interpreter.py` | Pure Python simulation with callbacks |
+| `proc_testbench.py` | Testbench DSL for verification |
+| `pipeline_fifo_testbench.py` | FIFO pipeline with full testbench |
+
+### Debugging & Diagnostics
+
+| File | Description |
+|------|-------------|
+| `diagnostics.py` | Source location tracing through compilation |
+
+## Quick Start Guide
+
+### 1. Basic Design (counter.py)
+
 ```python
-# Step (go-done interface)
-with mod.step("load") as grp:
-    # ... operations
-    grp.done(condition)
+from circt.pycmt2 import Circuit, UInt
 
-# Static latency group
-with mod.static_step(4, "compute") as sgrp:
-    # ... 4-cycle operation
-    pass
+circuit = Circuit("Counter")
+with circuit.module("Counter") as m:
+    clk, rst = m.clock(), m.reset()
 
-# Procedural rule with control
-with mod.proc_rule("execute") as rule:
-    with rule.guard() as g:
-        g.always()
-    with rule.control() as ctrl:
-        with ctrl.seq():
-            ctrl.enable(load.ref())
-            ctrl.enable(compute.ref())
+    with m.rule("increment") as rule:
+        with rule.guard() as g:
+            g.always()
+        with rule.body() as b:
+            pass  # increment logic
+
+print(circuit.emit_mlir())
+```
+
+### 2. Simulation Workspace (simulation_workspace.py)
+
+```python
+from circt.pycmt2 import Circuit
+from circt.pycmt2.simulation import SimulationWorkspace
+from circt.pycmt2.stl import Reg, clear_stl_registry
+
+clear_stl_registry()
+circuit = Circuit("MyDesign")
+# ... define circuit ...
+
+ws = SimulationWorkspace(circuit, "./my_sim_workspace")
+ws.generate_placeholder()
+
+# Then: cd my_sim_workspace && make && make run
+```
+
+### 3. Python Interpreter (interpreter.py)
+
+```python
+interp = circuit.interpreter()
+
+def my_guard(interp):
+    return True
+
+def my_body(interp):
+    val = interp.get_register("count")
+    interp.set_register("count", val + 1)
+
+interp.register_guard("increment", my_guard)
+interp.register_body("increment", my_body)
+
+for _ in range(10):
+    interp.step()
+```
+
+## Generated Workspaces
+
+Examples that generate simulation workspaces will create directories with `_workspace` suffix.
+These are gitignored and should not be committed:
+
+```
+*_workspace/     # All workspace directories
+sim_*/           # All sim_* directories
+```
+
+## API Reference
+
+See `docs/Dialects/Cmt2/` for full documentation:
+
+- `CMT2-Improvements-Plan.md` - PyCMT2 ecosystem overview
+- `RationaleCmt2.md` - CMT2 design philosophy
+- `ModuleLibrary.md` - STL module documentation
+
+## Debugging
+
+### Interactive Debugger
+
+```bash
+build/bin/cmt2-dbg test/Dialect/Cmt2/gcd.mlir
+```
+
+Commands: `step`, `run`, `break @rule`, `print @reg`, `trace`, `quit`
+
+### Verbose Compilation
+
+```bash
+build/bin/circt-opt input.mlir --mlir-print-ir-after-all
 ```

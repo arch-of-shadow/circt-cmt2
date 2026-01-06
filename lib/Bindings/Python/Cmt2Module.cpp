@@ -31,4 +31,65 @@ void circt::python::populateDialectCmt2Submodule(nb::module_ &m) {
           mlirDialectHandleLoadDialect(handle, ctx);
       },
       nb::arg("context"), nb::arg("load") = true);
+
+  //===--------------------------------------------------------------------===//
+  // IntervalAttr
+  //===--------------------------------------------------------------------===//
+  mlir_attribute_subclass(m, "IntervalAttr", circtCmt2IntervalAttrIsA)
+      .def_classmethod(
+          "get",
+          [](nb::object cls, MlirContext ctx, int64_t cycles) {
+            return cls(circtCmt2IntervalAttrGet(ctx, cycles));
+          },
+          nb::arg("cls"), nb::arg("context"), nb::arg("cycles"),
+          "Create an IntervalAttr with the given number of cycles.")
+      .def_property_readonly(
+          "cycles",
+          [](MlirAttribute self) {
+            return circtCmt2IntervalAttrGetCycles(self);
+          },
+          "Get the number of cycles.");
+
+  //===--------------------------------------------------------------------===//
+  // LatencyAttr
+  //===--------------------------------------------------------------------===//
+  mlir_attribute_subclass(m, "LatencyAttr", circtCmt2LatencyAttrIsA)
+      .def_classmethod(
+          "get",
+          [](nb::object cls, MlirContext ctx, int64_t cycles) {
+            return cls(circtCmt2LatencyAttrGet(ctx, cycles));
+          },
+          nb::arg("cls"), nb::arg("context"), nb::arg("cycles"),
+          "Create a LatencyAttr with the given number of cycles.")
+      .def_property_readonly(
+          "cycles",
+          [](MlirAttribute self) {
+            return circtCmt2LatencyAttrGetCycles(self);
+          },
+          "Get the number of cycles.");
+
+  //===--------------------------------------------------------------------===//
+  // TimingIntervalAttr
+  //===--------------------------------------------------------------------===//
+  mlir_attribute_subclass(m, "TimingIntervalAttr",
+                          circtCmt2TimingIntervalAttrIsA)
+      .def_classmethod(
+          "get",
+          [](nb::object cls, MlirContext ctx, int64_t start, int64_t end) {
+            return cls(circtCmt2TimingIntervalAttrGet(ctx, start, end));
+          },
+          nb::arg("cls"), nb::arg("context"), nb::arg("start"), nb::arg("end"),
+          "Create a TimingIntervalAttr with the given start and end cycles.")
+      .def_property_readonly(
+          "start",
+          [](MlirAttribute self) {
+            return circtCmt2TimingIntervalAttrGetStart(self);
+          },
+          "Get the start cycle.")
+      .def_property_readonly(
+          "end",
+          [](MlirAttribute self) {
+            return circtCmt2TimingIntervalAttrGetEnd(self);
+          },
+          "Get the end cycle.");
 }
