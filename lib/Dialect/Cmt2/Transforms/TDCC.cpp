@@ -45,10 +45,60 @@ namespace {
 // Schedule Data Structures
 //===----------------------------------------------------------------------===//
 
-/// A predecessor edge with state and guard.
+/// A guard specification that can be serialized.
+/// For if/else conditions, tracks the source operation and inversion.
+/// For dynamic step done signals, tracks the step name.
+struct GuardSpec {
+  /// The operation that defines the condition (e.g., ProcIfOp, ProcStaticIfOp).
+  /// nullptr means unconditional (always true).
+  Operation *sourceOp = nullptr;
+
+  /// Whether the guard should be inverted (for else branches).
+  bool inverted = false;
+
+  /// The actual FIRRTL Value for the condition (used during schedule building).
+  Value condValue = nullptr;
+
+  /// For dynamic step exits: the step name whose done signal guards the transition.
+  /// Empty string means no done signal guard.
+  StringRef doneStepName;
+
+  /// Create an unconditional guard.
+  static GuardSpec unconditional() { return GuardSpec{}; }
+
+  /// Create a positive guard (condition = true).
+  static GuardSpec positive(Operation *op, Value cond) {
+    GuardSpec g;
+    g.sourceOp = op;
+    g.inverted = false;
+    g.condValue = cond;
+    return g;
+  }
+
+  /// Create a negative guard (condition = false / inverted).
+  static GuardSpec negative(Operation *op, Value cond) {
+    GuardSpec g;
+    g.sourceOp = op;
+    g.inverted = true;
+    g.condValue = cond;
+    return g;
+  }
+
+  /// Create a done signal guard for dynamic step exits.
+  static GuardSpec doneGuard(StringRef stepName) {
+    GuardSpec g;
+    g.doneStepName = stepName;
+    return g;
+  }
+
+  bool isUnconditional() const { return sourceOp == nullptr && doneStepName.empty(); }
+  bool hasDoneGuard() const { return !doneStepName.empty(); }
+};
+
+/// A predecessor edge with state and guard specification.
 struct PredEdge {
   uint64_t state;
-  Value guard; // null means true guard
+  GuardSpec guard; // unconditional if guard.isUnconditional()
 };
 
 /// An assignment in the schedule.
@@ -63,9 +113,9 @@ struct Schedule {
   /// Assignments that should be enabled in a given state.
   DenseMap<uint64_t, SmallVector<Assignment>> enables;
 
-  /// Transition from one state to another when the guard is true.
-  /// (from_state, to_state, guard)
-  SmallVector<std::tuple<uint64_t, uint64_t, Value>> transitions;
+  /// Transition from one state to another with guard specification.
+  /// (from_state, to_state, guard_spec)
+  SmallVector<std::tuple<uint64_t, uint64_t, GuardSpec>> transitions;
 
   /// Maximum state ID seen.
   uint64_t maxState = 0;
@@ -75,9 +125,14 @@ struct Schedule {
     maxState = std::max(maxState, state);
   }
 
-  void addTransition(uint64_t from, uint64_t to, Value guard) {
+  void addTransition(uint64_t from, uint64_t to, GuardSpec guard) {
     transitions.push_back({from, to, guard});
     maxState = std::max(maxState, std::max(from, to));
+  }
+
+  /// Convenience overload for unconditional transitions.
+  void addTransition(uint64_t from, uint64_t to) {
+    addTransition(from, to, GuardSpec::unconditional());
   }
 };
 
@@ -124,7 +179,17 @@ private:
                           const ConflictMatrixAnalysis &cma);
 
   /// Map from EnableOp to its state ID.
+  /// For operations inside static_repeat, we use (op, iteration) as key
+  /// via the iterationOffsets map.
   DenseMap<Operation *, uint64_t> stateIds;
+
+  /// For static_repeat: map from (op, iteration_index) to state ID.
+  /// This allows different iterations to have different state IDs.
+  DenseMap<std::pair<Operation *, int64_t>, uint64_t> iterStateIds;
+
+  /// Current iteration index for static_repeat unrolling.
+  /// -1 means not inside a static_repeat.
+  int64_t currentIteration = -1;
 
   /// Map from step name to step operation.
   DenseMap<StringRef, Operation *> stepMap;
@@ -148,10 +213,31 @@ uint64_t TDCCPass::computeUniqueIds(Region &control, uint64_t curState) {
 uint64_t TDCCPass::computeUniqueIdsForOp(Operation *op, uint64_t curState) {
   return llvm::TypeSwitch<Operation *, uint64_t>(op)
       .Case<ProcEnableOp>([&](ProcEnableOp enable) {
-        stateIds[enable] = curState;
-        LLVM_DEBUG(llvm::dbgs() << "  Enable @" << enable.getGroupName()
-                                << " -> state " << curState << "\n");
-        return curState + 1;
+        // Look up the step to get its latency
+        int64_t latency = 1; // Default latency for dynamic steps
+        StringRef stepName = enable.getStepName();
+        auto it = stepMap.find(stepName);
+        if (it != stepMap.end()) {
+          if (auto staticStep = dyn_cast<ProcStaticStepOp>(it->second)) {
+            latency = staticStep.getLatency();
+            LLVM_DEBUG(llvm::dbgs() << "  Enable @" << stepName
+                                    << " has static latency " << latency << "\n");
+          }
+        }
+
+        // Use iteration-aware state ID if inside static_repeat
+        if (currentIteration >= 0) {
+          iterStateIds[{enable.getOperation(), currentIteration}] = curState;
+          LLVM_DEBUG(llvm::dbgs() << "  Enable @" << enable.getGroupName()
+                                  << " iter " << currentIteration
+                                  << " -> state " << curState << "\n");
+        } else {
+          stateIds[enable] = curState;
+          LLVM_DEBUG(llvm::dbgs() << "  Enable @" << enable.getGroupName()
+                                  << " -> state " << curState << "\n");
+        }
+        // Allocate 'latency' states for this step
+        return curState + latency;
       })
       .Case<ProcSeqOp>([&](ProcSeqOp seq) {
         // Sequential: states numbered consecutively
@@ -163,14 +249,34 @@ uint64_t TDCCPass::computeUniqueIdsForOp(Operation *op, uint64_t curState) {
         return cur;
       })
       .Case<ProcParOp>([&](ProcParOp par) {
-        // Parallel: each branch gets independent state space
-        // For now, just assign the par itself a state
-        stateIds[par] = curState;
+        // Parallel: fork-join pattern
+        // - Fork state (state N): All branches are enabled
+        // - Join: Wait for all branches to complete
+        //
+        // State allocation strategy:
+        // - Assign fork state to the par op
+        // - Each branch gets states starting from fork+1
+        // - Track max end state across all branches
+        // - Next available state is max_end + 1
+        uint64_t forkState = (curState == 0) ? 1 : curState;
+        stateIds[par] = forkState;
+        LLVM_DEBUG(llvm::dbgs() << "  Par fork -> state " << forkState << "\n");
+
+        // Process each branch, tracking max end state
+        uint64_t maxBranchEnd = forkState;
         for (Operation &stmt : par.getBody().front()) {
-          if (!isa<ProcControlEndOp>(stmt))
-            computeUniqueIdsForOp(&stmt, 0); // Reset to 0 for each branch
+          if (!isa<ProcControlEndOp>(stmt)) {
+            // Each branch starts at forkState + 1
+            // (branches execute concurrently, so they share state space
+            //  but in terms of FSM, they're all enabled from fork state)
+            uint64_t branchEnd = computeUniqueIdsForOp(&stmt, forkState + 1);
+            maxBranchEnd = std::max(maxBranchEnd, branchEnd);
+            LLVM_DEBUG(llvm::dbgs() << "    Branch ends at state " << branchEnd << "\n");
+          }
         }
-        return curState + 1;
+
+        // Return next state after all branches complete
+        return maxBranchEnd;
       })
       .Case<ProcIfOp>([&](ProcIfOp ifOp) {
         // Branches can't get initial state (start at 1 if curState == 0)
@@ -196,11 +302,15 @@ uint64_t TDCCPass::computeUniqueIdsForOp(Operation *op, uint64_t curState) {
         return elseNext;
       })
       .Case<ProcWhileOp>([&](ProcWhileOp whileOp) {
-        uint64_t cur = (curState == 0) ? 1 : curState;
-        stateIds[whileOp] = cur;
+        // While loop needs:
+        // - Header state for condition checking (state N)
+        // - Body states starting at N+1
+        uint64_t headerState = (curState == 0) ? 1 : curState;
+        stateIds[whileOp] = headerState;
+        LLVM_DEBUG(llvm::dbgs() << "  While header -> state " << headerState << "\n");
 
-        // Process body
-        uint64_t bodyNext = cur;
+        // Process body starting at headerState + 1
+        uint64_t bodyNext = headerState + 1;
         for (Operation &stmt : whileOp.getBody().front()) {
           if (!isa<ProcControlEndOp>(stmt))
             bodyNext = computeUniqueIdsForOp(&stmt, bodyNext);
@@ -216,15 +326,17 @@ uint64_t TDCCPass::computeUniqueIdsForOp(Operation *op, uint64_t curState) {
         LLVM_DEBUG(llvm::dbgs() << "  StaticRepeat (count=" << repeatOp.getCount()
                                 << ") -> state " << cur << "\n");
 
-        // Process body states for each iteration conceptually
-        // In practice, we allocate states sequentially for all iterations
+        // Process body states for each iteration with iteration-aware state IDs
         int64_t count = repeatOp.getCount();
+        int64_t savedIteration = currentIteration;
         for (int64_t i = 0; i < count; ++i) {
+          currentIteration = i;
           for (Operation &stmt : repeatOp.getBody().front()) {
             if (!isa<ProcControlEndOp>(stmt))
               cur = computeUniqueIdsForOp(&stmt, cur);
           }
         }
+        currentIteration = savedIteration;
 
         return cur;
       })
@@ -269,7 +381,7 @@ void TDCCPass::controlExits(Operation *op, SmallVectorImpl<PredEdge> &exits,
         uint64_t state = stateIds[enable];
         // Exit when step's done signal is true
         // For now, we'll use a placeholder - actual done signal comes from group
-        exits.push_back({state, nullptr}); // null = unconditional (done)
+        exits.push_back({state, GuardSpec::unconditional()});
       })
       .Case<ProcSeqOp>([&](ProcSeqOp seq) {
         // Only the last statement's exits matter
@@ -295,12 +407,10 @@ void TDCCPass::controlExits(Operation *op, SmallVectorImpl<PredEdge> &exits,
         }
       })
       .Case<ProcWhileOp>([&](ProcWhileOp whileOp) {
-        // Loop exits when condition is false
-        // This is more complex - for now just add body exits
-        for (Operation &stmt : whileOp.getBody().front()) {
-          if (!isa<ProcControlEndOp>(stmt))
-            controlExits(&stmt, exits, builder);
-        }
+        // Loop exits from header state when condition is false
+        // The header state has guard=!cond for exit
+        uint64_t headerState = stateIds[whileOp];
+        exits.push_back({headerState, GuardSpec::negative(whileOp, whileOp.getCond())});
       })
       .Case<ProcStaticRepeatOp>([&](ProcStaticRepeatOp repeatOp) {
         // Static repeat exits after all iterations complete
@@ -326,6 +436,15 @@ void TDCCPass::controlExits(Operation *op, SmallVectorImpl<PredEdge> &exits,
           }
         }
       })
+      .Case<ProcParOp>([&](ProcParOp par) {
+        // Parallel: all branches contribute exits
+        // Join happens when ALL branches complete
+        // Each branch's exit contributes to the overall parallel exit
+        for (Operation &stmt : par.getBody().front()) {
+          if (!isa<ProcControlEndOp>(stmt))
+            controlExits(&stmt, exits, builder);
+        }
+      })
       .Default([](Operation *) {
         // Skip other operations
       });
@@ -341,18 +460,56 @@ SmallVector<PredEdge> TDCCPass::calculateStatesRecur(
 
   return llvm::TypeSwitch<Operation *, SmallVector<PredEdge>>(op)
       .Case<ProcEnableOp>([&](ProcEnableOp enable) {
-        uint64_t curState = stateIds[enable];
+        // Get state ID - use iteration-aware if inside static_repeat
+        uint64_t curState;
+        if (currentIteration >= 0) {
+          auto it = iterStateIds.find({enable.getOperation(), currentIteration});
+          if (it != iterStateIds.end()) {
+            curState = it->second;
+          } else {
+            // Fallback to stateIds if not found
+            curState = stateIds[enable];
+          }
+        } else {
+          curState = stateIds[enable];
+        }
 
-        // Add transitions from predecessors
+        // Look up the step to get its latency and type
+        int64_t latency = 1;
+        bool isStaticStep = false;
+        StringRef stepName = enable.getStepName();
+        auto it = stepMap.find(stepName);
+        if (it != stepMap.end()) {
+          if (auto staticStep = dyn_cast<ProcStaticStepOp>(it->second)) {
+            latency = staticStep.getLatency();
+            isStaticStep = true;
+          }
+          // Dynamic steps (ProcStepOp) have latency=1 but need done signal
+        }
+
+        // Add transitions from predecessors to current state
         for (auto &pred : preds) {
           schedule.addTransition(pred.state, curState, pred.guard);
+        }
+
+        // For multi-cycle static steps, add internal transitions (unconditional)
+        for (int64_t i = 0; i < latency - 1; ++i) {
+          schedule.addTransition(curState + i, curState + i + 1);
         }
 
         // Record the enable (will generate go signal later)
         schedule.addEnable(curState, nullptr, nullptr, nullptr);
 
-        // Return exit edge (state, done guard)
-        return SmallVector<PredEdge>{{curState, nullptr}};
+        // Return exit edge from the last state of this step
+        // - Static steps: unconditional (FSM counts cycles)
+        // - Dynamic steps: guarded by done signal
+        uint64_t exitState = curState + latency - 1;
+        if (isStaticStep) {
+          return SmallVector<PredEdge>{{exitState, GuardSpec::unconditional()}};
+        } else {
+          // Dynamic step: exit is guarded by step's done signal
+          return SmallVector<PredEdge>{{exitState, GuardSpec::doneGuard(stepName)}};
+        }
       })
       .Case<ProcSeqOp>([&](ProcSeqOp seq) {
         SmallVector<PredEdge> prev = preds;
@@ -365,10 +522,11 @@ SmallVector<PredEdge> TDCCPass::calculateStatesRecur(
       .Case<ProcIfOp>([&](ProcIfOp ifOp) {
         Value cond = ifOp.getCond();
 
-        // True branch: predecessors with condition = true
+        // True branch: predecessors with positive condition guard
         SmallVector<PredEdge> truPreds;
         for (auto &p : preds) {
-          truPreds.push_back({p.state, cond}); // AND with condition
+          // Create guard: cond = true (positive guard)
+          truPreds.push_back({p.state, GuardSpec::positive(ifOp, cond)});
         }
 
         SmallVector<PredEdge> truExits;
@@ -378,13 +536,13 @@ SmallVector<PredEdge> TDCCPass::calculateStatesRecur(
                                             module);
         }
 
-        // False branch: predecessors with condition = false
+        // False branch: predecessors with negative condition guard (!cond)
         SmallVector<PredEdge> falExits;
         if (!ifOp.getElseRegion().empty()) {
           SmallVector<PredEdge> falPreds;
           for (auto &p : preds) {
-            // Need to create !cond
-            falPreds.push_back({p.state, nullptr}); // TODO: proper guard
+            // Create guard: cond = false (negative/inverted guard)
+            falPreds.push_back({p.state, GuardSpec::negative(ifOp, cond)});
           }
           for (Operation &stmt : ifOp.getElseRegion().front()) {
             if (!isa<ProcControlEndOp>(stmt))
@@ -400,15 +558,40 @@ SmallVector<PredEdge> TDCCPass::calculateStatesRecur(
         return allExits;
       })
       .Case<ProcWhileOp>([&](ProcWhileOp whileOp) {
-        // Simplified while handling - just process body
-        SmallVector<PredEdge> bodyPreds = preds;
+        // While loop FSM structure:
+        // - Header state: condition is checked here
+        // - Body entry: transition from header when cond=true
+        // - Body exit -> header: back-edge to re-check condition
+        // - Header -> exit: transition when cond=false
+
+        Value cond = whileOp.getCond();
+        uint64_t headerState = stateIds[whileOp];
+
+        // Add transitions from predecessors to header state
+        for (auto &pred : preds) {
+          schedule.addTransition(pred.state, headerState, pred.guard);
+        }
+
+        // Process body with header as predecessor (guarded by cond=true)
+        SmallVector<PredEdge> bodyPreds;
+        bodyPreds.push_back({headerState, GuardSpec::positive(whileOp, cond)});
+
         SmallVector<PredEdge> bodyExits;
         for (Operation &stmt : whileOp.getBody().front()) {
           if (!isa<ProcControlEndOp>(stmt))
             bodyExits = calculateStatesRecur(schedule, &stmt, bodyPreds,
                                              builder, module);
         }
-        return bodyExits;
+
+        // Add back-edge: body exit -> header (to re-check condition)
+        for (auto &exitPred : bodyExits) {
+          schedule.addTransition(exitPred.state, headerState,
+                                 GuardSpec::unconditional());
+        }
+
+        // Return exit edge: header with guard=!cond (loop termination)
+        // The actual exit transitions will be added by the caller
+        return SmallVector<PredEdge>{{headerState, GuardSpec::negative(whileOp, cond)}};
       })
       .Case<ProcStaticRepeatOp>([&](ProcStaticRepeatOp repeatOp) {
         // Static repeat: process body 'count' times sequentially
@@ -416,24 +599,27 @@ SmallVector<PredEdge> TDCCPass::calculateStatesRecur(
         SmallVector<PredEdge> prev = preds;
         int64_t count = repeatOp.getCount();
 
+        int64_t savedIteration = currentIteration;
         for (int64_t i = 0; i < count; ++i) {
+          currentIteration = i;
           for (Operation &stmt : repeatOp.getBody().front()) {
             if (!isa<ProcControlEndOp>(stmt))
               prev = calculateStatesRecur(schedule, &stmt, prev, builder, module);
           }
         }
+        currentIteration = savedIteration;
 
         return prev;
       })
       .Case<ProcStaticIfOp>([&](ProcStaticIfOp staticIf) {
-        // Static if: similar to dynamic if but transitions are unconditional
-        // after the branch is taken (no done signal waiting)
+        // Static if: similar to dynamic if but with known branch latencies
         Value cond = staticIf.getCond();
 
-        // True branch: predecessors with condition = true
+        // True branch: predecessors with positive condition guard
         SmallVector<PredEdge> truPreds;
         for (auto &p : preds) {
-          truPreds.push_back({p.state, cond}); // AND with condition
+          // Create guard: cond = true (positive guard)
+          truPreds.push_back({p.state, GuardSpec::positive(staticIf, cond)});
         }
 
         SmallVector<PredEdge> truExits;
@@ -443,13 +629,13 @@ SmallVector<PredEdge> TDCCPass::calculateStatesRecur(
                                             module);
         }
 
-        // False branch: predecessors with condition = false
+        // False branch: predecessors with negative condition guard (!cond)
         SmallVector<PredEdge> falExits;
         if (!staticIf.getElseRegion().empty()) {
           SmallVector<PredEdge> falPreds;
           for (auto &p : preds) {
-            // Need to create !cond
-            falPreds.push_back({p.state, nullptr}); // TODO: proper guard
+            // Create guard: cond = false (negative/inverted guard)
+            falPreds.push_back({p.state, GuardSpec::negative(staticIf, cond)});
           }
           for (Operation &stmt : staticIf.getElseRegion().front()) {
             if (!isa<ProcControlEndOp>(stmt))
@@ -463,6 +649,49 @@ SmallVector<PredEdge> TDCCPass::calculateStatesRecur(
         allExits.append(truExits);
         allExits.append(falExits);
         return allExits;
+      })
+      .Case<ProcParOp>([&](ProcParOp par) {
+        // Parallel: fork-join pattern
+        // - Fork: single state enables all branches
+        // - Join: wait for all branches to complete
+        //
+        // FSM structure:
+        // - Predecessors transition to fork state
+        // - Fork state enables all branches simultaneously
+        // - Each branch may have different latencies
+        // - Exit when ALL branches are done (for now: when slowest completes)
+
+        uint64_t forkState = stateIds[par];
+
+        // Add transitions from predecessors to fork state
+        for (auto &pred : preds) {
+          schedule.addTransition(pred.state, forkState, pred.guard);
+        }
+
+        // Process all branches from fork state (they all start simultaneously)
+        // Each branch gets the fork state as predecessor
+        SmallVector<PredEdge> forkPreds;
+        forkPreds.push_back({forkState, GuardSpec::unconditional()});
+
+        // Collect exits from all branches
+        SmallVector<PredEdge> allBranchExits;
+        for (Operation &stmt : par.getBody().front()) {
+          if (!isa<ProcControlEndOp>(stmt)) {
+            SmallVector<PredEdge> branchExits =
+                calculateStatesRecur(schedule, &stmt, forkPreds, builder, module);
+            allBranchExits.append(branchExits);
+          }
+        }
+
+        // For fork-join: all branches must complete
+        // The parallel block exits from the latest-completing branch
+        // In terms of FSM edges, we return all branch exits
+        // The caller will handle joining them appropriately
+        //
+        // TODO: For proper join semantics with dynamic done signals,
+        // we would need to AND all branch done signals. For now, we assume
+        // static steps where latency determines completion.
+        return allBranchExits;
       })
       .Default([&](Operation *) { return preds; });
 }
@@ -485,7 +714,16 @@ void TDCCPass::realizeSchedule(Schedule &schedule, Operation *procOp,
     }
     llvm::dbgs() << "  Transitions:\n";
     for (auto &[from, to, guard] : schedule.transitions) {
-      llvm::dbgs() << "    " << from << " -> " << to << "\n";
+      llvm::dbgs() << "    " << from << " -> " << to;
+      if (!guard.isUnconditional()) {
+        llvm::dbgs() << " [guard: " << (guard.inverted ? "NOT " : "");
+        if (isa<ProcIfOp>(guard.sourceOp))
+          llvm::dbgs() << "if";
+        else if (isa<ProcStaticIfOp>(guard.sourceOp))
+          llvm::dbgs() << "static_if";
+        llvm::dbgs() << "]";
+      }
+      llvm::dbgs() << "\n";
     }
   });
 
@@ -510,6 +748,7 @@ void TDCCPass::realizeSchedule(Schedule &schedule, Operation *procOp,
 
   // Store state assignments for each enable
   SmallVector<Attribute> stateAssigns;
+  // First add non-iteration state assignments
   for (auto &[enableOp, state] : stateIds) {
     if (auto enable = dyn_cast<ProcEnableOp>(enableOp)) {
       auto entry = builder.getDictionaryAttr({
@@ -519,16 +758,82 @@ void TDCCPass::realizeSchedule(Schedule &schedule, Operation *procOp,
       stateAssigns.push_back(entry);
     }
   }
+  // Then add iteration-aware state assignments from static_repeat
+  for (auto &[key, state] : iterStateIds) {
+    auto [enableOp, iteration] = key;
+    if (auto enable = dyn_cast<ProcEnableOp>(enableOp)) {
+      auto entry = builder.getDictionaryAttr({
+        builder.getNamedAttr("step", enable.getStepNameAttr()),
+        builder.getNamedAttr("state", builder.getI64IntegerAttr(state)),
+        builder.getNamedAttr("iteration", builder.getI64IntegerAttr(iteration))
+      });
+      stateAssigns.push_back(entry);
+    }
+  }
   procOp->setAttr("tdcc.enables", builder.getArrayAttr(stateAssigns));
 
-  // Store transitions
+  // Build a map from if/static_if operations to unique IDs for guard serialization
+  DenseMap<Operation *, int64_t> condOpIds;
+  SmallVector<Attribute> condOpAttrs;
+  int64_t nextCondOpId = 0;
+
+  // First pass: identify all unique condition operations from transitions
+  for (auto &[from, to, guard] : schedule.transitions) {
+    if (!guard.isUnconditional() && guard.sourceOp) {
+      if (condOpIds.find(guard.sourceOp) == condOpIds.end()) {
+        condOpIds[guard.sourceOp] = nextCondOpId++;
+      }
+    }
+  }
+
+  // Store condition operation info (for ProcStmtToAction to look up)
+  // Each condition op is identified by its operation type and location in control region
+  for (auto &[condOp, id] : condOpIds) {
+    SmallVector<NamedAttribute> attrs;
+    attrs.push_back(builder.getNamedAttr("id", builder.getI64IntegerAttr(id)));
+
+    // Store operation type for identification
+    if (isa<ProcIfOp>(condOp)) {
+      attrs.push_back(builder.getNamedAttr("type", builder.getStringAttr("if")));
+    } else if (isa<ProcStaticIfOp>(condOp)) {
+      attrs.push_back(builder.getNamedAttr("type", builder.getStringAttr("static_if")));
+    } else if (isa<ProcWhileOp>(condOp)) {
+      attrs.push_back(builder.getNamedAttr("type", builder.getStringAttr("while")));
+    }
+
+    condOpAttrs.push_back(builder.getDictionaryAttr(attrs));
+  }
+  if (!condOpAttrs.empty()) {
+    procOp->setAttr("tdcc.cond_ops", builder.getArrayAttr(condOpAttrs));
+  }
+
+  // Store transitions with guard information
   SmallVector<Attribute> transAttrs;
   for (auto &[from, to, guard] : schedule.transitions) {
-    auto entry = builder.getDictionaryAttr({
-      builder.getNamedAttr("from", builder.getI64IntegerAttr(from)),
-      builder.getNamedAttr("to", builder.getI64IntegerAttr(to))
-    });
-    transAttrs.push_back(entry);
+    SmallVector<NamedAttribute> attrs;
+    attrs.push_back(builder.getNamedAttr("from", builder.getI64IntegerAttr(from)));
+    attrs.push_back(builder.getNamedAttr("to", builder.getI64IntegerAttr(to)));
+
+    // Serialize guard information
+    if (!guard.isUnconditional()) {
+      // Store reference to the condition operation (for if/while guards)
+      if (guard.sourceOp) {
+        auto it = condOpIds.find(guard.sourceOp);
+        if (it != condOpIds.end()) {
+          attrs.push_back(builder.getNamedAttr("guard_op_id",
+                                               builder.getI64IntegerAttr(it->second)));
+          attrs.push_back(builder.getNamedAttr("guard_inverted",
+                                               builder.getBoolAttr(guard.inverted)));
+        }
+      }
+      // Store done signal guard (for dynamic step exits)
+      if (guard.hasDoneGuard()) {
+        attrs.push_back(builder.getNamedAttr("done_step",
+                                             builder.getStringAttr(guard.doneStepName)));
+      }
+    }
+
+    transAttrs.push_back(builder.getDictionaryAttr(attrs));
   }
   procOp->setAttr("tdcc.transitions", builder.getArrayAttr(transAttrs));
 
@@ -648,6 +953,8 @@ void TDCCPass::processProcOp(Operation *procOp, cmt2::ModuleOp module) {
 
   // Clear state from previous proc op
   stateIds.clear();
+  iterStateIds.clear();
+  currentIteration = -1;
 
   // Get the control region
   Region *controlRegion = nullptr;
@@ -672,7 +979,7 @@ void TDCCPass::processProcOp(Operation *procOp, cmt2::ModuleOp module) {
   OpBuilder builder(procOp);
   Schedule schedule;
 
-  SmallVector<PredEdge> initPreds = {{0, nullptr}}; // Start at state 0
+  SmallVector<PredEdge> initPreds = {{0, GuardSpec::unconditional()}}; // Start at state 0
 
   for (Operation &op : controlRegion->front()) {
     if (!isa<ProcControlEndOp>(op))

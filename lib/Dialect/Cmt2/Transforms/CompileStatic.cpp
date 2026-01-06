@@ -88,6 +88,31 @@ private:
   /// Analyze a step for early-reset opportunities.
   EarlyResetInfo analyzeEarlyReset(ProcStaticStepOp step,
                                     const StepFSMConfig &config);
+
+  /// Find a suitable register module in the circuit.
+  Operation *findRegisterModule(CircuitOp circuit, unsigned width);
+
+  /// Transform static step into wrapper with internal FSM.
+  /// This is the key transformation that merges static path into dynamic.
+  void transformStaticStepToWrapper(ProcStaticStepOp step,
+                                     cmt2::ModuleOp module,
+                                     const StepFSMConfig &config,
+                                     const EarlyResetInfo &earlyReset);
+
+  /// Create FSM tick rule for a static step.
+  void createFSMTickRule(OpBuilder &builder, Location loc,
+                          StringRef stepName, StringRef fsmInstName,
+                          unsigned fsmWidth, int64_t numStates, bool isOneHot);
+
+  /// Create done value for a static step.
+  void createDoneValue(OpBuilder &builder, Location loc,
+                        StringRef stepName, StringRef fsmInstName,
+                        unsigned fsmWidth, int64_t doneState, bool isOneHot);
+
+  /// Create start rule that activates FSM when step is enabled.
+  void createStartRule(OpBuilder &builder, Location loc,
+                        StringRef stepName, StringRef fsmInstName,
+                        ProcStaticStepOp step, unsigned fsmWidth, bool isOneHot);
 };
 
 } // end anonymous namespace
@@ -285,6 +310,334 @@ void CompileStaticPass::annotateFSMRegisterInfo(ProcStaticStepOp step,
 }
 
 //===----------------------------------------------------------------------===//
+// Register Module Finding
+//===----------------------------------------------------------------------===//
+
+Operation *CompileStaticPass::findRegisterModule(CircuitOp circuit,
+                                                  unsigned width) {
+  // Look for existing register module in circuit
+  for (auto &op : circuit.getBodyRegion().front()) {
+    if (auto extMod = dyn_cast<ExtModuleFirrtlOp>(op)) {
+      // Look for module with read/write methods
+      bool hasRead = false, hasWrite = false;
+      for (auto &bodyOp : extMod.getBody().front()) {
+        if (auto bindValue = dyn_cast<BindValueOp>(bodyOp)) {
+          if (bindValue.getSymName() == "read")
+            hasRead = true;
+        } else if (auto bindMethod = dyn_cast<BindMethodOp>(bodyOp)) {
+          if (bindMethod.getSymName() == "write")
+            hasWrite = true;
+        }
+      }
+      if (hasRead && hasWrite)
+        return extMod;
+    }
+  }
+  return nullptr;
+}
+
+//===----------------------------------------------------------------------===//
+// FSM Tick Rule Creation
+//===----------------------------------------------------------------------===//
+
+void CompileStaticPass::createFSMTickRule(OpBuilder &builder, Location loc,
+                                           StringRef stepName,
+                                           StringRef fsmInstName,
+                                           unsigned fsmWidth, int64_t numStates,
+                                           bool isOneHot) {
+  auto fsmType = firrtl::UIntType::get(builder.getContext(), fsmWidth);
+
+  // Create rule: @{stepName}__tick
+  std::string tickRuleName = (stepName + "__tick").str();
+  auto funcType = builder.getFunctionType({}, {});
+  auto funcTypeAttr = TypeAttr::get(funcType);
+
+  auto tickRule = builder.create<RuleOp>(
+      loc, builder.getStringAttr(tickRuleName), funcTypeAttr,
+      builder.getArrayAttr({}), builder.getArrayAttr({}),
+      ArrayAttr(), ArrayAttr());
+
+  // Build guard region: fsm != 0 && fsm < numStates (running but not done)
+  Block *guardBlock = new Block();
+  tickRule.getGuard().push_back(guardBlock);
+  OpBuilder guardBuilder(guardBlock, guardBlock->begin());
+
+  // Read FSM state
+  auto instanceSym = FlatSymbolRefAttr::get(builder.getContext(), fsmInstName);
+  auto readSym = FlatSymbolRefAttr::get(builder.getContext(), "read");
+  auto fsmReadCall = guardBuilder.create<CallOp>(
+      loc, SmallVector<Type>{fsmType}, ValueRange{},
+      instanceSym, readSym,
+      ArrayAttr(), ArrayAttr());
+
+  // Guard: fsm > 0 && fsm < numStates (in progress, not idle or done)
+  auto zeroConst = guardBuilder.create<firrtl::ConstantOp>(
+      loc, fsmType, llvm::APInt(fsmWidth, 0));
+  auto notIdle = guardBuilder.create<firrtl::GTPrimOp>(
+      loc, fsmReadCall.getResult(0), zeroConst.getResult());
+
+  // For simplicity, we check that FSM hasn't reached max state
+  // In the final cycle, we don't tick anymore
+  auto maxState = guardBuilder.create<firrtl::ConstantOp>(
+      loc, fsmType, llvm::APInt(fsmWidth, numStates));
+  auto notDone = guardBuilder.create<firrtl::LTPrimOp>(
+      loc, fsmReadCall.getResult(0), maxState.getResult());
+
+  auto running = guardBuilder.create<firrtl::AndPrimOp>(
+      loc, notIdle.getResult(), notDone.getResult());
+
+  guardBuilder.create<ReturnOp>(loc, ValueRange{running.getResult()});
+
+  // Build body region: fsm <= fsm + 1
+  Block *bodyBlock = new Block();
+  tickRule.getBody().push_back(bodyBlock);
+  OpBuilder bodyBuilder(bodyBlock, bodyBlock->begin());
+
+  // Read current state
+  auto fsmReadCall2 = bodyBuilder.create<CallOp>(
+      loc, SmallVector<Type>{fsmType}, ValueRange{},
+      instanceSym, readSym,
+      ArrayAttr(), ArrayAttr());
+
+  // Compute next state
+  Value nextState;
+  if (isOneHot) {
+    // One-hot: shift left by 1
+    auto shiftAmt = bodyBuilder.create<firrtl::ConstantOp>(
+        loc, firrtl::UIntType::get(builder.getContext(), 1),
+        llvm::APInt(1, 1));
+    nextState = bodyBuilder.create<firrtl::DShlPrimOp>(
+        loc, fsmReadCall2.getResult(0), shiftAmt.getResult()).getResult();
+  } else {
+    // Binary: increment by 1
+    auto oneConst = bodyBuilder.create<firrtl::ConstantOp>(
+        loc, fsmType, llvm::APInt(fsmWidth, 1));
+    nextState = bodyBuilder.create<firrtl::AddPrimOp>(
+        loc, fsmReadCall2.getResult(0), oneConst.getResult()).getResult();
+  }
+
+  // Write next state
+  auto writeSym = FlatSymbolRefAttr::get(builder.getContext(), "write");
+  bodyBuilder.create<CallOp>(
+      loc, SmallVector<Type>{}, ValueRange{nextState},
+      instanceSym, writeSym,
+      ArrayAttr(), ArrayAttr());
+
+  bodyBuilder.create<ReturnOp>(loc);
+
+  LLVM_DEBUG(llvm::dbgs() << "  Created FSM tick rule @" << tickRuleName << "\n");
+}
+
+//===----------------------------------------------------------------------===//
+// Done Value Creation
+//===----------------------------------------------------------------------===//
+
+void CompileStaticPass::createDoneValue(OpBuilder &builder, Location loc,
+                                         StringRef stepName,
+                                         StringRef fsmInstName,
+                                         unsigned fsmWidth, int64_t doneState,
+                                         bool isOneHot) {
+  auto fsmType = firrtl::UIntType::get(builder.getContext(), fsmWidth);
+  auto boolType = firrtl::UIntType::get(builder.getContext(), 1);
+
+  // Create value: @{stepName}__done
+  std::string doneValueName = (stepName + "__done").str();
+  auto funcType = builder.getFunctionType({}, {boolType});
+  auto funcTypeAttr = TypeAttr::get(funcType);
+
+  auto doneValue = builder.create<ValueOp>(
+      loc, builder.getStringAttr(doneValueName), funcTypeAttr,
+      builder.getArrayAttr({}), builder.getArrayAttr({}),
+      ArrayAttr(), ArrayAttr());
+
+  // Guard: always true
+  Block *guardBlock = new Block();
+  doneValue.getGuard().push_back(guardBlock);
+  OpBuilder guardBuilder(guardBlock, guardBlock->begin());
+  auto trueConst = guardBuilder.create<firrtl::ConstantOp>(
+      loc, boolType, llvm::APInt(1, 1));
+  guardBuilder.create<ReturnOp>(loc, ValueRange{trueConst.getResult()});
+
+  // Body: return fsm >= doneState (step has completed its cycles)
+  Block *bodyBlock = new Block();
+  doneValue.getBody().push_back(bodyBlock);
+  OpBuilder bodyBuilder(bodyBlock, bodyBlock->begin());
+
+  auto instanceSym = FlatSymbolRefAttr::get(builder.getContext(), fsmInstName);
+  auto readSym = FlatSymbolRefAttr::get(builder.getContext(), "read");
+  auto fsmReadCall = bodyBuilder.create<CallOp>(
+      loc, SmallVector<Type>{fsmType}, ValueRange{},
+      instanceSym, readSym,
+      ArrayAttr(), ArrayAttr());
+
+  // done = fsm >= doneState
+  auto doneStateConst = bodyBuilder.create<firrtl::ConstantOp>(
+      loc, fsmType, llvm::APInt(fsmWidth, doneState));
+  auto isDone = bodyBuilder.create<firrtl::GEQPrimOp>(
+      loc, fsmReadCall.getResult(0), doneStateConst.getResult());
+
+  bodyBuilder.create<ReturnOp>(loc, ValueRange{isDone.getResult()});
+
+  LLVM_DEBUG(llvm::dbgs() << "  Created done value @" << doneValueName
+                          << " (done at state " << doneState << ")\n");
+}
+
+//===----------------------------------------------------------------------===//
+// Start Rule Creation
+//===----------------------------------------------------------------------===//
+
+void CompileStaticPass::createStartRule(OpBuilder &builder, Location loc,
+                                         StringRef stepName,
+                                         StringRef fsmInstName,
+                                         ProcStaticStepOp step,
+                                         unsigned fsmWidth, bool isOneHot) {
+  (void)step; // Used for future expansion
+  auto fsmType = firrtl::UIntType::get(builder.getContext(), fsmWidth);
+
+  // Create rule: @{stepName}__start
+  std::string startRuleName = (stepName + "__start").str();
+  auto funcType = builder.getFunctionType({}, {});
+  auto funcTypeAttr = TypeAttr::get(funcType);
+
+  auto startRule = builder.create<RuleOp>(
+      loc, builder.getStringAttr(startRuleName), funcTypeAttr,
+      builder.getArrayAttr({}), builder.getArrayAttr({}),
+      ArrayAttr(), ArrayAttr());
+
+  // Guard: FSM is idle (fsm == 0) AND step is enabled
+  // Note: The actual enable signal comes from the enclosing control flow
+  // For now, we check that FSM is idle (TDCC will handle the enable)
+  Block *guardBlock = new Block();
+  startRule.getGuard().push_back(guardBlock);
+  OpBuilder guardBuilder(guardBlock, guardBlock->begin());
+
+  auto instanceSym = FlatSymbolRefAttr::get(builder.getContext(), fsmInstName);
+  auto readSym = FlatSymbolRefAttr::get(builder.getContext(), "read");
+  auto fsmReadCall = guardBuilder.create<CallOp>(
+      loc, SmallVector<Type>{fsmType}, ValueRange{},
+      instanceSym, readSym,
+      ArrayAttr(), ArrayAttr());
+
+  auto zeroConst = guardBuilder.create<firrtl::ConstantOp>(
+      loc, fsmType, llvm::APInt(fsmWidth, 0));
+  auto isIdle = guardBuilder.create<firrtl::EQPrimOp>(
+      loc, fsmReadCall.getResult(0), zeroConst.getResult());
+
+  guardBuilder.create<ReturnOp>(loc, ValueRange{isIdle.getResult()});
+
+  // Body: Set FSM to 1 (start state)
+  Block *bodyBlock = new Block();
+  startRule.getBody().push_back(bodyBlock);
+  OpBuilder bodyBuilder(bodyBlock, bodyBlock->begin());
+
+  Value initState;
+  if (isOneHot) {
+    // One-hot: start with bit 1 set
+    initState = bodyBuilder.create<firrtl::ConstantOp>(
+        loc, fsmType, llvm::APInt(fsmWidth, 1)).getResult();
+  } else {
+    // Binary: start at state 1
+    initState = bodyBuilder.create<firrtl::ConstantOp>(
+        loc, fsmType, llvm::APInt(fsmWidth, 1)).getResult();
+  }
+
+  auto writeSym = FlatSymbolRefAttr::get(builder.getContext(), "write");
+  bodyBuilder.create<CallOp>(
+      loc, SmallVector<Type>{}, ValueRange{initState},
+      instanceSym, writeSym,
+      ArrayAttr(), ArrayAttr());
+
+  bodyBuilder.create<ReturnOp>(loc);
+
+  LLVM_DEBUG(llvm::dbgs() << "  Created start rule @" << startRuleName << "\n");
+}
+
+//===----------------------------------------------------------------------===//
+// Static Step Transformation
+//===----------------------------------------------------------------------===//
+
+void CompileStaticPass::transformStaticStepToWrapper(
+    ProcStaticStepOp step, cmt2::ModuleOp module, const StepFSMConfig &config,
+    const EarlyResetInfo &earlyReset) {
+
+  Location loc = step.getLoc();
+  StringRef stepName = step.getSymName();
+  auto circuit = module->getParentOfType<CircuitOp>();
+
+  // Find a suitable register module
+  auto regMod = findRegisterModule(circuit, config.bitwidth);
+  if (!regMod) {
+    LLVM_DEBUG(llvm::dbgs() << "  Warning: No register module found, "
+                            << "skipping wrapper transformation\n");
+    return;
+  }
+
+  // Get clock and reset from module arguments
+  Value clock, reset;
+  for (auto arg : module.getBody().getArguments()) {
+    if (isa<firrtl::ClockType>(arg.getType())) {
+      clock = arg;
+    } else if (auto uintType = dyn_cast<firrtl::UIntType>(arg.getType())) {
+      if (uintType.getWidth() == 1 && !reset) {
+        reset = arg;
+      }
+    }
+  }
+
+  if (!clock || !reset) {
+    LLVM_DEBUG(llvm::dbgs() << "  Warning: Could not find clock/reset, "
+                            << "skipping wrapper transformation\n");
+    return;
+  }
+
+  OpBuilder builder(step);
+  builder.setInsertionPointAfter(step);
+
+  // Create FSM instance
+  std::string fsmInstName = ("__fsm_" + stepName).str();
+  StringRef regModName;
+  if (auto extMod = dyn_cast<ExtModuleFirrtlOp>(regMod)) {
+    regModName = extMod.getSymName();
+  }
+
+  builder.create<InstanceOp>(
+      loc, builder.getStringAttr(fsmInstName),
+      ValueRange{clock, reset},
+      FlatSymbolRefAttr::get(builder.getContext(), regModName),
+      ArrayAttr());
+
+  LLVM_DEBUG(llvm::dbgs() << "  Created FSM instance @" << fsmInstName << "\n");
+
+  // Determine done state (either early reset or full latency)
+  int64_t doneState = config.numStates;
+  if (earlyReset.canEarlyReset) {
+    doneState = earlyReset.earlyResetState;
+    LLVM_DEBUG(llvm::dbgs() << "  Using early reset: done at state "
+                            << doneState << "\n");
+  }
+
+  // Create FSM tick rule (increments FSM each cycle while running)
+  createFSMTickRule(builder, loc, stepName, fsmInstName, config.bitwidth,
+                    config.numStates, config.isOneHot);
+
+  // Create done value (signals when step is complete)
+  createDoneValue(builder, loc, stepName, fsmInstName, config.bitwidth,
+                   doneState, config.isOneHot);
+
+  // Create start rule (activates FSM when step is enabled from idle)
+  createStartRule(builder, loc, stepName, fsmInstName, step, config.bitwidth,
+                   config.isOneHot);
+
+  // Mark step as having wrapper generated
+  step->setAttr("wrapper_generated", builder.getUnitAttr());
+  step->setAttr("wrapper_fsm_instance", builder.getStringAttr(fsmInstName));
+  step->setAttr("wrapper_done_state", builder.getI64IntegerAttr(doneState));
+
+  LLVM_DEBUG(llvm::dbgs() << "  Wrapper transformation complete for @"
+                          << stepName << "\n");
+}
+
+//===----------------------------------------------------------------------===//
 // Static Step Processing
 //===----------------------------------------------------------------------===//
 
@@ -292,8 +645,34 @@ void CompileStaticPass::processStaticStep(ProcStaticStepOp step,
                                            cmt2::ModuleOp module) {
   auto config = readFSMConfig(step);
   if (!config) {
-    LLVM_DEBUG(llvm::dbgs() << "  Skipping @" << step.getSymName()
-                            << " (no FSM allocation)\n");
+    // No FSM allocation from StaticFSMAllocation - use latency directly
+    int64_t latency = step.getLatency();
+    LLVM_DEBUG(llvm::dbgs() << "  Processing @" << step.getSymName()
+                            << " (latency=" << latency << ", no prior FSM alloc)\n");
+
+    // Create config from latency
+    StepFSMConfig defaultConfig;
+    defaultConfig.numStates = latency;
+    // Use binary encoding for > 8 states, one-hot otherwise
+    if (latency <= static_cast<int64_t>(oneHotThreshold)) {
+      defaultConfig.bitwidth = latency;
+      defaultConfig.isOneHot = true;
+    } else {
+      defaultConfig.bitwidth = llvm::Log2_64_Ceil(latency + 1);
+      defaultConfig.isOneHot = false;
+    }
+
+    // Analyze early-reset
+    EarlyResetInfo earlyReset;
+
+    // Annotate FSM register info
+    annotateFSMRegisterInfo(step, defaultConfig, earlyReset);
+
+    // Transform to wrapper with internal FSM
+    transformStaticStepToWrapper(step, module, defaultConfig, earlyReset);
+
+    // Mark as compiled
+    step->setAttr("static_compiled", OpBuilder(step).getUnitAttr());
     return;
   }
 
@@ -342,6 +721,9 @@ void CompileStaticPass::processStaticStep(ProcStaticStepOp step,
     annotateCallWithStateGuard(call, startState, endState, config->isOneHot);
     ++callIdx;
   });
+
+  // Transform to wrapper with internal FSM
+  transformStaticStepToWrapper(step, module, *config, earlyReset);
 }
 
 //===----------------------------------------------------------------------===//

@@ -114,8 +114,9 @@ void ProcStmtToActionPass::generateStateRules(
   auto boolType = firrtl::UIntType::get(builder.getContext(), 1);
   StringRef ruleName = procRule.getSymName();
 
-  // Build map from step name to state
-  DenseMap<StringRef, uint64_t> stepToState;
+  // Build map from step name to states
+  // A step can be enabled in multiple states (e.g., in static_repeat iterations)
+  DenseMap<StringRef, SmallVector<uint64_t>> stepToStates;
   if (enablesAttr) {
     for (auto enableAttr : enablesAttr) {
       auto dict = cast<DictionaryAttr>(enableAttr);
@@ -123,26 +124,54 @@ void ProcStmtToActionPass::generateStateRules(
       auto stepRef = dict.getAs<FlatSymbolRefAttr>("step");
       auto stateAttr = dict.getAs<IntegerAttr>("state");
       if (stepRef && stateAttr) {
-        stepToState[stepRef.getValue()] = stateAttr.getInt();
+        stepToStates[stepRef.getValue()].push_back(stateAttr.getInt());
       }
     }
   }
 
-  // Build map from state to next state
-  DenseMap<uint64_t, uint64_t> stateTransitions;
+  // Structure to hold transition with optional guard
+  struct TransitionInfo {
+    uint64_t toState;
+    int64_t guardOpId;   // -1 means unconditional
+    bool guardInverted;  // true for else branches
+    StringRef doneStep;  // non-empty means guarded by step's done signal
+  };
+
+  // Build map from state to its outgoing transitions (may have multiple for if/else)
+  DenseMap<uint64_t, SmallVector<TransitionInfo>> stateTransitions;
   if (transitionsAttr) {
     for (auto transAttr : transitionsAttr) {
       auto dict = cast<DictionaryAttr>(transAttr);
       auto fromAttr = dict.getAs<IntegerAttr>("from");
       auto toAttr = dict.getAs<IntegerAttr>("to");
-      if (fromAttr && toAttr) {
-        stateTransitions[fromAttr.getInt()] = toAttr.getInt();
+      if (!fromAttr || !toAttr)
+        continue;
+
+      TransitionInfo trans;
+      trans.toState = toAttr.getInt();
+      trans.guardOpId = -1;
+      trans.guardInverted = false;
+
+      // Check for guard information (if/while condition)
+      if (auto guardIdAttr = dict.getAs<IntegerAttr>("guard_op_id")) {
+        trans.guardOpId = guardIdAttr.getInt();
+        if (auto invertedAttr = dict.getAs<BoolAttr>("guard_inverted")) {
+          trans.guardInverted = invertedAttr.getValue();
+        }
       }
+
+      // Check for done signal guard (dynamic step exits)
+      if (auto doneStepAttr = dict.getAs<StringAttr>("done_step")) {
+        trans.doneStep = doneStepAttr.getValue();
+      }
+
+      stateTransitions[fromAttr.getInt()].push_back(trans);
     }
   }
 
   // Group steps by state (for parallel blocks, multiple steps share the same state)
   // We store Operation* to handle both ProcStepOp and ProcStaticStepOp
+  // With static_repeat, a step can appear in multiple states (one per iteration)
   DenseMap<uint64_t, SmallVector<Operation *>> stateToSteps;
   for (auto &op : module.getBodyRegion().front()) {
     StringRef stepName;
@@ -154,16 +183,50 @@ void ProcStmtToActionPass::generateStateRules(
       continue;
     }
 
-    auto stateIt = stepToState.find(stepName);
-    if (stateIt == stepToState.end())
+    auto stateIt = stepToStates.find(stepName);
+    if (stateIt == stepToStates.end())
       continue;
 
-    stateToSteps[stateIt->second].push_back(&op);
+    // Add this step to all states it's enabled in
+    for (uint64_t state : stateIt->second) {
+      stateToSteps[state].push_back(&op);
+    }
   }
 
-  // For each state, generate a single rule that combines all steps
-  for (auto &[state, steps] : stateToSteps) {
-    uint64_t nextState = stateTransitions.lookup(state);
+  // Collect all states that need rules (from both enables and transitions)
+  DenseSet<uint64_t> allStates;
+  for (auto &[state, _] : stateToSteps) {
+    allStates.insert(state);
+  }
+  for (auto &[fromState, transitions] : stateTransitions) {
+    allStates.insert(fromState);
+  }
+
+  // Build a map from condition op ID to the actual condition operation in control region
+  // We traverse the control region to find if/static_if/while ops and assign them IDs in order
+  DenseMap<int64_t, Operation *> condOpIdToOp;
+  int64_t nextCondOpId = 0;
+  std::function<void(Region *)> collectCondOps = [&](Region *region) {
+    if (!region || region->empty())
+      return;
+    for (auto &op : region->front()) {
+      if (isa<ProcIfOp, ProcStaticIfOp, ProcWhileOp>(&op)) {
+        condOpIdToOp[nextCondOpId++] = &op;
+      }
+      // Recurse into nested regions
+      for (auto &nestedRegion : op.getRegions()) {
+        collectCondOps(&nestedRegion);
+      }
+    }
+  };
+  collectCondOps(&procRule.getControl());
+
+  // For each state, generate a rule
+  for (uint64_t state : allStates) {
+    auto transIt = stateTransitions.find(state);
+    auto stepsIt = stateToSteps.find(state);
+    bool hasSteps = stepsIt != stateToSteps.end() && !stepsIt->second.empty();
+    bool hasTransitions = transIt != stateTransitions.end() && !transIt->second.empty();
 
     // Create rule: @{ruleName}_state{state}
     std::string stateRuleName =
@@ -195,7 +258,32 @@ void ProcStmtToActionPass::generateStateRules(
     auto inState = guardBuilder.create<firrtl::EQPrimOp>(
         loc, fsmReadCall.getResult(0), stateConst.getResult());
 
-    // If this is state 0, also AND with the original proc rule guard
+    // Guard semantics for procedural rules with FSM-based control:
+    //
+    // The original rule guard controls ENTRY ONLY (state 0), not continuation.
+    // This follows GAA (Guarded Atomic Actions) ORAAT semantics:
+    //   - Rule guard determines when a rule can fire (start execution)
+    //   - Once a rule starts (enters state 1), it's committed to complete
+    //   - Continuation states (state > 0) are unconditional on the original guard
+    //
+    // Why entry-only guard is correct:
+    //   1. GAA semantics: "pick a rule, execute it, commit" - guard is for picking
+    //   2. Hardware behavior: FSM represents committed control flow, not speculation
+    //   3. Scheduling: Other rules can fire between FSM states, but this rule
+    //      continues because it already claimed its resources
+    //   4. Predictability: Once started, the rule will complete (barring done signals)
+    //
+    // Example: proc_rule @example with guard %ready {
+    //   proc.seq { enable @step_a; enable @step_b; }
+    // }
+    //   State 0: guard = inState(0) AND %ready  (entry check)
+    //   State 1: guard = inState(1)             (step_a, unconditional)
+    //   State 2: guard = inState(2)             (step_b, unconditional)
+    //
+    // If continuation states needed re-checking of the original guard, we would
+    // risk deadlock: the FSM is in state 1, but the guard becomes false, leaving
+    // the rule stuck mid-execution.
+    //
     Value guardResult = inState.getResult();
     if (state == 0 && !procRule.getGuard().empty()) {
       // Clone the original guard region content
@@ -214,45 +302,239 @@ void ProcStmtToActionPass::generateStateRules(
 
     guardBuilder.create<ReturnOp>(loc, ValueRange{guardResult});
 
-    // Build body region: execute all steps in this state + write next state
+    // Build body region: execute step body (if any) + write next state
     Block *bodyBlock = new Block();
     stateRule.getBody().push_back(bodyBlock);
     OpBuilder bodyBuilder(bodyBlock, bodyBlock->begin());
 
-    // Clone all step bodies (except step_done)
-    // For parallel blocks, all steps execute simultaneously
-    for (auto *stepOp : steps) {
-      IRMapping bodyMapping;
-      Region *bodyRegion = nullptr;
-      if (auto step = dyn_cast<ProcStepOp>(stepOp)) {
-        bodyRegion = &step.getBody();
-      } else if (auto staticStep = dyn_cast<ProcStaticStepOp>(stepOp)) {
-        bodyRegion = &staticStep.getBody();
-      }
+    // Mapping to track cloned operations (shared across all steps in this state)
+    IRMapping bodyMapping;
 
-      if (bodyRegion && !bodyRegion->empty()) {
-        for (auto &op : bodyRegion->front()) {
-          if (!isa<ProcStepDoneOp>(op)) {
-            bodyBuilder.clone(op, bodyMapping);
+    // Clone step bodies only for states that have steps
+    if (hasSteps) {
+      for (auto *stepOp : stepsIt->second) {
+        Region *bodyRegion = nullptr;
+        if (auto step = dyn_cast<ProcStepOp>(stepOp)) {
+          bodyRegion = &step.getBody();
+        } else if (auto staticStep = dyn_cast<ProcStaticStepOp>(stepOp)) {
+          bodyRegion = &staticStep.getBody();
+        }
+
+        if (bodyRegion && !bodyRegion->empty()) {
+          for (auto &op : bodyRegion->front()) {
+            if (!isa<ProcStepDoneOp>(op)) {
+              bodyBuilder.clone(op, bodyMapping);
+            }
           }
         }
       }
     }
 
     // Write next state to FSM: cmt2.call @fsmInst @write(%nextState)
-    auto nextStateConst = bodyBuilder.create<firrtl::ConstantOp>(
-        loc, fsmType, llvm::APInt(fsmWidth, nextState));
+    // Handle conditional transitions (if/else branches)
+    Value nextStateValue;
+    std::string transitionDesc;
+
+    if (hasTransitions) {
+      auto &transitions = transIt->second;
+
+      // Check if single transition with no condition guard
+      bool singleUnguarded = (transitions.size() == 1 && transitions[0].guardOpId < 0);
+      bool hasDoneGuard = (transitions.size() == 1 && !transitions[0].doneStep.empty());
+
+      if (singleUnguarded && !hasDoneGuard) {
+        // Single unconditional transition (no condition, no done signal)
+        uint64_t nextState = transitions[0].toState;
+        nextStateValue = bodyBuilder.create<firrtl::ConstantOp>(
+            loc, fsmType, llvm::APInt(fsmWidth, nextState)).getResult();
+        transitionDesc = std::to_string(nextState);
+      } else if (hasDoneGuard) {
+        // Dynamic step exit - guard transition by done signal
+        // next_state = done ? nextState : currentState (stay until done)
+        StringRef doneStepName = transitions[0].doneStep;
+        uint64_t nextState = transitions[0].toState;
+
+        // Find the step and extract its done signal
+        // The step body was already cloned into bodyMapping (excluding ProcStepDoneOp)
+        // We need to find the done value in the original step
+        Value doneValue = nullptr;
+        if (hasSteps) {
+          for (auto *stepOp : stepsIt->second) {
+            if (auto step = dyn_cast<ProcStepOp>(stepOp)) {
+              if (step.getSymName() == doneStepName) {
+                // Find ProcStepDoneOp in the step body
+                for (auto &op : step.getBody().front()) {
+                  if (auto stepDone = dyn_cast<ProcStepDoneOp>(op)) {
+                    // The done signal should be in bodyMapping from step body cloning
+                    doneValue = bodyMapping.lookupOrNull(stepDone.getDone());
+                    if (!doneValue) {
+                      // If not in mapping, clone the done signal computation
+                      // (This handles cases where done is computed inline)
+                      Value origDone = stepDone.getDone();
+                      if (origDone.getDefiningOp()) {
+                        // Clone the defining operation chain
+                        std::function<Value(Value)> cloneDef;
+                        cloneDef = [&](Value v) -> Value {
+                          if (!v) return nullptr;
+                          if (auto mapped = bodyMapping.lookupOrNull(v))
+                            return mapped;
+                          if (auto defOp = v.getDefiningOp()) {
+                            for (Value operand : defOp->getOperands())
+                              cloneDef(operand);
+                            bodyBuilder.clone(*defOp, bodyMapping);
+                            return bodyMapping.lookup(v);
+                          }
+                          return v;
+                        };
+                        doneValue = cloneDef(origDone);
+                      }
+                    }
+                    break;
+                  }
+                }
+                break;
+              }
+            }
+          }
+        }
+
+        if (doneValue) {
+          // Generate: next_state = done ? nextState : currentState
+          auto nextConst = bodyBuilder.create<firrtl::ConstantOp>(
+              loc, fsmType, llvm::APInt(fsmWidth, nextState)).getResult();
+          auto stayConst = bodyBuilder.create<firrtl::ConstantOp>(
+              loc, fsmType, llvm::APInt(fsmWidth, state)).getResult();
+          nextStateValue = bodyBuilder.create<firrtl::MuxPrimOp>(
+              loc, doneValue, nextConst, stayConst).getResult();
+          transitionDesc = "done ? " + std::to_string(nextState) + " : " + std::to_string(state);
+        } else {
+          // Fallback: unconditional (done signal not found)
+          nextStateValue = bodyBuilder.create<firrtl::ConstantOp>(
+              loc, fsmType, llvm::APInt(fsmWidth, nextState)).getResult();
+          transitionDesc = std::to_string(nextState) + " (done signal not found)";
+        }
+      } else {
+        // Multiple conditional transitions - generate muxed next-state
+        // Group transitions by guard condition
+        // For if/else: one with guardInverted=false, one with guardInverted=true
+        Value condValue = nullptr;
+        uint64_t thenState = 0, elseState = 0;
+        bool hasThen = false, hasElse = false;
+
+        // Helper lambda to clone the operations that define a value into the body
+        // This is needed because the condition is defined in the control region
+        // but we need to use it in the generated rule body
+        IRMapping condMapping;
+        std::function<Value(Value)> cloneConditionDef = [&](Value val) -> Value {
+          if (!val)
+            return nullptr;
+
+          // Check if already mapped
+          if (auto mapped = condMapping.lookupOrNull(val))
+            return mapped;
+
+          // If it's a block argument, it should be available in scope
+          if (auto blockArg = dyn_cast<BlockArgument>(val)) {
+            // Block arguments from proc rule should be available
+            return val;
+          }
+
+          // Get the defining operation
+          Operation *defOp = val.getDefiningOp();
+          if (!defOp)
+            return val;
+
+          // Recursively clone operands first
+          for (Value operand : defOp->getOperands()) {
+            cloneConditionDef(operand);
+          }
+
+          // Clone the operation
+          Operation *cloned = bodyBuilder.clone(*defOp, condMapping);
+          return condMapping.lookup(val);
+        };
+
+        for (auto &trans : transitions) {
+          if (trans.guardOpId >= 0) {
+            // Find the condition operation and get its condition value
+            auto condOpIt = condOpIdToOp.find(trans.guardOpId);
+            if (condOpIt != condOpIdToOp.end()) {
+              Operation *condOp = condOpIt->second;
+              Value origCondValue = nullptr;
+              if (auto ifOp = dyn_cast<ProcIfOp>(condOp)) {
+                origCondValue = ifOp.getCond();
+              } else if (auto staticIfOp = dyn_cast<ProcStaticIfOp>(condOp)) {
+                origCondValue = staticIfOp.getCond();
+              } else if (auto whileOp = dyn_cast<ProcWhileOp>(condOp)) {
+                origCondValue = whileOp.getCond();
+              }
+
+              // Clone the condition computation into the rule body
+              if (origCondValue) {
+                condValue = cloneConditionDef(origCondValue);
+              }
+            }
+
+            if (trans.guardInverted) {
+              elseState = trans.toState;
+              hasElse = true;
+            } else {
+              thenState = trans.toState;
+              hasThen = true;
+            }
+          } else {
+            // Unconditional fallback
+            elseState = trans.toState;
+            hasElse = true;
+          }
+        }
+
+        if (condValue && hasThen && hasElse) {
+          // Generate: next_state = cond ? thenState : elseState
+          auto thenConst = bodyBuilder.create<firrtl::ConstantOp>(
+              loc, fsmType, llvm::APInt(fsmWidth, thenState)).getResult();
+          auto elseConst = bodyBuilder.create<firrtl::ConstantOp>(
+              loc, fsmType, llvm::APInt(fsmWidth, elseState)).getResult();
+
+          nextStateValue = bodyBuilder.create<firrtl::MuxPrimOp>(
+              loc, condValue, thenConst, elseConst).getResult();
+          transitionDesc = "cond ? " + std::to_string(thenState) + " : " + std::to_string(elseState);
+        } else if (hasThen) {
+          // Only then branch (no else)
+          nextStateValue = bodyBuilder.create<firrtl::ConstantOp>(
+              loc, fsmType, llvm::APInt(fsmWidth, thenState)).getResult();
+          transitionDesc = std::to_string(thenState);
+        } else if (hasElse) {
+          // Only else branch
+          nextStateValue = bodyBuilder.create<firrtl::ConstantOp>(
+              loc, fsmType, llvm::APInt(fsmWidth, elseState)).getResult();
+          transitionDesc = std::to_string(elseState);
+        } else {
+          // Fallback: stay in same state
+          nextStateValue = bodyBuilder.create<firrtl::ConstantOp>(
+              loc, fsmType, llvm::APInt(fsmWidth, state)).getResult();
+          transitionDesc = std::to_string(state) + " (no transition)";
+        }
+      }
+    } else {
+      // No transitions - stay in same state (shouldn't happen normally)
+      nextStateValue = bodyBuilder.create<firrtl::ConstantOp>(
+          loc, fsmType, llvm::APInt(fsmWidth, state)).getResult();
+      transitionDesc = std::to_string(state) + " (no transition)";
+    }
+
     auto writeSym = FlatSymbolRefAttr::get(builder.getContext(), "write");
     bodyBuilder.create<CallOp>(
-        loc, SmallVector<Type>{}, ValueRange{nextStateConst.getResult()},
+        loc, SmallVector<Type>{}, ValueRange{nextStateValue},
         instanceSym, writeSym,
         ArrayAttr(), ArrayAttr());
 
     bodyBuilder.create<ReturnOp>(loc);
 
     LLVM_DEBUG(llvm::dbgs() << "Generated rule @" << stateRuleName
-                            << " for state " << state << " -> " << nextState
-                            << " with " << steps.size() << " step(s)\n");
+                            << " for state " << state << " -> " << transitionDesc
+                            << (hasSteps ? " with steps" : " (wait state)")
+                            << "\n");
   }
 
   // Generate reset rule: when in done state, go back to idle
