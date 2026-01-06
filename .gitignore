@@ -23,5 +23,6 @@ lit.site.cfg.py
 
 # Generated simulation workspaces
 *_workspace/
-sim_workspace*/
-*_testbench_workspace/
+sim_*/
+examples/PyCMT2/*_workspace/
+examples/PyCMT2/sim_*/

@@ -1,3 +1,8 @@
+---
+name: mlir-ops-passes
+description: Standard workflow for adding MLIR operations, attributes, and passes to Cmt2 dialect. Use when implementing new ops, modifying TableGen definitions, adding compiler passes, fixing build errors, or updating Python bindings.
+---
+
 # MLIR Ops and Passes Development Workflow
 
 This skill documents the standard workflow for adding or updating MLIR operations, attributes, and passes in the circt-cmt2 project.
