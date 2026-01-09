@@ -22,5 +22,6 @@ add_circt_dialect_library(CIRCTCmt2
   )
 
 add_subdirectory(Analysis)
+add_subdirectory(Interpreter)
 add_subdirectory(Transforms)
 add_subdirectory(ECMT2)
