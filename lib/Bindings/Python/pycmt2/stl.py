@@ -128,16 +128,16 @@ class Wire:
     """Factory for wire external modules.
 
     Creates an external module matching C++ STLLibrary::createWireModule:
-    - clock port: "clk"
-    - reset port: "rst"
     - value method: "read" -> returns data
     - action method: "write" <- takes data
     - sequence_before("write", "read")
     - conflict("write", "write")
 
+    Note: Wire is a combinational module and does NOT have clock/reset ports.
+
     Example:
         wire_mod = Wire.create(circuit, 32)
-        temp = m.instance(wire_mod, "temp", clk=clk, rst=rst)
+        temp = m.instance(wire_mod, "temp")
     """
 
     @staticmethod
@@ -165,10 +165,9 @@ class Wire:
             firrtl_module_name = f"Wire_w{width}"
 
         # Create the external module matching ECMT2 STLLibrary::createWireModule
+        # Note: Wire is combinational and does NOT have clock/reset ports
         with circuit.external_module(name) as wire:
             wire.set_firrtl_module_name(firrtl_module_name)
-            wire.clock("clk")
-            wire.reset("rst")
             wire.value("read",
                        ready_name="read_ready",
                        returns=[("read_data", UInt(width))])
@@ -223,10 +222,8 @@ class WireDefault:
         wire_mod = Wire.create(circuit, width)
 
         with circuit.module(name) as wire_default:
-            # Internal wire instance (no clock/reset needed at this level)
-            clk = wire_default.clock("clk")
-            rst = wire_default.reset("rst")
-            inner = wire_default.instance(wire_mod, "inner", clk=clk, rst=rst)
+            # Internal wire instance (Wire is combinational, no clk/rst)
+            inner = wire_default.instance(wire_mod, "inner")
 
             # Value: read() -> data (delegates to inner)
             with wire_default.value("read", returns=[UInt(width)]) as read_val:
@@ -307,10 +304,11 @@ class FIFO1Push:
             rst = fifo.reset("rst")
 
             # Instances
+            # Reg modules need clk/rst, Wire modules don't (combinational)
             reg_data = fifo.instance(reg_data_mod, "reg_data", clk=clk, rst=rst)
             full_reg = fifo.instance(reg_bool_mod, "full_reg", clk=clk, rst=rst)
-            deqed = fifo.instance(wire_bool_mod, "deqed", clk=clk, rst=rst)
-            enqed = fifo.instance(wire_bool_mod, "enqed", clk=clk, rst=rst)
+            deqed = fifo.instance(wire_bool_mod, "deqed")
+            enqed = fifo.instance(wire_bool_mod, "enqed")
 
             # Value: full() -> bool
             with fifo.value("full", returns=[UInt(1)]) as full_val:
@@ -433,10 +431,11 @@ class FIFO1Pull:
             rst = fifo.reset("rst")
 
             # Instances
+            # Reg modules need clk/rst, Wire modules don't (combinational)
             reg_data = fifo.instance(reg_data_mod, "reg_data", clk=clk, rst=rst)
             full_reg = fifo.instance(reg_bool_mod, "full_reg", clk=clk, rst=rst)
-            deqed = fifo.instance(wire_bool_mod, "deqed", clk=clk, rst=rst)
-            enqed = fifo.instance(wire_bool_mod, "enqed", clk=clk, rst=rst)
+            deqed = fifo.instance(wire_bool_mod, "deqed")
+            enqed = fifo.instance(wire_bool_mod, "enqed")
 
             # Value: full() -> bool
             with fifo.value("full", returns=[UInt(1)]) as full_val:
@@ -553,12 +552,13 @@ class FIFO2I:
             rst = fifo.reset("rst")
 
             # Instances
+            # Reg modules need clk/rst, Wire/WireDefault modules don't (combinational)
             reg0 = fifo.instance(reg_data_mod, "reg0", clk=clk, rst=rst)
             reg1 = fifo.instance(reg_data_mod, "reg1", clk=clk, rst=rst)
             state = fifo.instance(reg_state_mod, "state", clk=clk, rst=rst)
-            deqed = fifo.instance(wire_default_bool_mod, "deqed", clk=clk, rst=rst)
-            enqed = fifo.instance(wire_default_bool_mod, "enqed", clk=clk, rst=rst)
-            enq_value = fifo.instance(wire_data_mod, "enq_value", clk=clk, rst=rst)
+            deqed = fifo.instance(wire_default_bool_mod, "deqed")
+            enqed = fifo.instance(wire_default_bool_mod, "enqed")
+            enq_value = fifo.instance(wire_data_mod, "enq_value")
 
             # Value: full() -> bool (state == 2)
             with fifo.value("full", returns=[UInt(1)]) as full_val:
@@ -569,6 +569,16 @@ class FIFO2I:
                     c2 = body.const(2, 2)
                     is_full = body.eq(state_val, c2)
                     body.returns(is_full)
+
+            # Value: empty() -> bool (state == 0)
+            with fifo.value("empty", returns=[UInt(1)]) as empty_val:
+                with empty_val.guard() as g:
+                    g.always()
+                with empty_val.body() as body:
+                    state_val = body.call(state, "read")
+                    c0 = body.const(0, 2)
+                    is_empty = body.eq(state_val, c0)
+                    body.returns(is_empty)
 
             # Method: deq() -> data
             # Guard: state != 0
@@ -621,23 +631,17 @@ class FIFO2I:
                     is_enqed = body.call(enqed, "read")
                     is_deqed = body.call(deqed, "read")
 
-                    # if (enqed && deqed): reg0 = enq_value (stay at state 1)
-                    # if (enqed && !deqed): reg1 = reg0, reg0 = enq_value, state = 2
-                    # if (!enqed && deqed): state = 0
-
-                    # We need to use mux for conditional writes
-                    val = body.call(enq_value, "read")
-                    reg0_val = body.call(reg0, "read")
-
-                    # Compute next state
-                    # enq && deq -> stay 1
-                    # enq && !deq -> go to 2
+                    # State transitions:
+                    # enq && deq -> stay 1, reg0 = enq_value
+                    # enq && !deq -> go to 2, reg1 = reg0, reg0 = enq_value
                     # !enq && deq -> go to 0
                     # !enq && !deq -> stay 1
-                    not_deqed = body.not_(is_deqed)
-                    not_enqed = body.not_(is_enqed)
 
-                    # next_state = enqed ? (deqed ? 1 : 2) : (deqed ? 0 : 1)
+                    val = body.call(enq_value, "read")
+                    reg0_val = body.call(reg0, "read")
+                    not_deqed = body.not_(is_deqed)
+
+                    # Compute next state using mux
                     c0 = body.const(0, 2)
                     c1 = body.const(1, 2)
                     c2 = body.const(2, 2)
@@ -646,14 +650,19 @@ class FIFO2I:
                     next_state = body.mux(is_enqed, inner_if_enq, inner_if_not_enq)
                     body.call(state, "write", next_state)
 
-                    # Write reg0 if enqed
-                    # Write reg1 if enqed && !deqed (reg1 = old reg0)
+                    # Conditionally write reg0 (if enqed)
+                    # Use enable signal to gate the write
+                    enq_and_not_deq = body.and_(is_enqed, not_deqed)
+
+                    # Write reg0 when enqed (use if for single level)
                     with body.if_(is_enqed) as if_enq:
                         with if_enq.then_() as then_b:
                             then_b.call(reg0, "write", val)
-                            with then_b.if_(not_deqed) as if_not_deq:
-                                with if_not_deq.then_() as inner_then:
-                                    inner_then.call(reg1, "write", reg0_val)
+
+                    # Write reg1 when enqed && !deqed (separate if, not nested)
+                    with body.if_(enq_and_not_deq) as if_reg1:
+                        with if_reg1.then_() as then_b:
+                            then_b.call(reg1, "write", reg0_val)
 
             # State update rule: state2 (when state == 2)
             # if deqed: reg0 = reg1, state = 1
@@ -670,9 +679,10 @@ class FIFO2I:
                     body.call(reg0, "write", reg1_val)
                     body.call(state, "write", body.const(1, 2))
 
-            # Precedence: full < deq < enq < state0_update < state1_update < state2_update
+            # Precedence: full < empty < deq < enq < state0_update < state1_update < state2_update
             fifo.precedence(
                 full_val.ref(),
+                empty_val.ref(),
                 deq_meth.ref(),
                 enq_meth.ref(),
                 state0_rule.ref(),

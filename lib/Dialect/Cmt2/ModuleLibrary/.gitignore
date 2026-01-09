@@ -1,3 +1,4 @@
 cache/
 */*.mlir
 */*/*.mlir
+!interp/*.mlir
