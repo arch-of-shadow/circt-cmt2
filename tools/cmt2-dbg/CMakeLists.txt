@@ -6,6 +6,7 @@ add_llvm_executable(cmt2-dbg
 llvm_update_compile_flags(cmt2-dbg)
 target_link_libraries(cmt2-dbg PRIVATE
   CIRCTCmt2
+  CIRCTCmt2Interpreter
   CIRCTCmt2Transforms
   CIRCTComb
   CIRCTFIRRTL

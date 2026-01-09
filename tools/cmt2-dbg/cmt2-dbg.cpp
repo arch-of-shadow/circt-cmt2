@@ -565,8 +565,8 @@ int main(int argc, char **argv) {
         break;
     }
 
-    if (batchMode)
-      return 0;
+    // Script execution implies batch mode - exit after script completes
+    return 0;
   }
 
   // Batch mode: just exit

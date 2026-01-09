@@ -13,6 +13,7 @@
 #include "Interpreter.h"
 #include "circt/Dialect/Comb/CombOps.h"
 #include "circt/Dialect/FIRRTL/FIRRTLOps.h"
+#include "circt/Dialect/FIRRTL/FIRRTLTypes.h"
 #include "circt/Dialect/HW/HWOps.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "llvm/ADT/TypeSwitch.h"
@@ -29,7 +30,17 @@ using namespace mlir;
 //===----------------------------------------------------------------------===//
 
 Cmt2Interpreter::Cmt2Interpreter(mlir::ModuleOp module, llvm::raw_ostream &os)
-    : module_(module), os_(os) {}
+    : module_(module), os_(os) {
+  // Initialize control flow plugins
+  dynamicControlPlugin_ = std::make_unique<interp::DynamicControlPlugin>();
+  staticControlPlugin_ = std::make_unique<interp::StaticControlPlugin>();
+
+  // Initialize default scheduler (ORAAT)
+  scheduler_ = std::make_unique<interp::ORAATScheduler>();
+
+  // Register built-in operation handlers
+  opRegistry_.registerBuiltinHandlers();
+}
 
 Cmt2Interpreter::~Cmt2Interpreter() = default;
 
@@ -50,6 +61,13 @@ LogicalResult Cmt2Interpreter::initialize(StringRef circuitName) {
     return failure();
   }
 
+  // Initialize conflict matrix analysis for all modules
+  conflictMatrixAnalysis_ = std::make_unique<ConflictMatrixAnalysis>(circuit_);
+  LLVM_DEBUG({
+    llvm::dbgs() << "ConflictMatrix analysis initialized:\n";
+    conflictMatrixAnalysis_->print(llvm::dbgs());
+  });
+
   // Find the top-level module
   topModule_ = findTopModule();
   if (!topModule_) {
@@ -62,6 +80,16 @@ LogicalResult Cmt2Interpreter::initialize(StringRef circuitName) {
 
   // Initialize procedural constructs
   initializeProcConstructs(topModule_);
+
+  // Initialize control flow plugins with the module
+  if (dynamicControlPlugin_)
+    dynamicControlPlugin_->initialize(topModule_, stateManager_);
+  if (staticControlPlugin_)
+    staticControlPlugin_->initialize(topModule_, stateManager_);
+
+  // Initialize scheduler with the module
+  if (scheduler_)
+    scheduler_->initialize(topModule_);
 
   os_ << "Initialized interpreter\n";
   os_ << "  Top module: " << topModule_.getModuleName() << "\n";
@@ -97,44 +125,126 @@ cmt2::ModuleOp Cmt2Interpreter::findTopModule() {
 
 void Cmt2Interpreter::initializeRegisters(cmt2::ModuleOp module) {
   registers_.clear();
+  cmt2ModuleInstances_.clear();
+  moduleRegistry_.clearUnresolvedModules();
 
-  // Walk through instances to find registers
-  module.walk([&](InstanceOp instance) {
-    StringRef instanceName = instance.getInstanceName();
+  // Recursive helper to initialize instances with hierarchical names
+  std::function<void(cmt2::ModuleOp, StringRef)> initializeModule;
+  initializeModule = [&](cmt2::ModuleOp mod, StringRef prefix) {
+    LLVM_DEBUG(llvm::dbgs() << "Processing module: " << mod.getModuleName()
+                            << " (prefix: '" << prefix << "')\n");
 
-    // Check if this is a register (external FIRRTL module with read/write)
-    auto refModule = instance.getReferencedModule();
-    if (!refModule)
-      return;
+    // Walk through direct instances only (not recursively)
+    for (auto &op : mod.getBody().front()) {
+      auto instance = dyn_cast<InstanceOp>(&op);
+      if (!instance)
+        continue;
 
-    // For now, we treat any instance as a potential register
-    // We'll detect registers by looking for read/write methods
-    bool hasRead = false, hasWrite = false;
+      StringRef localName = instance.getInstanceName();
+      std::string fullName = prefix.empty()
+          ? localName.str()
+          : (prefix.str() + "." + localName.str());
 
-    // Check for read/write methods by looking at the module name
-    // For now, treat all external modules with reg/Reg/Register in name as registers
-    StringRef modName = refModule.moduleName();
-    if (modName.contains_insensitive("reg") || modName.contains_insensitive("register")) {
-      hasRead = true;
-      hasWrite = true;
+      auto refModule = instance.getReferencedModule();
+      if (!refModule) {
+        LLVM_DEBUG(llvm::dbgs() << "  Instance: " << fullName << " -> (ref not found)\n");
+        continue;
+      }
+
+      mlir::Operation *refOp = refModule.getOperation();
+
+      // External FIRRTL module
+      if (auto extModule = dyn_cast<ExtModuleFirrtlOp>(refOp)) {
+        SmallVector<mlir::NamedAttribute> params;
+        if (auto paramsAttr = instance->getAttrOfType<ArrayAttr>("parameters")) {
+          for (auto attr : paramsAttr) {
+            if (auto namedAttr = dyn_cast<mlir::DictionaryAttr>(attr)) {
+              for (auto entry : namedAttr)
+                params.push_back(entry);
+            }
+          }
+        }
+
+        // Extract width from the module's read binding if not specified in params
+        bool hasWidth = false;
+        for (const auto &param : params) {
+          if (param.getName() == "width") {
+            hasWidth = true;
+            break;
+          }
+        }
+        if (!hasWidth) {
+          // Try to extract width from the "read" binding's return type
+          extModule.walk([&](BindValueOp bindOp) {
+            if (bindOp.getSymName() == "read") {
+              auto funcType = bindOp.getFunctionType();
+              if (funcType.getNumResults() > 0) {
+                if (auto firrtlType = dyn_cast<firrtl::FIRRTLBaseType>(funcType.getResult(0))) {
+                  int32_t width = firrtlType.getBitWidthOrSentinel();
+                  if (width > 0) {
+                    params.push_back(NamedAttribute(
+                        StringAttr::get(extModule.getContext(), "width"),
+                        IntegerAttr::get(IntegerType::get(extModule.getContext(), 32), width)));
+                    LLVM_DEBUG(llvm::dbgs() << "  Extracted width=" << width
+                                            << " from read binding\n");
+                  }
+                }
+              }
+            }
+          });
+        }
+
+        if (moduleRegistry_.initializeInstance(fullName, extModule, params)) {
+          LLVM_DEBUG(llvm::dbgs() << "  Initialized instance via registry: "
+                                  << fullName << "\n");
+        }
+        continue;
+      }
+
+      // CMT2 module - track it, create per-instance scheduler, and recurse
+      if (auto cmt2Module = dyn_cast<cmt2::ModuleOp>(refOp)) {
+        cmt2ModuleInstances_[fullName] = cmt2Module;
+
+        // Create per-instance scheduler for this nested module
+        auto instanceScheduler = std::make_unique<interp::ORAATScheduler>();
+        instanceScheduler->initialize(cmt2Module);
+        instanceSchedulers_[fullName] = std::move(instanceScheduler);
+
+        LLVM_DEBUG(llvm::dbgs() << "  Found CMT2 module instance: " << fullName
+                                << " -> " << cmt2Module.getModuleName()
+                                << " (scheduler initialized)\n");
+        // Recursively initialize nested instances with hierarchical prefix
+        initializeModule(cmt2Module, fullName);
+        continue;
+      }
+
+      // Fallback: Legacy register detection
+      StringRef modName = refModule.moduleName();
+      if (modName.contains_insensitive("reg") || modName.contains_insensitive("register")) {
+        RegisterState state;
+        state.name = fullName;
+        state.width = 32;
+        state.value = APInt(state.width, 0);
+        state.hasReset = true;
+        state.resetValue = APInt(state.width, 0);
+        registers_[fullName] = state;
+        LLVM_DEBUG(llvm::dbgs() << "  Found register (legacy): " << fullName << "\n");
+      }
     }
+  };
 
-    if (hasRead && hasWrite) {
-      // This looks like a register
-      RegisterState state;
-      state.name = instanceName.str();
-      state.width = 32; // Default, should be extracted from type
-      state.value = APInt(state.width, 0);
-      state.hasReset = true;
-      state.resetValue = APInt(state.width, 0);
+  // Start initialization from top module with empty prefix
+  initializeModule(module, "");
 
-      // Try to extract width from the read method return type
-      // For now, use default
-
-      registers_[instanceName] = state;
-      LLVM_DEBUG(llvm::dbgs() << "  Found register: " << instanceName << "\n");
-    }
-  });
+  // Report any unresolved modules
+  const auto &unresolved = moduleRegistry_.getUnresolvedModules();
+  if (!unresolved.empty()) {
+    LLVM_DEBUG({
+      llvm::dbgs() << "  Unresolved external modules:\n";
+      for (const auto &name : unresolved)
+        llvm::dbgs() << "    - " << name << "\n";
+    });
+  }
 }
 
 void Cmt2Interpreter::reset() {
@@ -142,8 +252,12 @@ void Cmt2Interpreter::reset() {
   valueMap_.clear();
   pendingWrites_.clear();
   stepsDoneThisCycle_.clear();
+  currentInstancePath_.clear();
 
-  // Reset all registers to their reset values
+  // Reset all instances through the registry
+  moduleRegistry_.resetAllInstances();
+
+  // Reset legacy registers to their reset values
   for (auto &entry : registers_) {
     RegisterState &state = entry.second;
     if (state.hasReset) {
@@ -157,7 +271,23 @@ void Cmt2Interpreter::reset() {
     entry.second.isRunning = false;
   }
 
+  // Reset modular infrastructure
+  stateManager_.reset();
+  if (dynamicControlPlugin_)
+    dynamicControlPlugin_->reset();
+  if (staticControlPlugin_)
+    staticControlPlugin_->reset();
+  if (scheduler_)
+    scheduler_->reset();
+
   os_ << "Reset to cycle 0\n";
+}
+
+void Cmt2Interpreter::setScheduler(std::unique_ptr<interp::Scheduler> scheduler) {
+  scheduler_ = std::move(scheduler);
+  // If already initialized, re-initialize the new scheduler
+  if (topModule_ && scheduler_)
+    scheduler_->initialize(topModule_);
 }
 
 //===----------------------------------------------------------------------===//
@@ -170,53 +300,308 @@ std::vector<RuleResult> Cmt2Interpreter::step() {
   // Clear pending writes from previous cycle
   pendingWrites_.clear();
   stepsDoneThisCycle_.clear();
+  methodsCalledThisCycle_.clear();
 
-  // Phase 1: Evaluate all rule guards
-  std::vector<std::string> enabledRules = evaluateGuards();
+  // Tick all module instances (start of cycle)
+  moduleRegistry_.tickAllInstances();
 
-  LLVM_DEBUG(llvm::dbgs() << "Cycle " << cycle_ << ": " << enabledRules.size()
-                          << " rules enabled\n");
+  // Tick control flow plugins (for plugin-based execution)
+  if (usePluginExecution_) {
+    if (dynamicControlPlugin_)
+      dynamicControlPlugin_->tick();
+    if (staticControlPlugin_)
+      staticControlPlugin_->tick();
+  }
 
-  // Phase 2: Resolve conflicts
-  std::vector<std::string> rulesToFire = resolveConflicts(enabledRules);
+  //===--------------------------------------------------------------------===//
+  // On-Demand Guard Evaluation with Wire Propagation
+  //
+  // This implements correct GAA semantics where:
+  // 1. Rules are evaluated in scheduler-determined precedence order
+  // 2. Guards see wire values updated by earlier-fired rules in the same cycle
+  // 3. This enables bypass patterns like `!full | deqed` to work correctly
+  //
+  // Integration with Scheduler infrastructure:
+  // - Top-level rules: Use scheduler_ for priority ordering and conflict checking
+  // - Nested module rules: Use per-instance conflict checking via conflictMatrixAnalysis_
+  //===--------------------------------------------------------------------===//
 
-  // Phase 3: Execute selected rules
-  for (const std::string &ruleName : rulesToFire) {
-    RuleResult result;
-    result.ruleName = ruleName;
-    result.guardEnabled = true;
-    result.fired = true;
+  // Collect all rules from all modules with their precedence
+  struct RuleInfo {
+    std::string fullName;
+    std::string instancePath;
+    std::string localName;
+    Operation *moduleOp;  // Store as Operation* to avoid const issues
+    unsigned precedence;
+  };
+  std::vector<RuleInfo> allRules;
 
-    // Find and execute the rule (check both regular rules and proc.rules)
-    bool found = false;
-    topModule_.walk([&](RuleOp rule) {
-      if (rule.getSymName() == ruleName) {
-        executeBody(rule.getBody());
-        found = true;
-        return WalkResult::interrupt();
+  // Get scheduler for priority queries
+  // Note: We use getName() instead of dynamic_cast since RTTI is disabled
+  interp::ORAATScheduler *oraatScheduler = nullptr;
+  if (scheduler_ && scheduler_->getName() == "ORAAT") {
+    oraatScheduler = static_cast<interp::ORAATScheduler *>(scheduler_.get());
+  }
+
+  // Helper to collect rules from a module using scheduler for priorities
+  auto collectModuleRules = [&](cmt2::ModuleOp mod, StringRef instancePath) {
+    // Get the appropriate scheduler for this module
+    interp::ORAATScheduler *moduleScheduler = nullptr;
+    if (instancePath.empty()) {
+      // Top-level module uses the main scheduler
+      moduleScheduler = oraatScheduler;
+    } else {
+      // Nested module uses its per-instance scheduler
+      auto it = instanceSchedulers_.find(instancePath);
+      if (it != instanceSchedulers_.end()) {
+        moduleScheduler = it->second.get();
       }
-      return WalkResult::advance();
-    });
+    }
 
-    if (!found) {
-      // Check if it's a proc.rule
-      topModule_.walk([&](ProcRuleOp procRule) {
-        if (procRule.getSymName() == ruleName) {
-          auto fsmIt = procFSMStates_.find(ruleName);
+    unsigned textualOrder = 0;
+    for (auto &op : mod.getBody().front()) {
+      if (auto rule = dyn_cast<RuleOp>(&op)) {
+        RuleInfo info;
+        info.localName = rule.getSymName().str();
+        info.instancePath = instancePath.str();
+        info.fullName = instancePath.empty()
+            ? info.localName
+            : (instancePath.str() + "." + info.localName);
+        info.moduleOp = mod.getOperation();
+
+        // Use scheduler for priority (works for both top-level and nested modules)
+        if (moduleScheduler) {
+          info.precedence = moduleScheduler->getPriority(info.localName);
+        } else {
+          // Fallback to textual order if no scheduler available
+          info.precedence = 1000 + textualOrder;
+        }
+        allRules.push_back(info);
+        textualOrder++;
+      } else if (auto procRule = dyn_cast<ProcRuleOp>(&op)) {
+        RuleInfo info;
+        info.localName = procRule.getSymName().str();
+        info.instancePath = instancePath.str();
+        info.fullName = instancePath.empty()
+            ? info.localName
+            : (instancePath.str() + "." + info.localName);
+        info.moduleOp = mod.getOperation();
+
+        // Use scheduler for priority (works for both top-level and nested modules)
+        if (moduleScheduler) {
+          info.precedence = moduleScheduler->getPriority(info.localName);
+        } else {
+          // Fallback to textual order if no scheduler available
+          info.precedence = 1000 + textualOrder;
+        }
+        allRules.push_back(info);
+        textualOrder++;
+      }
+    }
+  };
+
+  // Collect from top module and all nested modules (each uses its own scheduler)
+  collectModuleRules(topModule_, "");
+  for (const auto &entry : cmt2ModuleInstances_) {
+    collectModuleRules(entry.second, entry.first());
+  }
+
+  // Sort all rules by (instancePath, precedence) so we process in correct order
+  // Top-level rules come first, then nested module rules
+  // Within each module, lower precedence number = higher priority
+  std::stable_sort(allRules.begin(), allRules.end(),
+                   [](const RuleInfo &a, const RuleInfo &b) {
+                     // Top-level rules (empty instancePath) have highest priority
+                     if (a.instancePath.empty() != b.instancePath.empty())
+                       return a.instancePath.empty();
+                     // Within same module level, sort by precedence
+                     if (a.instancePath == b.instancePath)
+                       return a.precedence < b.precedence;
+                     // Different nested modules - keep original order
+                     return a.instancePath < b.instancePath;
+                   });
+
+  // Track which rules fired for conflict detection
+  llvm::StringSet<> firedRules;
+  llvm::StringSet<> firedTopLevelRules;  // Track top-level rules separately for scheduler
+  std::vector<std::string> rulesToFire;
+  std::vector<std::string> enabledButBlocked;
+
+  // Get AnnotationScheduler if available for conflict checking
+  // Note: We use getName() instead of dynamic_cast since RTTI is disabled
+  interp::AnnotationScheduler *annotationScheduler = nullptr;
+  if (scheduler_ && scheduler_->getName() == "Annotation") {
+    annotationScheduler = static_cast<interp::AnnotationScheduler *>(scheduler_.get());
+  }
+
+  // Get conflict matrix for top module
+  const ModuleConflictMatrix *topModuleConflictMatrix = nullptr;
+  if (conflictMatrixAnalysis_) {
+    topModuleConflictMatrix = conflictMatrixAnalysis_->getModuleMatrix(
+        topModule_.getSymNameAttr());
+  }
+
+  // Helper to check if a rule can fire (not conflicting with already-fired rules)
+  // Uses scheduler infrastructure for conflict detection.
+  auto canFireRule = [&](const RuleInfo &info) -> bool {
+    if (info.instancePath.empty()) {
+      // Top-level rules: Use scheduler's conflict information
+      // 1. Check AnnotationScheduler's explicit conflict annotations
+      if (annotationScheduler) {
+        for (const auto &firedEntry : firedTopLevelRules) {
+          if (annotationScheduler->conflicts(info.localName, firedEntry.getKey())) {
+            LLVM_DEBUG(llvm::dbgs() << "Rule " << info.fullName
+                                    << " blocked by scheduler conflict with "
+                                    << firedEntry.getKey() << "\n");
+            return false;
+          }
+        }
+      }
+
+      // 2. Check conflict matrix for rule-to-rule conflicts in top module
+      if (topModuleConflictMatrix) {
+        StringAttr ruleAttr = StringAttr::get(topModule_.getContext(), info.localName);
+        for (const auto &firedEntry : firedTopLevelRules) {
+          StringAttr firedRuleAttr = StringAttr::get(topModule_.getContext(),
+                                                      firedEntry.getKey());
+          Relationship rel = topModuleConflictMatrix->getRelationship(
+              firedRuleAttr, ruleAttr);
+          if (rel == Relationship::Conflict) {
+            LLVM_DEBUG(llvm::dbgs() << "Rule " << info.fullName
+                                    << " blocked by conflict matrix with "
+                                    << firedEntry.getKey() << "\n");
+            return false;
+          }
+        }
+      }
+
+      // No conflicts found - rule can fire
+      return true;
+    }
+
+    // For nested module rules: check conflict matrix for method-to-rule conflicts
+    auto calledMethodsIt = methodsCalledThisCycle_.find(info.instancePath);
+    if (calledMethodsIt == methodsCalledThisCycle_.end())
+      return true;  // No methods called on this instance
+
+    auto mod = cast<cmt2::ModuleOp>(info.moduleOp);
+    const ModuleConflictMatrix *conflictMatrix = nullptr;
+    if (conflictMatrixAnalysis_) {
+      conflictMatrix = conflictMatrixAnalysis_->getModuleMatrix(
+          mod.getSymNameAttr());
+    }
+
+    if (!conflictMatrix)
+      return true;
+
+    StringAttr ruleAttr = StringAttr::get(mod.getContext(), info.localName);
+    for (const auto &methodName : calledMethodsIt->second) {
+      StringAttr methodAttr = StringAttr::get(mod.getContext(), methodName.first());
+      Relationship rel = conflictMatrix->getRelationship(methodAttr, ruleAttr);
+      if (rel == Relationship::Conflict) {
+        LLVM_DEBUG(llvm::dbgs() << "Rule " << info.fullName
+                                << " blocked by conflict with method " << methodName.first()
+                                << "\n");
+        return false;
+      }
+    }
+    return true;
+  };
+
+  // Helper to evaluate a single rule's guard
+  auto evaluateSingleRuleGuard = [&](const RuleInfo &info) -> bool {
+    std::string savedPath = currentInstancePath_;
+    currentInstancePath_ = info.instancePath;
+
+    bool enabled = false;
+    auto mod = cast<cmt2::ModuleOp>(info.moduleOp);
+
+    // Find the rule and evaluate its guard
+    for (auto &op : mod.getBody().front()) {
+      if (auto rule = dyn_cast<RuleOp>(&op)) {
+        if (rule.getSymName() == info.localName) {
+          bool explicitGuard = evaluateGuard(rule.getGuard());
+          bool methodGuards = evaluateMethodGuards(rule.getBody());
+          enabled = explicitGuard && methodGuards;
+          break;
+        }
+      } else if (auto procRule = dyn_cast<ProcRuleOp>(&op)) {
+        if (procRule.getSymName() == info.localName) {
+          enabled = isProcRuleEnabled(procRule);
+          break;
+        }
+      }
+    }
+
+    currentInstancePath_ = savedPath;
+    return enabled;
+  };
+
+  // Helper to execute a rule body
+  auto executeRuleBody = [&](const RuleInfo &info) {
+    std::string savedPath = currentInstancePath_;
+    currentInstancePath_ = info.instancePath;
+    auto mod = cast<cmt2::ModuleOp>(info.moduleOp);
+
+    for (auto &op : mod.getBody().front()) {
+      if (auto rule = dyn_cast<RuleOp>(&op)) {
+        if (rule.getSymName() == info.localName) {
+          executeBody(rule.getBody());
+          break;
+        }
+      } else if (auto procRule = dyn_cast<ProcRuleOp>(&op)) {
+        if (procRule.getSymName() == info.localName) {
+          auto fsmIt = procFSMStates_.find(info.fullName);
           if (fsmIt != procFSMStates_.end()) {
             executeProcRuleStep(procRule, fsmIt->second);
           }
-          found = true;
-          return WalkResult::interrupt();
+          break;
         }
-        return WalkResult::advance();
-      });
+      }
     }
 
-    results.push_back(result);
+    currentInstancePath_ = savedPath;
+  };
+
+  // On-demand evaluation: for each rule in precedence order, evaluate guard
+  // and execute if enabled
+  LLVM_DEBUG(llvm::dbgs() << "Cycle " << cycle_ << ": evaluating " << allRules.size()
+                          << " rules in precedence order\n");
+
+  for (const RuleInfo &info : allRules) {
+    // Evaluate guard (may see wire values from earlier-fired rules)
+    if (evaluateSingleRuleGuard(info)) {
+      // Guard passed - check if we can fire (no conflicts)
+      if (canFireRule(info)) {
+        LLVM_DEBUG(llvm::dbgs() << "  " << info.fullName << ": FIRING\n");
+
+        // Execute the rule body (this may update wire values!)
+        executeRuleBody(info);
+
+        // Track that this rule fired
+        firedRules.insert(info.fullName);
+        rulesToFire.push_back(info.fullName);
+
+        // Track top-level rules separately for scheduler conflict checking
+        if (info.instancePath.empty()) {
+          firedTopLevelRules.insert(info.localName);
+        }
+
+        RuleResult result;
+        result.ruleName = info.fullName;
+        result.guardEnabled = true;
+        result.fired = true;
+        results.push_back(result);
+      } else {
+        LLVM_DEBUG(llvm::dbgs() << "  " << info.fullName << ": enabled but blocked\n");
+        enabledButBlocked.push_back(info.fullName);
+      }
+    } else {
+      LLVM_DEBUG(llvm::dbgs() << "  " << info.fullName << ": guard failed\n");
+    }
   }
 
-  // Phase 3b: Continue executing any running proc.rules
+  // Continue executing any running proc.rules
   for (auto &fsmEntry : procFSMStates_) {
     ProcFSMState &fsm = fsmEntry.second;
     if (fsm.isRunning && fsm.currentState > 0) {
@@ -229,14 +614,8 @@ std::vector<RuleResult> Cmt2Interpreter::step() {
         return WalkResult::advance();
       });
 
-      // Add to results as running
-      bool alreadyInResults = false;
-      for (const auto &r : results) {
-        if (r.ruleName == fsmEntry.first()) {
-          alreadyInResults = true;
-          break;
-        }
-      }
+      // Add to results as running if not already there
+      bool alreadyInResults = firedRules.count(fsmEntry.first().str()) > 0;
       if (!alreadyInResults) {
         RuleResult result;
         result.ruleName = fsmEntry.first().str();
@@ -248,16 +627,12 @@ std::vector<RuleResult> Cmt2Interpreter::step() {
   }
 
   // Add results for rules that were enabled but didn't fire
-  for (const std::string &ruleName : enabledRules) {
-    bool fired = std::find(rulesToFire.begin(), rulesToFire.end(), ruleName) !=
-                 rulesToFire.end();
-    if (!fired) {
-      RuleResult result;
-      result.ruleName = ruleName;
-      result.guardEnabled = true;
-      result.fired = false;
-      results.push_back(result);
-    }
+  for (const std::string &ruleName : enabledButBlocked) {
+    RuleResult result;
+    result.ruleName = ruleName;
+    result.guardEnabled = true;
+    result.fired = false;
+    results.push_back(result);
   }
 
   // Phase 4: Apply state updates atomically
@@ -270,6 +645,8 @@ std::vector<RuleResult> Cmt2Interpreter::step() {
 
   // Increment cycle
   cycle_++;
+  if (usePluginExecution_)
+    stateManager_.incrementCycle();
 
   return results;
 }
@@ -300,21 +677,54 @@ std::optional<Breakpoint> Cmt2Interpreter::continueExec(uint64_t maxCycles) {
 std::vector<std::string> Cmt2Interpreter::evaluateGuards() {
   std::vector<std::string> enabledRules;
 
-  // Check regular rules
-  topModule_.walk([&](RuleOp rule) {
-    // Evaluate the guard region
-    Region &guardRegion = rule.getGuard();
-    if (evaluateGuard(guardRegion)) {
-      enabledRules.push_back(rule.getSymName().str());
-    }
-  });
+  // Helper to evaluate rules in a module with a given instance path
+  auto evaluateModuleRules = [&](cmt2::ModuleOp mod, StringRef instancePath) {
+    // Save and update current instance path for nested method calls during guard evaluation
+    std::string savedPath = currentInstancePath_;
+    currentInstancePath_ = instancePath.str();
 
-  // Check proc.rules (only enabled when idle)
-  topModule_.walk([&](ProcRuleOp procRule) {
-    if (isProcRuleEnabled(procRule)) {
-      enabledRules.push_back(procRule.getSymName().str());
+    // Check regular rules in this module
+    for (auto &op : mod.getBody().front()) {
+      if (auto rule = dyn_cast<RuleOp>(&op)) {
+        Region &guardRegion = rule.getGuard();
+        // Evaluate explicit guard AND method guards from body
+        bool explicitGuard = evaluateGuard(guardRegion);
+        bool methodGuards = evaluateMethodGuards(rule.getBody());
+        LLVM_DEBUG(llvm::dbgs() << "Rule " << rule.getSymName()
+                                << ": explicitGuard=" << explicitGuard
+                                << ", methodGuards=" << methodGuards << "\n");
+        if (explicitGuard && methodGuards) {
+          std::string ruleName = instancePath.empty()
+              ? rule.getSymName().str()
+              : (instancePath.str() + "." + rule.getSymName().str());
+          enabledRules.push_back(ruleName);
+        }
+      }
     }
-  });
+
+    // Check proc.rules (only enabled when idle)
+    for (auto &op : mod.getBody().front()) {
+      if (auto procRule = dyn_cast<ProcRuleOp>(&op)) {
+        if (isProcRuleEnabled(procRule)) {
+          std::string ruleName = instancePath.empty()
+              ? procRule.getSymName().str()
+              : (instancePath.str() + "." + procRule.getSymName().str());
+          enabledRules.push_back(ruleName);
+        }
+      }
+    }
+
+    // Restore instance path
+    currentInstancePath_ = savedPath;
+  };
+
+  // Evaluate rules in top module
+  evaluateModuleRules(topModule_, "");
+
+  // Evaluate rules in all nested CMT2 module instances
+  for (const auto &entry : cmt2ModuleInstances_) {
+    evaluateModuleRules(entry.second, entry.first());
+  }
 
   return enabledRules;
 }
@@ -405,6 +815,110 @@ bool Cmt2Interpreter::evaluateGuard(Region &guardRegion) {
   return true;
 }
 
+bool Cmt2Interpreter::evaluateMethodGuards(Region &bodyRegion) {
+  if (bodyRegion.empty())
+    return true;
+
+  // Scan the body for cmt2.call operations and evaluate their method guards
+  for (Operation &op : bodyRegion.front()) {
+    if (auto callOp = dyn_cast<CallOp>(&op)) {
+      StringRef instanceName = callOp.getCalleeAttr().getLeafReference().getValue();
+      StringRef methodName = callOp.getMethodOrValueAttr().getLeafReference().getValue();
+
+      // Build the full hierarchical instance name
+      std::string fullInstanceName = currentInstancePath_.empty()
+          ? instanceName.str()
+          : (currentInstancePath_ + "." + instanceName.str());
+
+      LLVM_DEBUG({
+        llvm::dbgs() << "evaluateMethodGuards: checking " << fullInstanceName
+                     << "." << methodName << "\n";
+        llvm::dbgs() << "  cmt2ModuleInstances_ has " << cmt2ModuleInstances_.size() << " entries\n";
+        for (const auto &entry : cmt2ModuleInstances_) {
+          llvm::dbgs() << "    - " << entry.first() << "\n";
+        }
+      });
+
+      // Check if this is a CMT2 module instance
+      auto cmt2It = cmt2ModuleInstances_.find(fullInstanceName);
+
+      // Debug: print when NOT found
+      if (cmt2It == cmt2ModuleInstances_.end()) {
+        LLVM_DEBUG(llvm::dbgs() << "  NOT FOUND in cmt2ModuleInstances_\n");
+        // Try to find in module registry (external FIRRTL modules)
+        // For external modules, we can't evaluate their guards here
+        continue;
+      }
+
+      if (cmt2It != cmt2ModuleInstances_.end()) {
+        cmt2::ModuleOp cmt2Module = cmt2It->second;
+
+        // Save and update current instance path for nested calls
+        std::string savedPath = currentInstancePath_;
+        currentInstancePath_ = fullInstanceName;
+
+        // Save current valueMap
+        auto savedValueMap = std::move(valueMap_);
+        valueMap_.clear();
+
+        bool guardPassed = true;
+
+        // Look for the method or value in the CMT2 module
+        cmt2::MethodOp methodOp;
+        cmt2Module.walk([&](cmt2::MethodOp m) {
+          if (m.getSymName() == methodName) {
+            methodOp = m;
+            return WalkResult::interrupt();
+          }
+          return WalkResult::advance();
+        });
+
+        if (methodOp) {
+          // Evaluate method guard
+          guardPassed = evaluateGuard(methodOp.getGuard());
+
+          // Also check nested method guards in the method body
+          if (guardPassed) {
+            guardPassed = evaluateMethodGuards(methodOp.getBody());
+          }
+        } else {
+          // Try as a value
+          cmt2::ValueOp valueOp;
+          cmt2Module.walk([&](cmt2::ValueOp v) {
+            if (v.getSymName() == methodName) {
+              valueOp = v;
+              return WalkResult::interrupt();
+            }
+            return WalkResult::advance();
+          });
+
+          if (valueOp) {
+            // Evaluate value guard
+            guardPassed = evaluateGuard(valueOp.getGuard());
+            LLVM_DEBUG(llvm::dbgs() << "  Value guard for " << methodName
+                                    << ": " << (guardPassed ? "passed" : "failed") << "\n");
+
+            // Also check nested method guards in the value body
+            if (guardPassed) {
+              guardPassed = evaluateMethodGuards(valueOp.getBody());
+            }
+          }
+        }
+
+        // Restore saved state
+        valueMap_ = std::move(savedValueMap);
+        currentInstancePath_ = savedPath;
+
+        if (!guardPassed) {
+          return false;  // Method guard failed, rule cannot fire
+        }
+      }
+    }
+  }
+
+  return true;  // All method guards passed
+}
+
 void Cmt2Interpreter::executeBody(Region &bodyRegion) {
   if (bodyRegion.empty())
     return;
@@ -426,80 +940,167 @@ void Cmt2Interpreter::executeBody(Region &bodyRegion) {
 
 std::vector<std::string> Cmt2Interpreter::resolveConflicts(
     const std::vector<std::string> &enabledRules) {
-  // Use precedence attribute from module to determine priority
-  // precedence = [[@a, @b], [@c, @d]] means a > b and c > d in priority
-  // In GAA semantics, only one rule fires per cycle by default
+  // For hierarchical modules, each module has its own scheduling domain.
+  // Rules in different modules can fire in parallel.
+  //
+  // Within each module:
+  // - Top-level user modules use ORAAT (one rule at a time)
+  // - Nested CMT2 modules (like FIFO internals) fire all enabled rules
+  //   since they implement atomic module behavior
+  //
+  // The precedence attribute determines execution order within a module.
 
   if (enabledRules.empty())
     return {};
 
-  // Build priority map from precedence attribute
-  llvm::StringMap<unsigned> priorityMap;
-  unsigned nextPriority = 0;
-
-  // Parse precedence attribute from module
-  if (auto precAttr = topModule_->getAttrOfType<ArrayAttr>("precedence")) {
-    for (auto chain : precAttr) {
-      if (auto chainArray = dyn_cast<ArrayAttr>(chain)) {
-        // Each chain is [[@a, @b, ...]] meaning a > b > ... in priority
-        for (auto elem : chainArray) {
-          if (auto symRef = dyn_cast<FlatSymbolRefAttr>(elem)) {
-            StringRef ruleName = symRef.getValue();
-            if (!priorityMap.count(ruleName)) {
-              priorityMap[ruleName] = nextPriority++;
-            }
-          }
-        }
-      }
-    }
-  }
-
-  // Find the highest priority rule among enabled rules
-  std::string bestRule = enabledRules[0];
-  unsigned bestPriority = UINT_MAX;
-
+  // Group rules by their module instance path
+  // e.g., "producer" -> "", "fifo.next" -> "fifo"
+  llvm::StringMap<std::vector<std::string>> rulesByModule;
   for (const std::string &ruleName : enabledRules) {
-    unsigned priority = UINT_MAX;
+    StringRef fullName(ruleName);
+    size_t lastDot = fullName.rfind('.');
+    std::string instancePath = "";
+    if (lastDot != StringRef::npos) {
+      instancePath = fullName.substr(0, lastDot).str();
+    }
+    rulesByModule[instancePath].push_back(ruleName);
+  }
 
-    // Check precedence-based priority first
-    auto it = priorityMap.find(ruleName);
-    if (it != priorityMap.end()) {
-      priority = it->second;
-    } else {
-      // Check for explicit priority attribute on the rule
-      topModule_.walk([&](RuleOp rule) {
-        if (rule.getSymName() == ruleName) {
-          if (auto prioAttr = rule->getAttrOfType<IntegerAttr>("priority")) {
-            priority = prioAttr.getInt();
-          }
-          return WalkResult::interrupt();
-        }
-        return WalkResult::advance();
-      });
+  std::vector<std::string> selectedRules;
 
-      // Also check proc.rules
-      if (priority == UINT_MAX) {
-        topModule_.walk([&](ProcRuleOp procRule) {
-          if (procRule.getSymName() == ruleName) {
-            if (auto prioAttr = procRule->getAttrOfType<IntegerAttr>("priority")) {
-              priority = prioAttr.getInt();
-            }
-            return WalkResult::interrupt();
-          }
-          return WalkResult::advance();
-        });
+  for (auto &entry : rulesByModule) {
+    StringRef instancePath = entry.first();
+    std::vector<std::string> &moduleRules = entry.second;
+
+    if (moduleRules.empty())
+      continue;
+
+    // Get the module for precedence lookup
+    cmt2::ModuleOp mod = topModule_;
+    if (!instancePath.empty()) {
+      auto it = cmt2ModuleInstances_.find(instancePath);
+      if (it != cmt2ModuleInstances_.end()) {
+        mod = it->second;
       }
     }
 
-    // Lower priority number = higher priority
-    if (priority < bestPriority) {
-      bestPriority = priority;
-      bestRule = ruleName;
+    // Build priority map from module's precedence attribute
+    llvm::StringMap<unsigned> priorityMap;
+    unsigned nextPriority = 0;
+
+    if (auto precAttr = mod->getAttrOfType<ArrayAttr>("precedence")) {
+      for (auto chain : precAttr) {
+        if (auto chainArray = dyn_cast<ArrayAttr>(chain)) {
+          for (auto elem : chainArray) {
+            if (auto symRef = dyn_cast<FlatSymbolRefAttr>(elem)) {
+              StringRef localRuleName = symRef.getValue();
+              if (!priorityMap.count(localRuleName)) {
+                priorityMap[localRuleName] = nextPriority++;
+              }
+            }
+          }
+        }
+      }
+    }
+
+    // For top module (empty instance path): use ORAAT - select highest priority rule
+    // For nested modules: fire all enabled rules that don't conflict with called methods
+    if (instancePath.empty()) {
+      // ORAAT for top module
+      std::string bestRule = moduleRules[0];
+      unsigned bestPriority = UINT_MAX;
+
+      for (const std::string &ruleName : moduleRules) {
+        StringRef fullName(ruleName);
+        unsigned priority = UINT_MAX;
+        auto it = priorityMap.find(fullName);
+        if (it != priorityMap.end()) {
+          priority = it->second;
+        }
+
+        if (priority < bestPriority) {
+          bestPriority = priority;
+          bestRule = ruleName;
+        }
+      }
+      selectedRules.push_back(bestRule);
+    } else {
+      // For nested modules: filter rules that conflict with called methods,
+      // then sort remaining rules by precedence order.
+      //
+      // Conflict detection uses the module's conflict matrix, which defines
+      // relationships between rules and methods. If a method and rule have
+      // Relationship::Conflict in the matrix, they cannot execute in the same cycle.
+
+      auto calledMethodsIt = methodsCalledThisCycle_.find(instancePath);
+      llvm::StringSet<> calledMethods;
+      if (calledMethodsIt != methodsCalledThisCycle_.end()) {
+        calledMethods = calledMethodsIt->second;
+      }
+
+      // Get the conflict matrix for this module
+      const ModuleConflictMatrix *conflictMatrix = nullptr;
+      if (conflictMatrixAnalysis_) {
+        conflictMatrix = conflictMatrixAnalysis_->getModuleMatrix(
+            mod.getSymNameAttr());
+      }
+
+      // Filter out conflicting rules using the conflict matrix
+      std::vector<std::string> nonConflictingRules;
+      for (const std::string &ruleName : moduleRules) {
+        StringRef fullName(ruleName);
+        size_t lastDot = fullName.rfind('.');
+        StringRef localName = lastDot != StringRef::npos ? fullName.substr(lastDot + 1) : fullName;
+
+        // Check if this rule conflicts with any called method using the conflict matrix
+        bool conflicts = false;
+
+        if (conflictMatrix) {
+          StringAttr ruleAttr = StringAttr::get(mod.getContext(), localName);
+          for (const auto &methodName : calledMethods) {
+            StringAttr methodAttr = StringAttr::get(mod.getContext(), methodName.first());
+            Relationship rel = conflictMatrix->getRelationship(methodAttr, ruleAttr);
+            if (rel == Relationship::Conflict) {
+              conflicts = true;
+              LLVM_DEBUG(llvm::dbgs() << "resolveConflicts: blocking " << ruleName
+                                      << " due to conflict with method " << methodName.first()
+                                      << " (relationship: Conflict)\n");
+              break;
+            }
+          }
+        }
+
+        if (!conflicts) {
+          nonConflictingRules.push_back(ruleName);
+        }
+      }
+
+      // Sort by precedence order (lower priority number = higher precedence = fires first)
+      std::sort(nonConflictingRules.begin(), nonConflictingRules.end(),
+                [&](const std::string &a, const std::string &b) {
+                  StringRef aFull(a), bFull(b);
+                  size_t aLastDot = aFull.rfind('.');
+                  size_t bLastDot = bFull.rfind('.');
+                  StringRef aLocal = aLastDot != StringRef::npos ? aFull.substr(aLastDot + 1) : aFull;
+                  StringRef bLocal = bLastDot != StringRef::npos ? bFull.substr(bLastDot + 1) : bFull;
+
+                  unsigned aPrio = UINT_MAX, bPrio = UINT_MAX;
+                  auto aIt = priorityMap.find(aLocal);
+                  if (aIt != priorityMap.end()) aPrio = aIt->second;
+                  auto bIt = priorityMap.find(bLocal);
+                  if (bIt != priorityMap.end()) bPrio = bIt->second;
+
+                  return aPrio < bPrio;
+                });
+
+      // Add all non-conflicting rules from nested module in precedence order
+      for (const auto &rule : nonConflictingRules) {
+        selectedRules.push_back(rule);
+      }
     }
   }
 
-  // Return only the highest priority rule (ORAAT semantics)
-  return {bestRule};
+  return selectedRules;
 }
 
 //===----------------------------------------------------------------------===//
@@ -507,6 +1108,15 @@ std::vector<std::string> Cmt2Interpreter::resolveConflicts(
 //===----------------------------------------------------------------------===//
 
 std::optional<InterpValue> Cmt2Interpreter::readRegister(StringRef name) {
+  // First check the registry
+  if (moduleRegistry_.hasInstance(name)) {
+    // Call the read method
+    auto result = moduleRegistry_.callMethod(name, "read", {});
+    if (result && !result->empty())
+      return (*result)[0];
+  }
+
+  // Fallback to legacy registers
   auto it = registers_.find(name);
   if (it == registers_.end())
     return std::nullopt;
@@ -527,24 +1137,50 @@ LogicalResult Cmt2Interpreter::writeRegister(StringRef name,
 
 std::vector<std::string> Cmt2Interpreter::getRegisterNames() const {
   std::vector<std::string> names;
+
+  // Get names from the registry
+  auto registryNames = moduleRegistry_.getAllInstanceNames();
+  names.insert(names.end(), registryNames.begin(), registryNames.end());
+
+  // Add legacy register names
   for (const auto &entry : registers_) {
-    names.push_back(entry.first().str());
+    // Avoid duplicates
+    if (std::find(names.begin(), names.end(), entry.first().str()) == names.end())
+      names.push_back(entry.first().str());
   }
   return names;
 }
 
 std::vector<std::string> Cmt2Interpreter::getRuleNames() const {
   std::vector<std::string> names;
+
+  // Helper to collect rules from a module with a given instance path
+  auto collectModuleRules = [&](cmt2::ModuleOp mod, StringRef instancePath) {
+    for (auto &op : mod.getBody().front()) {
+      if (auto rule = dyn_cast<RuleOp>(&op)) {
+        std::string ruleName = instancePath.empty()
+            ? rule.getSymName().str()
+            : (instancePath.str() + "." + rule.getSymName().str());
+        names.push_back(ruleName);
+      } else if (auto procRule = dyn_cast<ProcRuleOp>(&op)) {
+        std::string ruleName = instancePath.empty()
+            ? procRule.getSymName().str()
+            : (instancePath.str() + "." + procRule.getSymName().str());
+        names.push_back(ruleName);
+      }
+    }
+  };
+
+  // Collect rules from top module
   if (topModule_) {
-    // Regular rules
-    topModule_->walk([&](RuleOp rule) {
-      names.push_back(rule.getSymName().str());
-    });
-    // Proc rules
-    topModule_->walk([&](ProcRuleOp procRule) {
-      names.push_back(procRule.getSymName().str());
-    });
+    collectModuleRules(topModule_, "");
   }
+
+  // Collect rules from nested CMT2 module instances
+  for (const auto &entry : cmt2ModuleInstances_) {
+    collectModuleRules(entry.second, entry.first());
+  }
+
   return names;
 }
 
@@ -600,18 +1236,142 @@ std::optional<InterpValue> Cmt2Interpreter::readValue(StringRef name) {
 std::optional<std::vector<InterpValue>> Cmt2Interpreter::callMethod(
     StringRef instanceName, StringRef methodName,
     const std::vector<InterpValue> &args) {
-  // Find the instance and execute the method
-  // For now, handle register read/write specially
-  auto regIt = registers_.find(instanceName);
+  // Build the full hierarchical name
+  std::string fullInstanceName = currentInstancePath_.empty()
+      ? instanceName.str()
+      : (currentInstancePath_ + "." + instanceName.str());
+
+  LLVM_DEBUG(llvm::dbgs() << "callMethod: instance='" << instanceName
+                          << "' full='" << fullInstanceName
+                          << "' method='" << methodName << "'\n");
+
+  // First, try the module interpreter registry (external modules)
+  if (moduleRegistry_.hasInstance(fullInstanceName)) {
+    llvm::ArrayRef<interp::InterpValue> interpArgs(args);
+    return moduleRegistry_.callMethod(fullInstanceName, methodName, interpArgs);
+  }
+
+  // Second, try CMT2 module instances (nested modules)
+  auto cmt2It = cmt2ModuleInstances_.find(fullInstanceName);
+  if (cmt2It != cmt2ModuleInstances_.end()) {
+    cmt2::ModuleOp cmt2Module = cmt2It->second;
+
+    // Track this method call for conflict detection in resolveConflicts()
+    methodsCalledThisCycle_[fullInstanceName].insert(methodName);
+
+    // Save and update current instance path for nested calls
+    std::string savedPath = currentInstancePath_;
+    currentInstancePath_ = fullInstanceName;
+
+    // Save current valueMap (we need a fresh one for the nested method)
+    auto savedValueMap = std::move(valueMap_);
+    valueMap_.clear();
+
+    std::optional<std::vector<InterpValue>> result;
+
+    // Look for the method or value in the CMT2 module
+    // Try as a method first
+    cmt2::MethodOp methodOp;
+    cmt2Module.walk([&](cmt2::MethodOp m) {
+      if (m.getSymName() == methodName) {
+        methodOp = m;
+        return WalkResult::interrupt();
+      }
+      return WalkResult::advance();
+    });
+
+    if (methodOp) {
+      // Set up arguments in valueMap (for guard evaluation too)
+      auto methodArgs = methodOp.getBody().getArguments();
+      for (size_t i = 0; i < std::min(args.size(), (size_t)methodArgs.size()); ++i) {
+        setValue(methodArgs[i], args[i]);
+      }
+
+      // Check the guard first
+      if (!evaluateGuard(methodOp.getGuard())) {
+        LLVM_DEBUG(llvm::dbgs() << "Method '" << methodName << "' guard failed\n");
+        result = std::nullopt;
+      } else {
+        // Execute the method body
+        executeBody(methodOp.getBody());
+
+        // Collect results from cmt2.return
+        std::vector<InterpValue> results;
+        methodOp.getBody().walk([&](cmt2::ReturnOp retOp) {
+          for (Value v : retOp.getOperands()) {
+            results.push_back(getValue(v));
+          }
+          return WalkResult::interrupt();
+        });
+
+        result = results;
+      }
+    } else {
+      // Try as a value (read-only method)
+      cmt2::ValueOp valueOp;
+      cmt2Module.walk([&](cmt2::ValueOp v) {
+        if (v.getSymName() == methodName) {
+          valueOp = v;
+          return WalkResult::interrupt();
+        }
+        return WalkResult::advance();
+      });
+
+      if (valueOp) {
+        LLVM_DEBUG(llvm::dbgs() << "Calling value '" << methodName
+                                << "' on CMT2 module '" << fullInstanceName << "'\n");
+
+        // Set up arguments in valueMap (for guard evaluation too)
+        auto valueArgs = valueOp.getBody().getArguments();
+        for (size_t i = 0; i < std::min(args.size(), (size_t)valueArgs.size()); ++i) {
+          setValue(valueArgs[i], args[i]);
+        }
+
+        // Check the guard first
+        if (!evaluateGuard(valueOp.getGuard())) {
+          LLVM_DEBUG(llvm::dbgs() << "Value '" << methodName << "' guard failed\n");
+          result = std::nullopt;
+        } else {
+          // Execute the value body
+          executeBody(valueOp.getBody());
+
+          // Collect results from cmt2.return
+          std::vector<InterpValue> results;
+          valueOp.getBody().walk([&](cmt2::ReturnOp retOp) {
+            for (Value v : retOp.getOperands()) {
+              results.push_back(getValue(v));
+            }
+            return WalkResult::interrupt();
+          });
+
+          result = results;
+        }
+      } else {
+        LLVM_DEBUG(llvm::dbgs() << "CMT2 module '" << fullInstanceName
+                                << "' has no method/value '" << methodName << "'\n");
+      }
+    }
+
+    // Restore saved state
+    valueMap_ = std::move(savedValueMap);
+    currentInstancePath_ = savedPath;
+
+    return result;
+  }
+
+  // Fallback: Legacy register handling (also with hierarchical name)
+  auto regIt = registers_.find(fullInstanceName);
   if (regIt != registers_.end()) {
     if (methodName == "read") {
       return std::vector<InterpValue>{regIt->second.value};
     } else if (methodName == "write" && !args.empty()) {
-      pendingWrites_[instanceName] = args[0];
+      pendingWrites_[fullInstanceName] = args[0];
       return std::vector<InterpValue>{};
     }
   }
 
+  LLVM_DEBUG(llvm::dbgs() << "callMethod: instance '" << fullInstanceName
+                          << "' not found\n");
   return std::nullopt;
 }
 
@@ -1027,6 +1787,14 @@ std::optional<InterpValue> Cmt2Interpreter::executeOp(Operation *op) {
     return result;
   }
 
+  if (auto notOp = dyn_cast<firrtl::NotPrimOp>(op)) {
+    InterpValue input = getValue(notOp.getInput());
+    // FIRRTL not is bitwise inversion
+    InterpValue result = ~input;
+    setValue(notOp.getResult(), result);
+    return result;
+  }
+
   if (auto eqOp = dyn_cast<firrtl::EQPrimOp>(op)) {
     InterpValue lhs = getValue(eqOp.getLhs());
     InterpValue rhs = getValue(eqOp.getRhs());
@@ -1087,6 +1855,18 @@ std::optional<InterpValue> Cmt2Interpreter::executeOp(Operation *op) {
   return std::nullopt;
 }
 
+/// Helper to extract bit width from a type (handles both MLIR integer and FIRRTL types)
+static unsigned getTypeWidth(Type type) {
+  if (auto intType = dyn_cast<IntegerType>(type))
+    return intType.getWidth();
+  if (auto firrtlType = dyn_cast<firrtl::FIRRTLBaseType>(type)) {
+    int32_t width = firrtlType.getBitWidthOrSentinel();
+    if (width > 0)
+      return static_cast<unsigned>(width);
+  }
+  return 32;  // Default fallback
+}
+
 InterpValue Cmt2Interpreter::getValue(Value value) {
   // Check if we have a cached value
   auto it = valueMap_.find(value);
@@ -1096,9 +1876,7 @@ InterpValue Cmt2Interpreter::getValue(Value value) {
   // For block arguments, return a default value
   // This would need to be set up properly for method arguments
   if (auto arg = dyn_cast<BlockArgument>(value)) {
-    unsigned width = 32;
-    if (auto intType = dyn_cast<IntegerType>(value.getType()))
-      width = intType.getWidth();
+    unsigned width = getTypeWidth(value.getType());
     return APInt(width, 0);
   }
 
@@ -1109,9 +1887,7 @@ InterpValue Cmt2Interpreter::getValue(Value value) {
   }
 
   // Default
-  unsigned width = 32;
-  if (auto intType = dyn_cast<IntegerType>(value.getType()))
-    width = intType.getWidth();
+  unsigned width = getTypeWidth(value.getType());
   return APInt(width, 0);
 }
 
@@ -1120,7 +1896,10 @@ void Cmt2Interpreter::setValue(Value value, const InterpValue &v) {
 }
 
 void Cmt2Interpreter::applyStateUpdates() {
-  // Apply all pending writes atomically
+  // Commit all instances through the registry
+  moduleRegistry_.commitAllInstances();
+
+  // Apply legacy pending writes atomically
   for (const auto &write : pendingWrites_) {
     auto it = registers_.find(write.first());
     if (it != registers_.end()) {
@@ -1130,6 +1909,15 @@ void Cmt2Interpreter::applyStateUpdates() {
     }
   }
   pendingWrites_.clear();
+
+  // Commit control flow plugins (for plugin-based execution)
+  if (usePluginExecution_) {
+    if (dynamicControlPlugin_)
+      dynamicControlPlugin_->commit();
+    if (staticControlPlugin_)
+      staticControlPlugin_->commit();
+    stateManager_.commitWrites();
+  }
 }
 
 //===----------------------------------------------------------------------===//

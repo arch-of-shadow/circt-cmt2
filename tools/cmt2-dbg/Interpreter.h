@@ -20,6 +20,12 @@
 #define CMT2_DBG_INTERPRETER_H
 
 #include "circt/Dialect/Cmt2/Cmt2Ops.h"
+#include "circt/Dialect/Cmt2/Interpreter/ControlFlowPlugin.h"
+#include "circt/Dialect/Cmt2/Interpreter/ModuleInterpreterRegistry.h"
+#include "circt/Dialect/Cmt2/Interpreter/OpHandlerRegistry.h"
+#include "circt/Dialect/Cmt2/Interpreter/Scheduler.h"
+#include "circt/Dialect/Cmt2/Interpreter/StateManager.h"
+#include "circt/Dialect/Cmt2/Transforms/ConflictMatrix.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "llvm/ADT/APInt.h"
 #include "llvm/ADT/DenseMap.h"
@@ -238,6 +244,37 @@ public:
   void setMaxTraceEntries(unsigned max) { maxTraceEntries_ = max; }
 
   //===--------------------------------------------------------------------===//
+  // Plugin-Based Execution (Experimental)
+  //===--------------------------------------------------------------------===//
+
+  /// Enable/disable plugin-based execution path.
+  /// When enabled, uses ControlFlowPlugins for proc control flow.
+  void setPluginExecution(bool enabled) { usePluginExecution_ = enabled; }
+
+  /// Check if plugin-based execution is enabled.
+  bool isPluginExecutionEnabled() const { return usePluginExecution_; }
+
+  /// Get the state manager (for external access/debugging).
+  interp::StateManager &getStateManager() { return stateManager_; }
+
+  /// Get the static control plugin (for timing validation access).
+  interp::StaticControlPlugin *getStaticControlPlugin() {
+    return staticControlPlugin_.get();
+  }
+
+  /// Set the scheduler to use for conflict resolution.
+  /// Takes ownership of the scheduler. If null, uses default ORAATScheduler.
+  void setScheduler(std::unique_ptr<interp::Scheduler> scheduler);
+
+  /// Get the current scheduler.
+  interp::Scheduler *getScheduler() { return scheduler_.get(); }
+
+  /// Get scheduler name.
+  llvm::StringRef getSchedulerName() const {
+    return scheduler_ ? scheduler_->getName() : "ORAAT";
+  }
+
+  //===--------------------------------------------------------------------===//
   // Output
   //===--------------------------------------------------------------------===//
 
@@ -263,6 +300,10 @@ private:
 
   /// Evaluate a guard region
   bool evaluateGuard(mlir::Region &guardRegion);
+
+  /// Evaluate method guards from calls in a body region
+  /// Returns true if all method guards pass, false if any fails
+  bool evaluateMethodGuards(mlir::Region &bodyRegion);
 
   /// Execute a rule body
   void executeBody(mlir::Region &bodyRegion);
@@ -320,10 +361,13 @@ private:
   /// Current cycle count
   uint64_t cycle_ = 0;
 
-  /// Register states (keyed by hierarchical name)
+  /// Module interpreter registry for external modules (Reg, FIFO, Memory, etc.)
+  interp::ModuleInterpreterRegistry moduleRegistry_;
+
+  /// Register states (keyed by hierarchical name) - legacy, migrating to moduleRegistry_
   llvm::StringMap<RegisterState> registers_;
 
-  /// Pending register writes (for atomic update)
+  /// Pending register writes (for atomic update) - legacy, migrating to moduleRegistry_
   llvm::StringMap<InterpValue> pendingWrites_;
 
   /// SSA value storage during execution
@@ -352,6 +396,43 @@ private:
 
   /// Step done signals for current cycle
   llvm::DenseSet<llvm::StringRef> stepsDoneThisCycle_;
+
+  /// CMT2 module instances (keyed by hierarchical instance name -> referenced module)
+  llvm::StringMap<cmt2::ModuleOp> cmt2ModuleInstances_;
+
+  /// Per-instance schedulers for nested CMT2 modules
+  /// Each nested module instance gets its own ORAATScheduler initialized with its module
+  llvm::StringMap<std::unique_ptr<interp::ORAATScheduler>> instanceSchedulers_;
+
+  /// Current instance path for hierarchical name resolution during nested execution
+  std::string currentInstancePath_;
+
+  /// Methods called during current cycle (for conflict detection in nested modules)
+  /// Key: instance path (e.g., "fifo"), Value: set of method names called
+  llvm::StringMap<llvm::StringSet<>> methodsCalledThisCycle_;
+
+  //===--------------------------------------------------------------------===//
+  // Modular Infrastructure (Phase 3 Integration)
+  //===--------------------------------------------------------------------===//
+
+  /// Centralized state manager (new modular infrastructure)
+  interp::StateManager stateManager_;
+
+  /// Operation handler registry
+  interp::OpHandlerRegistry opRegistry_;
+
+  /// Control flow plugins
+  std::unique_ptr<interp::DynamicControlPlugin> dynamicControlPlugin_;
+  std::unique_ptr<interp::StaticControlPlugin> staticControlPlugin_;
+
+  /// Scheduler plugin (default: ORAATScheduler)
+  std::unique_ptr<interp::Scheduler> scheduler_;
+
+  /// Conflict matrix analysis for all modules
+  std::unique_ptr<ConflictMatrixAnalysis> conflictMatrixAnalysis_;
+
+  /// Flag to enable new plugin-based execution path
+  bool usePluginExecution_ = false;
 };
 
 } // namespace cmt2
