@@ -63,17 +63,20 @@ builtin.module {
             }
 
             // While loop: decrement while counter > 0
+            // The condition is computed in a dedicated region that supports cmt2.call
             cmt2.proc.rule @countdown_rule() -> () {
                 %c1 = firrtl.constant 1 : !firrtl.uint<1>
                 cmt2.return %c1 : !firrtl.uint<1>
             } control {
-                // Read counter and check if > 0
-                %count = cmt2.call @counter @read() : () -> !firrtl.uint<32>
-                %c0 = firrtl.constant 0 : !firrtl.uint<32>
-                %running = firrtl.neq %count, %c0 : (!firrtl.uint<32>, !firrtl.uint<32>) -> !firrtl.uint<1>
-
-                cmt2.proc.while %running : !firrtl.uint<1> {
+                cmt2.proc.while {
+                    // Condition region: read counter and check if > 0
+                    %count = cmt2.call @counter @read() : () -> !firrtl.uint<32>
+                    %c0 = firrtl.constant 0 : !firrtl.uint<32>
+                    %running = firrtl.neq %count, %c0 : (!firrtl.uint<32>, !firrtl.uint<32>) -> !firrtl.uint<1>
+                    cmt2.proc.while_cond %running : !firrtl.uint<1>
+                } do {
                     cmt2.proc.enable @decrement
+                    cmt2.proc.yield
                 }
                 cmt2.proc.control_end
             }
@@ -106,15 +109,17 @@ builtin.module {
                 %c1 = firrtl.constant 1 : !firrtl.uint<1>
                 cmt2.return %c1 : !firrtl.uint<1>
             } control {
-                %count = cmt2.call @counter @read() : () -> !firrtl.uint<32>
-                %c0 = firrtl.constant 0 : !firrtl.uint<32>
-                %running = firrtl.neq %count, %c0 : (!firrtl.uint<32>, !firrtl.uint<32>) -> !firrtl.uint<1>
-
-                cmt2.proc.while %running : !firrtl.uint<1> {
+                cmt2.proc.while {
+                    %count = cmt2.call @counter @read() : () -> !firrtl.uint<32>
+                    %c0 = firrtl.constant 0 : !firrtl.uint<32>
+                    %running = firrtl.neq %count, %c0 : (!firrtl.uint<32>, !firrtl.uint<32>) -> !firrtl.uint<1>
+                    cmt2.proc.while_cond %running : !firrtl.uint<1>
+                } do {
                     cmt2.proc.seq {
                         cmt2.proc.enable @read_step
                         cmt2.proc.enable @update_step
                     }
+                    cmt2.proc.yield
                 }
                 cmt2.proc.control_end
             }

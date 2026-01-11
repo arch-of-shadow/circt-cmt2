@@ -59,7 +59,7 @@ builtin.module {
             // CHECK: cmt2.proc.rule @seq_rule
             // CHECK-SAME: proc.converted
             // CHECK-SAME: proc.stmt_converted
-            // CHECK: cmt2.instance @__fsm_seq_rule = @reg
+            // CHECK: cmt2.instance @__fsm_seq_rule = @__FSMReg_
             // CHECK: cmt2.rule @seq_rule_state0
             // CHECK: cmt2.rule @seq_rule_state1
             // CHECK: cmt2.value @seq_rule__idle
@@ -90,7 +90,7 @@ builtin.module {
             // CHECK: cmt2.proc.rule @invoke_rule
             // CHECK-SAME: proc.converted
             // CHECK-SAME: proc.stmt_converted
-            // CHECK: cmt2.instance @__fsm_invoke_rule = @reg
+            // CHECK: cmt2.instance @__fsm_invoke_rule = @__FSMReg_
             cmt2.proc.rule @invoke_rule() -> () {
                 %c1 = firrtl.constant 1 : !firrtl.uint<1>
                 cmt2.return %c1 : !firrtl.uint<1>

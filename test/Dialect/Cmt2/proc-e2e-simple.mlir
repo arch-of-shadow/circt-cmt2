@@ -61,7 +61,7 @@ builtin.module {
             }
 
             // Procedural rule with sequential control
-            // CHECK-ACTION: cmt2.instance @__fsm_seq_test = @reg
+            // CHECK-ACTION: cmt2.instance @__fsm_seq_test = @__FSMReg_
             // CHECK-ACTION: cmt2.rule @seq_test_state0
             // CHECK-ACTION: cmt2.rule @seq_test_state1
             // CHECK-ACTION: cmt2.value @seq_test__idle

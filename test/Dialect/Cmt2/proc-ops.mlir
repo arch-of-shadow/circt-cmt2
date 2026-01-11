@@ -106,12 +106,18 @@ builtin.module {
                 %c1 = firrtl.constant 1 : !firrtl.uint<1>
                 cmt2.return %c1 : !firrtl.uint<1>
             } control {
-                %cond = cmt2.call @reg_a @read() : () -> !firrtl.uint<32>
-                %c0 = firrtl.constant 0 : !firrtl.uint<32>
-                %not_zero = firrtl.neq %cond, %c0 : (!firrtl.uint<32>, !firrtl.uint<32>) -> !firrtl.uint<1>
                 // CHECK: cmt2.proc.while
-                cmt2.proc.while %not_zero : !firrtl.uint<1> {
+                cmt2.proc.while {
+                    // Condition region with cmt2.call
+                    %cond = cmt2.call @reg_a @read() : () -> !firrtl.uint<32>
+                    %c0 = firrtl.constant 0 : !firrtl.uint<32>
+                    %not_zero = firrtl.neq %cond, %c0 : (!firrtl.uint<32>, !firrtl.uint<32>) -> !firrtl.uint<1>
+                    // CHECK: cmt2.proc.while_cond
+                    cmt2.proc.while_cond %not_zero : !firrtl.uint<1>
+                } do {
                     cmt2.proc.enable @load
+                    // CHECK: cmt2.proc.yield
+                    cmt2.proc.yield
                 }
             }
 

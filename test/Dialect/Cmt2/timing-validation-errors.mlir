@@ -81,5 +81,62 @@ builtin.module {
                 cmt2.proc.enable @bad_pipeline_step
             }
         }
+
+        // Test 3: proc.method static_latency doesn't match control flow (TV5)
+        cmt2.module @LatencyMismatch(%clk: !firrtl.clock, %rst: !firrtl.uint<1>) {
+            // Static steps with known latencies
+            cmt2.proc.static_step @step_a <3> {
+                // 3 cycle step
+            }
+            cmt2.proc.static_step @step_b <5> {
+                // 5 cycle step
+            }
+
+            // Declared latency=10, but actual latency=8 (3+5)
+            // expected-error @+1 {{'cmt2.proc.method' op declared static_latency=10 but control flow computes to 8 cycles}}
+            cmt2.proc.method @wrong_latency static<10>() -> () {
+                %c1 = firrtl.constant 1 : !firrtl.uint<1>
+                cmt2.return %c1 : !firrtl.uint<1>
+            } control {
+                cmt2.proc.seq {
+                    cmt2.proc.enable @step_a
+                    cmt2.proc.enable @step_b
+                }
+                cmt2.proc.control_end
+            }
+
+            cmt2.proc.rule @use_method() -> () {
+                %c1 = firrtl.constant 1 : !firrtl.uint<1>
+                cmt2.return %c1 : !firrtl.uint<1>
+            } control {
+                cmt2.proc.control_end
+            }
+        }
+
+        // Test 4: proc.method with static_latency but dynamic control (TV5)
+        cmt2.module @DynamicInStatic(%clk: !firrtl.clock, %rst: !firrtl.uint<1>) {
+            // Dynamic step (no fixed latency)
+            cmt2.proc.step @dynamic_step {
+                %c1 = firrtl.constant 1 : !firrtl.uint<1>
+                cmt2.proc.step_done %c1 : !firrtl.uint<1>
+            }
+
+            // Declared as static, but uses dynamic step
+            // expected-error @+1 {{'cmt2.proc.method' op has static_latency=5 but control region contains dynamic constructs}}
+            cmt2.proc.method @static_with_dynamic static<5>() -> () {
+                %c1 = firrtl.constant 1 : !firrtl.uint<1>
+                cmt2.return %c1 : !firrtl.uint<1>
+            } control {
+                cmt2.proc.enable @dynamic_step
+                cmt2.proc.control_end
+            }
+
+            cmt2.proc.rule @use_method2() -> () {
+                %c1 = firrtl.constant 1 : !firrtl.uint<1>
+                cmt2.return %c1 : !firrtl.uint<1>
+            } control {
+                cmt2.proc.control_end
+            }
+        }
     }
 }
