@@ -214,6 +214,32 @@ class CommentOp(TestOp):
         return f"# {self.text}"
 
 
+@dataclass
+class RecordCycleOp(TestOp):
+    """Record the current cycle number for timing verification."""
+    label: str
+
+    def to_cpp(self) -> str:
+        return f"uint64_t cycle_{self.label} = cycle_count;"
+
+    def to_python(self) -> str:
+        return f"cycle_{self.label} = cocotb.utils.get_sim_time('ns') // 10  # Approx cycles"
+
+
+@dataclass
+class PrintCycleDiffOp(TestOp):
+    """Print the difference between two recorded cycle counts."""
+    start_label: str
+    end_label: str
+    message: str
+
+    def to_cpp(self) -> str:
+        return f'std::cout << "{self.message}: " << (cycle_{self.end_label} - cycle_{self.start_label}) << " cycles" << std::endl;'
+
+    def to_python(self) -> str:
+        return f'print(f"{self.message}: {{cycle_{self.end_label} - cycle_{self.start_label}}} cycles")'
+
+
 class TestSequence:
     """A sequence of test operations.
 
@@ -355,6 +381,36 @@ class TestSequence:
             self for chaining.
         """
         self._ops.append(CommentOp(text))
+        return self
+
+    def record_cycle(self, label: str) -> TestSequence:
+        """Record the current cycle number for timing verification.
+
+        Use with print_cycle_diff() to measure elapsed cycles.
+
+        Args:
+            label: Label for this cycle recording (used in generated variable name).
+
+        Returns:
+            self for chaining.
+        """
+        self._ops.append(RecordCycleOp(label))
+        return self
+
+    def print_cycle_diff(
+        self, start_label: str, end_label: str, message: str
+    ) -> TestSequence:
+        """Print the difference between two recorded cycle counts.
+
+        Args:
+            start_label: Label of the start cycle recording.
+            end_label: Label of the end cycle recording.
+            message: Description of what was measured.
+
+        Returns:
+            self for chaining.
+        """
+        self._ops.append(PrintCycleDiffOp(start_label, end_label, message))
         return self
 
     def __enter__(self) -> TestSequence:

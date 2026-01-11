@@ -205,48 +205,28 @@ class StaticStepBuilder(RegionBuilder):
         pass
 
 
-class ControlBuilder:
+class ControlBuilder(RegionBuilder):
     """Builder for procedural control flow.
 
     ControlBuilder provides methods for sequential, parallel, conditional,
-    and loop control structures.
+    and loop control structures. It extends RegionBuilder to provide access
+    to expression-building methods like call(), lt(), add(), etc.
 
     Example:
         with proc_rule.control() as ctrl:
             with ctrl.seq():
                 ctrl.enable(load.ref())
-                with ctrl.while_(cond):
-                    ctrl.enable(step.ref())
+                # While loop with condition function
+                def loop_cond(b):
+                    cnt = b.call(counter, "read")
+                    return b.lt(cnt, b.const(10, 32))
+                with ctrl.while_(loop_cond) as loop:
+                    loop.enable(step.ref())
                 ctrl.enable(store.ref())
     """
 
     def __init__(self, block, loc, ctx):
-        self._block = block
-        self._loc = loc
-        self._ctx = ctx
-
-    def const(self, value: int, width: int) -> Signal:
-        """Create a constant unsigned integer.
-
-        Args:
-            value: The integer value.
-            width: The bit width.
-
-        Returns:
-            A Signal wrapping the constant.
-        """
-        from circt.ir import IntegerAttr, IntegerType, InsertionPoint
-        from circt.dialects import firrtl
-
-        with InsertionPoint(self._block):
-            # For FIRRTL, we need an unsigned integer type attribute, not signless
-            ty = firrtl.UIntType.get(self._ctx.mlir_context, width)
-            int_ty = IntegerType.get_unsigned(width)
-            attr = IntegerAttr.get(int_ty, value)
-            const_op = firrtl.ConstantOp(ty, attr, loc=self._loc)
-            from .builders import RegionBuilder
-            dummy_builder = RegionBuilder(self._block, self._loc, self._ctx)
-            return Signal(const_op.result, UInt(width), dummy_builder)
+        super().__init__(block, loc, ctx)
 
     @contextmanager
     def seq(self) -> Iterator[ControlBuilder]:
@@ -297,24 +277,60 @@ class ControlBuilder:
         builder._finalize()
 
     @contextmanager
-    def while_(self, condition: Signal) -> Iterator[ControlBuilder]:
-        """While loop control flow.
+    def while_(self, condition_fn) -> Iterator[ControlBuilder]:
+        """While loop control flow with condition region.
+
+        The condition is computed in a dedicated region that supports
+        cmt2.call operations for reading from instances.
 
         Args:
-            condition: Loop continuation condition.
+            condition_fn: A callable that takes a RegionBuilder and returns
+                          a Signal representing the loop condition.
+                          Example: lambda b: b.lt(b.call(counter, "read"), b.const(10, 32))
 
         Yields:
             A nested ControlBuilder for the loop body.
+
+        Example:
+            # Define condition function
+            def loop_cond(b):
+                cnt = b.call(counter, "read")
+                return b.lt(cnt, b.const(10, 32))
+
+            # Use in while loop
+            with ctrl.while_(loop_cond) as loop:
+                loop.enable(step.ref())
+
+            # Or with lambda
+            with ctrl.while_(lambda b: b.lt(b.call(cnt_reg, "read"), b.const(10, 32))) as loop:
+                loop.enable(step.ref())
         """
         from circt.ir import InsertionPoint, Block
         from circt.dialects import cmt2
 
         with InsertionPoint(self._block):
-            while_op = cmt2.ProcWhileOp(condition.value, loc=self._loc)
-            while_block = Block.create_at_start(while_op.body)
+            # Create the while op with two regions
+            while_op = cmt2.ProcWhileOp(loc=self._loc)
 
-        nested = ControlBuilder(while_block, self._loc, self._ctx)
+            # Create condition region block
+            cond_block = Block.create_at_start(while_op.condRegion)
+            # Create body region block
+            body_block = Block.create_at_start(while_op.body)
+
+        # Build condition in the condition region
+        cond_builder = RegionBuilder(cond_block, self._loc, self._ctx)
+        with InsertionPoint(cond_block):
+            condition = condition_fn(cond_builder)
+            # Add terminator to yield the condition
+            cmt2.ProcWhileCondYieldOp(condition.value, loc=self._loc)
+
+        # Yield body builder for the loop body
+        nested = ControlBuilder(body_block, self._loc, self._ctx)
         yield nested
+
+        # Add terminator to the body region
+        with InsertionPoint(body_block):
+            cmt2.ProcYieldOp(loc=self._loc)
 
     @contextmanager
     def static_repeat(
@@ -608,8 +624,9 @@ class ProcRuleBuilder:
             with rule.control() as ctrl:
                 with ctrl.seq():
                     ctrl.enable(load.ref())
-                    with ctrl.while_(cond):
-                        ctrl.enable(step.ref())
+                    # While with condition function that can call instances
+                    with ctrl.while_(lambda b: b.lt(b.call(cnt, "read"), b.const(10, 32))) as loop:
+                        loop.enable(step.ref())
                     ctrl.enable(store.ref())
     """
 
@@ -717,16 +734,29 @@ class ProcRuleBuilder:
 class ProcMethodBuilder:
     """Builder for procedural methods.
 
-    Procedural methods extend regular methods with multi-cycle control.
+    Procedural methods extend regular methods with multi-cycle control flow.
+    Unlike atomic methods, procedural methods CAN have timing attributes
+    (static_latency, interval) because they execute over multiple cycles.
 
-    Example:
-        with mod.proc_method("multiply", args=[("a", UInt(32)), ("b", UInt(32))], returns=[UInt(64)]) as meth:
+    Example (dynamic timing):
+        with mod.proc_method("multiply", args=[("a", UInt(32)), ("b", UInt(32))],
+                            returns=[UInt(64)]) as meth:
             with meth.guard() as g:
                 g.always()
             with meth.control() as ctrl:
                 with ctrl.seq():
                     ctrl.enable(start.ref())
                     ctrl.enable(wait.ref())
+
+    Example (static timing):
+        with mod.proc_method("fast_mult", args=[("a", UInt(32)), ("b", UInt(32))],
+                            returns=[UInt(64)], static_latency=4, interval=2) as meth:
+            # Method takes 4 cycles total, new calls can start every 2 cycles (pipelined)
+            with meth.guard() as g:
+                g.always()
+            with meth.control() as ctrl:
+                with ctrl.seq():
+                    ctrl.static_step(4, "compute")
     """
 
     def __init__(
@@ -735,11 +765,15 @@ class ProcMethodBuilder:
         name: str | None,
         args: list[tuple[str, Cmt2Type]],
         returns: list[Cmt2Type],
+        static_latency: int | None = None,
+        interval: int | None = None,
     ):
         self._module = module
         self._name = name
         self._arg_types = args
         self._return_types = returns
+        self._static_latency = static_latency
+        self._interval = interval
         self._guard_builder: GuardBuilder | None = None
         self._control_builder: ControlBuilder | None = None
         self._op = None
@@ -750,7 +784,7 @@ class ProcMethodBuilder:
 
     def _create_proc_method_op(self):
         """Create the MLIR procedural method operation."""
-        from circt.ir import InsertionPoint, StringAttr, ArrayAttr, Block, FunctionType, TypeAttr
+        from circt.ir import InsertionPoint, StringAttr, ArrayAttr, Block, FunctionType, TypeAttr, IntegerAttr, IntegerType
         from circt.dialects import cmt2
 
         ctx = self._module._circuit._ctx
@@ -771,6 +805,17 @@ class ProcMethodBuilder:
                 bodyResNames=ArrayAttr.get(body_res_names),
                 loc=ctx.location,
             )
+
+            # Set timing attributes after op creation
+            if self._static_latency is not None:
+                self._op.attributes["static_latency"] = IntegerAttr.get(
+                    IntegerType.get_signless(64), self._static_latency
+                )
+            if self._interval is not None:
+                # Use cmt2.IntervalAttr for the interval attribute
+                self._op.attributes["interval"] = cmt2.IntervalAttr.get(
+                    ctx.mlir_context, self._interval
+                )
 
             # Create guard and control blocks with arguments
             arg_locs = [ctx.location] * len(arg_mlir_types)
@@ -828,6 +873,26 @@ class ProcMethodBuilder:
         with InsertionPoint(control_block):
             cmt2.ProcControlEndOp(loc=self._module._circuit._ctx.location)
 
+    @property
+    def is_static(self) -> bool:
+        """Returns True if this method has static timing (known latency)."""
+        return self._static_latency is not None
+
+    @property
+    def latency(self) -> int | None:
+        """Get the static latency, or None if dynamic."""
+        return self._static_latency
+
+    @property
+    def interval(self) -> int | None:
+        """Get the initiation interval, or None if not pipelined."""
+        return self._interval
+
+    @property
+    def is_pipelined(self) -> bool:
+        """Returns True if this method is pipelined (has interval)."""
+        return self._interval is not None
+
     def ref(self) -> MethodRef:
         """Get a reference to this method for scheduling."""
         return MethodRef(self, None, self.name)
@@ -838,3 +903,129 @@ class ProcMethodBuilder:
             raise ValueError(f"ProcMethod '{self.name}' must have a guard region")
         if self._control_builder is None:
             raise ValueError(f"ProcMethod '{self.name}' must have a control region")
+
+        # TV2: Validate static_latency matches control flow
+        if self._static_latency is not None:
+            self._validate_static_latency()
+
+    def _validate_static_latency(self):
+        """Validate that declared static_latency matches the control flow.
+
+        Walks the control region and computes the actual latency from
+        seq/par/enable operations. Raises ValueError if mismatch.
+        """
+        computed = self._compute_region_latency(self._op.control)
+        if computed is None:
+            raise ValueError(
+                f"ProcMethod '{self.name}' has static_latency={self._static_latency} "
+                f"but control region contains dynamic constructs (dynamic steps, if, or while); "
+                f"use only static_step, static_repeat, static_if, seq, and par for static methods"
+            )
+        if computed != self._static_latency:
+            raise ValueError(
+                f"ProcMethod '{self.name}' declared static_latency={self._static_latency} "
+                f"but control flow computes to {computed} cycles"
+            )
+
+    def _compute_region_latency(self, region) -> int | None:
+        """Compute latency of a control region by summing operations.
+
+        Returns None if region contains dynamic constructs.
+        """
+        if len(region.blocks) == 0:
+            return 0
+
+        total = 0
+        for op in region.blocks[0]:
+            lat = self._compute_op_latency(op)
+            if lat is None:
+                return None
+            total += lat
+        return total
+
+    def _compute_op_latency(self, op) -> int | None:
+        """Compute latency of a single control operation.
+
+        Returns None if dynamic (unknown latency).
+        """
+        from circt.dialects import cmt2
+
+        op_name = op.operation.name
+
+        # ProcEnableOp: Look up step latency
+        if op_name == "cmt2.proc.enable":
+            step_name = op.stepName.value
+            return self._lookup_step_latency(step_name)
+
+        # ProcSeqOp: Sum of children
+        if op_name == "cmt2.proc.seq":
+            return self._compute_region_latency(op.body)
+
+        # ProcParOp: Max of children
+        if op_name == "cmt2.proc.par":
+            max_lat = 0
+            for child_op in op.body.blocks[0]:
+                child_lat = self._compute_op_latency(child_op)
+                if child_lat is None:
+                    return None
+                max_lat = max(max_lat, child_lat)
+            return max_lat
+
+        # ProcStaticRepeatOp: count * body_latency
+        if op_name == "cmt2.proc.static_repeat":
+            count = op.count.value
+            if "body_latency" in op.attributes:
+                return count * op.body_latency.value
+            body_lat = self._compute_region_latency(op.body)
+            if body_lat is None:
+                return None
+            return count * body_lat
+
+        # ProcStaticIfOp: max of branches
+        if op_name == "cmt2.proc.static_if":
+            then_lat = 0
+            else_lat = 0
+            if "then_latency" in op.attributes:
+                then_lat = op.then_latency.value
+            else:
+                computed = self._compute_region_latency(op.thenRegion)
+                if computed is None:
+                    return None
+                then_lat = computed
+            if len(op.elseRegion.blocks) == 0:
+                else_lat = 0
+            elif "else_latency" in op.attributes:
+                else_lat = op.else_latency.value
+            else:
+                computed = self._compute_region_latency(op.elseRegion)
+                if computed is None:
+                    return None
+                else_lat = computed
+            return max(then_lat, else_lat)
+
+        # Dynamic constructs - can't compute
+        if op_name in ("cmt2.proc.if", "cmt2.proc.while"):
+            return None
+
+        # Other ops (control_end, etc.) - zero latency
+        return 0
+
+    def _lookup_step_latency(self, step_name: str) -> int | None:
+        """Look up a step's latency by name.
+
+        Returns None if step is dynamic (ProcStepOp) or not found.
+        """
+        # Search for the step in the module's body block
+        # self._module._op.body is already a Block (not a Region)
+        module_body_block = self._module._op.body
+        for op in module_body_block:
+            op_name = op.operation.name
+            if op_name == "cmt2.proc.static_step":
+                if op.sym_name.value == step_name:
+                    return op.latency.value
+            elif op_name == "cmt2.proc.step":
+                if op.sym_name.value == step_name:
+                    # Dynamic step - latency unknown
+                    return None
+        # Step not found - might be external, can't compute
+        return None

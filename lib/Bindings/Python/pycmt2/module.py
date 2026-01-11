@@ -274,36 +274,34 @@ class ModuleBuilder:
         name: str | None = None,
         args: list[tuple[str, Cmt2Type]] | None = None,
         returns: list[Cmt2Type] | None = None,
-        static_latency: int | None = None,
-        interval: int | None = None,
     ) -> Iterator[MethodBuilder]:
-        """Define an action method.
+        """Define an atomic action method.
+
+        Atomic methods execute in a single cycle and have the ready-enable
+        contract. They do NOT support timing attributes.
+
+        For multi-cycle methods with timing attributes (static_latency, interval),
+        use proc_method() instead.
 
         Args:
             name: Optional method name.
             args: Method arguments as (name, type) pairs.
             returns: Return types.
-            static_latency: Optional fixed latency in cycles. If specified,
-                            the method has static timing and doesn't need
-                            a done signal at runtime.
-            interval: Optional initiation interval for pipelined methods.
-                      Specifies minimum cycles between consecutive calls.
 
         Yields:
             A MethodBuilder for defining guard and body.
 
-        Example with static timing:
-            with mod.method("multiply", args=[("a", UInt(32)), ("b", UInt(32))],
-                           returns=[UInt(32)], static_latency=4, interval=3) as m:
-                # Method takes 4 cycles, can start new call every 3 cycles
-                ...
+        Example:
+            with mod.method("write_reg", args=[("data", UInt(32))]) as m:
+                with m.guard() as g:
+                    g.always()
+                with m.body() as b:
+                    data = b.arg("data")
+                    b.call(reg, "write", data)
         """
         from .function_builders import MethodBuilder
 
-        builder = MethodBuilder(
-            self, name, args or [], returns or [],
-            static_latency=static_latency, interval=interval
-        )
+        builder = MethodBuilder(self, name, args or [], returns or [])
         yield builder
         builder._finalize()
         self._methods[builder.name] = builder
@@ -355,20 +353,43 @@ class ModuleBuilder:
         name: str | None = None,
         args: list[tuple[str, Cmt2Type]] | None = None,
         returns: list[Cmt2Type] | None = None,
+        static_latency: int | None = None,
+        interval: int | None = None,
     ) -> Iterator[ProcMethodBuilder]:
-        """Define a procedural method.
+        """Define a procedural method with optional timing attributes.
+
+        Procedural methods extend regular methods with multi-cycle control flow.
+        Unlike atomic methods, procedural methods CAN have timing attributes
+        because they execute over multiple cycles.
 
         Args:
             name: Optional method name.
-            args: Method arguments.
+            args: Method arguments as (name, type) pairs.
             returns: Return types.
+            static_latency: Optional total latency in cycles. If specified,
+                           the method has static timing and the FSM knows
+                           exactly when it will complete.
+            interval: Optional initiation interval for pipelined methods.
+                     Specifies minimum cycles between consecutive calls.
 
         Yields:
             A ProcMethodBuilder for defining guard and control.
+
+        Example with static timing:
+            with mod.proc_method("multiply", args=[("a", UInt(32)), ("b", UInt(32))],
+                                returns=[UInt(64)], static_latency=4, interval=2) as m:
+                with m.guard() as g:
+                    g.always()
+                with m.control() as ctrl:
+                    # 4-cycle multiply, can start new operation every 2 cycles
+                    ...
         """
         from .proc_builders import ProcMethodBuilder
 
-        builder = ProcMethodBuilder(self, name, args or [], returns or [])
+        builder = ProcMethodBuilder(
+            self, name, args or [], returns or [],
+            static_latency=static_latency, interval=interval
+        )
         yield builder
         builder._finalize()
         self._proc_methods[builder.name] = builder

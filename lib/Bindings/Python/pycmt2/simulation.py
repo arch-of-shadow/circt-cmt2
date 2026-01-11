@@ -61,16 +61,18 @@ class SimulationWorkspace:
         └── README.md             # Instructions
     """
 
-    def __init__(self, circuit: Circuit, output_dir: str | Path):
+    def __init__(self, circuit: Circuit, output_dir: str | Path, top_module: str | None = None):
         """Create a simulation workspace generator.
 
         Args:
             circuit: The CMT2 circuit to simulate.
             output_dir: Directory to generate workspace in.
+            top_module: Optional explicit top module name. If not specified,
+                uses the last defined module in the circuit.
         """
         self.circuit = circuit
         self.output_dir = Path(output_dir)
-        self._top_module = self._get_top_module_name()
+        self._top_module = top_module if top_module else self._get_top_module_name()
         self._external_rtl: dict[str, str] = {}  # filename -> content
 
     def add_external_rtl(self, filename: str, content: str) -> "SimulationWorkspace":
@@ -90,9 +92,15 @@ class SimulationWorkspace:
         return self
 
     def _get_top_module_name(self) -> str:
-        """Get the top-level module name from the circuit."""
+        """Get the top-level module name from the circuit.
+
+        Returns the last defined module, which is typically the top-level.
+        For circuits with STL modules, the first modules are library modules
+        and the last is the user's top-level module.
+        """
         if self.circuit._modules:
-            return next(iter(self.circuit._modules.keys()))
+            # Return the last module (typically the top-level)
+            return list(self.circuit._modules.keys())[-1]
         return self.circuit.name
 
     def _add_stl_rtl(self):
@@ -104,6 +112,13 @@ class SimulationWorkspace:
         from .module_library import get_module_library
 
         library = get_module_library()
+
+        # Pre-generate FSM register modules for common widths (1-8 bits)
+        # The ProcStmtToAction pass auto-creates FSM register modules during
+        # lowering, and they need the corresponding FIRRTL modules.
+        for width in range(1, 9):
+            library.build_module("FIRRTLReg", {"width": width, "init": 0})
+
         verilog_modules = library.get_verilog_for_modules()
 
         for module_name, verilog_content in verilog_modules.items():
