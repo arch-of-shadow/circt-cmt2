@@ -734,16 +734,18 @@ def MethodOp : Cmt2Op<
     }
   }];
 
+  let hasVerifier = 1;
 }
 
 def CallOp : Cmt2Op<
   "call", [
-    ParentOneOf<["MethodOp", "RuleOp", "ValueOp", "IfOp", "ProcStepOp", "ProcStaticStepOp", "ProcRuleOp", "ProcMethodOp"]>,
+    ParentOneOf<["MethodOp", "RuleOp", "ValueOp", "IfOp", "ProcStepOp", "ProcStaticStepOp", "ProcRuleOp", "ProcMethodOp", "ProcWhileOp"]>,
     DeclareOpInterfaceMethods<CallOpInterface>
   ]> {
   let summary = "Call Method/Value.";
   let description = [{
     The `cmt2.call` operation is used to invoke a `MethodOp` or `ValueOp` within a `RuleOp`, `MethodOp`, or `ValueOp`.
+    It can also be used within the condition region of a `ProcWhileOp` to compute loop conditions.
 
     This operation implements CallOpInterface, providing standard call-like operation features:
     - getCallableForCallee(): Returns the callee symbol reference
@@ -1308,30 +1310,87 @@ def ProcIfOp : Cmt2Op<
 def ProcWhileOp : Cmt2Op<
   "proc.while", [
     ParentOneOf<["ProcRuleOp", "ProcMethodOp", "ProcSeqOp", "ProcParOp", "ProcIfOp", "ProcWhileOp", "ProcStaticRepeatOp", "ProcStaticIfOp"]>,
-    SingleBlock,
-    NoTerminator,
     NoRegionArguments
   ]> {
-  let summary = "Loop control";
+  let summary = "Loop control with condition region";
   let description = [{
     Repeatedly executes body while condition is true.
-    TDCC creates backward edges guarded by condition.
+    The condition region computes the loop condition and can contain
+    cmt2.call operations to read from instances.
 
     Assembly format:
     ```mlir
-    cmt2.proc.while %cond : !firrtl.uint<1> {
+    cmt2.proc.while {
+      %cnt = cmt2.call @counter @read() : () -> !firrtl.uint<32>
+      %ten = firrtl.constant 10 : !firrtl.uint<32>
+      %cond = firrtl.lt %cnt, %ten : (!firrtl.uint<32>, !firrtl.uint<32>) -> !firrtl.uint<1>
+      cmt2.proc.while_cond %cond : !firrtl.uint<1>
+    } do {
       cmt2.proc.enable @body
     }
     ```
 
+    The condition region is evaluated each cycle to determine whether to:
+    - Continue looping (condition true): execute body and re-check
+    - Exit loop (condition false): proceed to next statement
+
+    TDCC creates backward edges guarded by condition.
     Transitions:
     - (prev, body_state, cond=true) - enter/continue loop
     - (body_state, next_state, body_done & cond=false) - exit loop
   }];
-  let arguments = (ins FIRRTLBaseType:$cond);
-  let regions = (region SizedRegion<1>:$body);
+  let regions = (region
+    SizedRegion<1>:$condRegion,
+    SizedRegion<1>:$body
+  );
   let assemblyFormat = [{
-    $cond `:` qualified(type($cond)) $body attr-dict
+    $condRegion `do` $body attr-dict
+  }];
+
+  let extraClassDeclaration = [{
+    /// Get the condition value from the condition region's terminator.
+    mlir::Value getCond();
+  }];
+}
+
+def ProcWhileCondYieldOp : Cmt2Op<
+  "proc.while_cond", [
+    Terminator,
+    HasParent<"ProcWhileOp">
+  ]> {
+  let summary = "Yield condition value from while condition region";
+  let description = [{
+    Terminates the condition region of a `cmt2.proc.while` operation,
+    yielding the boolean condition value that determines loop continuation.
+
+    Assembly format:
+    ```mlir
+    cmt2.proc.while_cond %cond : !firrtl.uint<1>
+    ```
+  }];
+  let arguments = (ins FIRRTLBaseType:$cond);
+  let assemblyFormat = [{
+    $cond `:` qualified(type($cond)) attr-dict
+  }];
+}
+
+def ProcYieldOp : Cmt2Op<
+  "proc.yield", [
+    Terminator,
+    ParentOneOf<["ProcWhileOp"]>
+  ]> {
+  let summary = "Terminate while body region";
+  let description = [{
+    Terminates the body region of a `cmt2.proc.while` operation.
+    This is a no-op that simply marks the end of the loop body.
+
+    Assembly format:
+    ```mlir
+    cmt2.proc.yield
+    ```
+  }];
+  let assemblyFormat = [{
+    attr-dict
   }];
 }
 

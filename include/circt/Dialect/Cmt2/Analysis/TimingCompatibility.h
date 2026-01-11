@@ -50,6 +50,11 @@ public:
   /// Check that all timing in a call is within the parent step's bounds.
   mlir::LogicalResult checkTimingBounds(CallOp call, int64_t stepLatency);
 
+  /// Check that step latency is sufficient for the called method.
+  /// This validates cross-method timing compatibility (TV6).
+  mlir::LogicalResult checkStepMethodLatency(CallOp call, int64_t stepLatency,
+                                             const TimingInfo &methodTiming);
+
   /// Validate all calls within a static step for timing correctness.
   mlir::LogicalResult validateStaticStep(ProcStaticStepOp step);
 

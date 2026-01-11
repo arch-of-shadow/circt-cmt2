@@ -60,6 +60,18 @@ private:
   /// Validate pipelined call spacing within a step.
   LogicalResult validatePipelinedCalls(ProcStaticStepOp step, cmt2::ModuleOp module,
                                        TimingAnalysis &analysis);
+
+  /// Validate that proc method's declared static_latency matches control flow.
+  LogicalResult validateProcMethodLatency(ProcMethodOp procMethod,
+                                          cmt2::ModuleOp module);
+
+  /// Compute the static latency of a control region.
+  /// Returns std::nullopt if the region contains dynamic constructs.
+  std::optional<int64_t> computeControlLatency(Region &region,
+                                               cmt2::ModuleOp module);
+
+  /// Compute the static latency of a single operation.
+  std::optional<int64_t> computeOpLatency(Operation *op, cmt2::ModuleOp module);
 };
 
 } // end anonymous namespace
@@ -189,6 +201,143 @@ LogicalResult TimingValidationPass::validateStaticStep(
 }
 
 //===----------------------------------------------------------------------===//
+// Proc Method Latency Computation
+//===----------------------------------------------------------------------===//
+
+std::optional<int64_t>
+TimingValidationPass::computeOpLatency(Operation *op, cmt2::ModuleOp module) {
+  // ProcEnableOp: Look up the step's latency
+  if (auto enable = dyn_cast<ProcEnableOp>(op)) {
+    auto stepName = enable.getStepName();
+    // Look up the step in the module
+    Operation *stepOp = module.lookupSymbol(stepName);
+    if (!stepOp)
+      return std::nullopt; // Step not found, can't compute
+
+    if (auto staticStep = dyn_cast<ProcStaticStepOp>(stepOp)) {
+      return staticStep.getLatency();
+    }
+    // Dynamic step (ProcStepOp) - latency is unknown
+    return std::nullopt;
+  }
+
+  // ProcSeqOp: Sum of children latencies
+  if (auto seq = dyn_cast<ProcSeqOp>(op)) {
+    return computeControlLatency(seq.getBody(), module);
+  }
+
+  // ProcParOp: Max of children latencies
+  if (auto par = dyn_cast<ProcParOp>(op)) {
+    int64_t maxLatency = 0;
+    for (Operation &child : par.getBody().front()) {
+      auto childLat = computeOpLatency(&child, module);
+      if (!childLat)
+        return std::nullopt;
+      maxLatency = std::max(maxLatency, *childLat);
+    }
+    return maxLatency;
+  }
+
+  // ProcStaticRepeatOp: count * body_latency
+  if (auto repeat = dyn_cast<ProcStaticRepeatOp>(op)) {
+    int64_t count = repeat.getCount();
+    // Use explicit body_latency if provided
+    if (auto bodyLat = repeat.getBodyLatency()) {
+      return count * *bodyLat;
+    }
+    // Otherwise compute from body
+    auto bodyLat = computeControlLatency(repeat.getBody(), module);
+    if (!bodyLat)
+      return std::nullopt;
+    return count * *bodyLat;
+  }
+
+  // ProcStaticIfOp: max of branch latencies
+  if (auto staticIf = dyn_cast<ProcStaticIfOp>(op)) {
+    int64_t thenLat = 0;
+    int64_t elseLat = 0;
+
+    // Get then latency
+    if (auto explicitThen = staticIf.getThenLatency()) {
+      thenLat = *explicitThen;
+    } else {
+      auto computed = computeControlLatency(staticIf.getThenRegion(), module);
+      if (!computed)
+        return std::nullopt;
+      thenLat = *computed;
+    }
+
+    // Get else latency
+    if (staticIf.getElseRegion().empty()) {
+      elseLat = 0;
+    } else if (auto explicitElse = staticIf.getElseLatency()) {
+      elseLat = *explicitElse;
+    } else {
+      auto computed = computeControlLatency(staticIf.getElseRegion(), module);
+      if (!computed)
+        return std::nullopt;
+      elseLat = *computed;
+    }
+
+    return std::max(thenLat, elseLat);
+  }
+
+  // Dynamic control constructs - can't compute static latency
+  if (isa<ProcIfOp, ProcWhileOp>(op))
+    return std::nullopt;
+
+  // Other ops (control_end, yield, etc.) - zero latency
+  return 0;
+}
+
+std::optional<int64_t>
+TimingValidationPass::computeControlLatency(Region &region,
+                                            cmt2::ModuleOp module) {
+  if (region.empty())
+    return 0;
+
+  int64_t totalLatency = 0;
+  for (Operation &op : region.front()) {
+    auto opLat = computeOpLatency(&op, module);
+    if (!opLat)
+      return std::nullopt;
+    totalLatency += *opLat;
+  }
+  return totalLatency;
+}
+
+//===----------------------------------------------------------------------===//
+// Proc Method Latency Validation
+//===----------------------------------------------------------------------===//
+
+LogicalResult
+TimingValidationPass::validateProcMethodLatency(ProcMethodOp procMethod,
+                                                cmt2::ModuleOp module) {
+  auto declaredLatency = procMethod.getStaticLatency();
+  if (!declaredLatency)
+    return success(); // No static_latency declared, nothing to validate
+
+  // Compute actual latency from control region
+  auto computedLatency = computeControlLatency(procMethod.getControl(), module);
+
+  if (!computedLatency) {
+    // Control region contains dynamic constructs
+    return procMethod.emitOpError("has static_latency=")
+           << *declaredLatency << " but control region contains dynamic "
+           << "constructs (dynamic steps, if, or while); use only static_step, "
+           << "static_repeat, static_if, seq, and par for static methods";
+  }
+
+  if (static_cast<uint64_t>(*computedLatency) != *declaredLatency) {
+    return procMethod.emitOpError("declared static_latency=")
+           << *declaredLatency << " but control flow computes to "
+           << *computedLatency << " cycles";
+  }
+
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
 // Module Validation
 //===----------------------------------------------------------------------===//
 
@@ -250,6 +399,10 @@ LogicalResult TimingValidationPass::validateModule(
         }
       }
     }
+
+    // Validate static_latency matches control flow (TV5)
+    if (failed(validateProcMethodLatency(procMethod, module)))
+      result = failure();
   });
 
   return result;

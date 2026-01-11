@@ -53,6 +53,11 @@ LogicalResult TimingCompatibility::checkCallCompatibility(CallOp call) {
   if (failed(checkTimingBounds(call, parentStep.getLatency())))
     return failure();
 
+  // TV6: Cross-method timing validation
+  // Validate that step latency >= method latency
+  if (failed(checkStepMethodLatency(call, parentStep.getLatency(), *methodTiming)))
+    return failure();
+
   // Check result timing
   if (failed(checkResultTiming(call, *methodTiming)))
     return failure();
@@ -152,6 +157,39 @@ LogicalResult TimingCompatibility::checkIntervalCompatibility(
 LogicalResult TimingCompatibility::checkTimingBounds(CallOp call,
                                                      int64_t stepLatency) {
   return cmt2::checkCallArgTimingBounds(call, stepLatency);
+}
+
+LogicalResult TimingCompatibility::checkStepMethodLatency(
+    CallOp call, int64_t stepLatency, const TimingInfo &methodTiming) {
+  // TV6: Cross-method timing validation
+  // If method has static latency, verify step latency >= method latency
+
+  if (!methodTiming.isStatic())
+    return success(); // Dynamic methods don't have known latency
+
+  int64_t methodLatency = *methodTiming.latency;
+
+  // Get the start time of the call from arg_timing
+  int64_t callStart = 0;
+  if (auto argTiming = call.getArgTiming()) {
+    if (!argTiming->empty()) {
+      if (auto timing = dyn_cast<TimingIntervalAttr>((*argTiming)[0])) {
+        callStart = timing.getStart();
+      }
+    }
+  }
+
+  // The method must complete within the step
+  // Method completes at: callStart + methodLatency
+  // Step ends at: stepLatency
+  // So we need: callStart + methodLatency <= stepLatency
+  if (callStart + methodLatency > stepLatency) {
+    return call.emitOpError("method with latency ")
+           << methodLatency << " starting at cycle " << callStart
+           << " cannot complete within step (latency " << stepLatency << ")";
+  }
+
+  return success();
 }
 
 LogicalResult TimingCompatibility::validateStaticStep(ProcStaticStepOp step) {

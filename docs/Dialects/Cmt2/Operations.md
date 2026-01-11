@@ -290,13 +290,28 @@ cmt2.proc.if %cond {
 
 ### cmt2.proc.while
 
-Loop control.
+Loop control with condition region. The condition is computed in a dedicated
+region that supports `cmt2.call` operations for reading from instances.
 
 ```mlir
-cmt2.proc.while %cond {
+cmt2.proc.while {
+    // Condition region - compute loop condition
+    %val = cmt2.call @counter @read() : () -> !firrtl.uint<32>
+    %c0 = firrtl.constant 0 : !firrtl.uint<32>
+    %cond = firrtl.neq %val, %c0 : (!firrtl.uint<32>, !firrtl.uint<32>) -> !firrtl.uint<1>
+    cmt2.proc.while_cond %cond : !firrtl.uint<1>
+} do {
+    // Body region - executed while condition is true
     cmt2.proc.enable @loop_body
+    cmt2.proc.yield
 }
 ```
+
+**Key points:**
+- The condition region is evaluated each cycle to determine loop continuation
+- `cmt2.call` is allowed in the condition region to read dynamic values
+- `cmt2.proc.while_cond` terminates the condition region with the boolean condition
+- `cmt2.proc.yield` terminates the body region
 
 ### cmt2.proc.static_repeat
 

@@ -235,16 +235,42 @@ public:
                       [](ControlBuilder &) {});
   }
 
-  /// While loop
+  /// While loop with condition region
+  /// @param condFn Function that builds the condition and returns the condition value
+  /// @param bodyFn Function that builds the loop body
+  template <typename CondFunc, typename BodyFunc>
+  ControlBuilder &whileLoop(CondFunc &&condFn, BodyFunc &&bodyFn) {
+    auto whileOp = builder_.create<ProcWhileOp>(loc_);
+
+    // Build condition region
+    auto *condBlock = new mlir::Block();
+    whileOp.getCondRegion().push_back(condBlock);
+    mlir::OpBuilder condBuilder(condBlock, condBlock->begin());
+    mlir::Value cond = condFn(condBuilder);
+    condBuilder.create<ProcWhileCondYieldOp>(loc_, cond);
+
+    // Build body region
+    auto *bodyBlock = new mlir::Block();
+    whileOp.getBody().push_back(bodyBlock);
+    mlir::OpBuilder bodyBuilder(bodyBlock, bodyBlock->begin());
+    ControlBuilder nested(bodyBuilder, loc_);
+    bodyFn(nested);
+
+    // Add terminator for body region
+    bodyBuilder.setInsertionPointToEnd(bodyBlock);
+    bodyBuilder.create<ProcYieldOp>(loc_);
+
+    return *this;
+  }
+
+  /// While loop (legacy API - condition must be computed before call)
+  /// @deprecated Use the two-function version instead
   template <typename Func>
   ControlBuilder &whileLoop(mlir::Value cond, Func &&fn) {
-    auto whileOp = builder_.create<ProcWhileOp>(loc_, cond);
-    auto *block = new mlir::Block();
-    whileOp.getBodyRegion().push_back(block);
-    mlir::OpBuilder whileBuilder(block, block->begin());
-    ControlBuilder nested(whileBuilder, loc_);
-    fn(nested);
-    return *this;
+    // Create a condition function that just returns the pre-computed value
+    return whileLoop(
+        [cond](mlir::OpBuilder &) { return cond; },
+        std::forward<Func>(fn));
   }
 
   /// Enable a group

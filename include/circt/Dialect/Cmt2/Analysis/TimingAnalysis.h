@@ -129,6 +129,13 @@ private:
 
   /// Helper to extract timing from a ProcMethodOp
   TimingInfo extractProcMethodTiming(ProcMethodOp method);
+
+  /// Helper to compute control region latency for inference
+  std::optional<int64_t> computeControlLatency(mlir::Region &region,
+                                               ModuleOp module);
+
+  /// Helper to compute single operation latency for inference
+  std::optional<int64_t> computeOpLatency(mlir::Operation *op, ModuleOp module);
 };
 
 //===----------------------------------------------------------------------===//

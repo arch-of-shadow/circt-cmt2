@@ -1060,6 +1060,27 @@ LogicalResult ProcStaticIfOp::verify() {
 }
 
 //===----------------------------------------------------------------------===//
+// MethodOp Verification
+//===----------------------------------------------------------------------===//
+
+LogicalResult MethodOp::verify() {
+  // Atomic methods do NOT support timing attributes.
+  // Timing is only valid for procedural methods (ProcMethodOp) which execute
+  // over multiple cycles. Atomic methods are always single-cycle.
+  if (getOperation()->hasAttr("static_latency")) {
+    return emitOpError("atomic methods cannot have timing attributes; "
+                       "use cmt2.proc.method for multi-cycle methods with "
+                       "static_latency");
+  }
+  if (getOperation()->hasAttr("interval")) {
+    return emitOpError("atomic methods cannot have timing attributes; "
+                       "use cmt2.proc.method for multi-cycle methods with "
+                       "interval");
+  }
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
 // CallOp Timing Verification
 //===----------------------------------------------------------------------===//
 
@@ -1104,8 +1125,21 @@ LogicalResult CallOp::verify() {
     }
   }
 
+  // Timing attributes are only meaningful inside ProcStaticStepOp.
+  // If specified elsewhere, emit a warning (timing will be ignored).
+  bool hasTimingAttrs = getArgTiming() || getResultTiming();
+  auto staticStep = getOperation()->getParentOfType<ProcStaticStepOp>();
+
+  if (hasTimingAttrs && !staticStep) {
+    // Timing specified outside static step - this is likely an error.
+    // The timing will be ignored during lowering.
+    return emitOpError("timing attributes (arg_timing/result_timing) are only "
+                       "valid inside cmt2.proc.static_step; timing on this "
+                       "call will be ignored during lowering");
+  }
+
   // If inside a static step, verify timing is within step bounds
-  if (auto staticStep = getOperation()->getParentOfType<ProcStaticStepOp>()) {
+  if (staticStep) {
     int64_t stepLatency = staticStep.getLatency();
 
     if (auto argTiming = getArgTiming()) {
@@ -1133,7 +1167,34 @@ LogicalResult CallOp::verify() {
     }
   }
 
+  // If parent is ProcWhileOp, verify we're in the condition region, not body
+  if (auto whileOp = dyn_cast<ProcWhileOp>(getOperation()->getParentOp())) {
+    // Check if we're in the condition region (first region) or body (second)
+    Region *parentRegion = getOperation()->getParentRegion();
+    if (parentRegion == &whileOp.getBody()) {
+      return emitOpError("cmt2.call is not allowed in the body region of "
+                         "cmt2.proc.while; use the condition region instead");
+    }
+  }
+
   return success();
+}
+
+//===----------------------------------------------------------------------===//
+// ProcWhileOp
+//===----------------------------------------------------------------------===//
+
+mlir::Value ProcWhileOp::getCond() {
+  // Get the condition from the terminator of the condition region
+  if (getCondRegion().empty())
+    return nullptr;
+  Block &condBlock = getCondRegion().front();
+  if (condBlock.empty())
+    return nullptr;
+  // The terminator should be ProcWhileCondYieldOp
+  if (auto yieldOp = dyn_cast<ProcWhileCondYieldOp>(condBlock.getTerminator()))
+    return yieldOp.getCond();
+  return nullptr;
 }
 
 //===----------------------------------------------------------------------===//

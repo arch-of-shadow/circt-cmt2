@@ -129,18 +129,122 @@ std::optional<int64_t> TimingAnalysis::canPromoteToStatic(ProcMethodOp method) {
   // A method can be promoted to static if all called methods are static
   // and we can compute a total latency
 
-  // For now, if the method already has static_latency, use that
+  // If the method already has static_latency, use that
   if (method.isStatic())
     return method.getLatencyOrZero();
 
-  // TODO: Implement full latency inference from control flow
-  // This would involve:
-  // 1. For seq: sum of child latencies
-  // 2. For par: max of child latencies
-  // 3. For static_repeat: count * body_latency
-  // 4. For static_if: max of branch latencies
+  // Get the parent module for step lookup
+  auto module = method->getParentOfType<ModuleOp>();
+  if (!module)
+    return std::nullopt;
 
-  return std::nullopt;
+  // Compute latency from control region
+  return computeControlLatency(method.getControl(), module);
+}
+
+//===----------------------------------------------------------------------===//
+// Control Flow Latency Computation for Inference
+//===----------------------------------------------------------------------===//
+
+std::optional<int64_t> TimingAnalysis::computeControlLatency(Region &region,
+                                                             ModuleOp module) {
+  if (region.empty())
+    return 0;
+
+  int64_t totalLatency = 0;
+  for (Operation &op : region.front()) {
+    auto opLat = computeOpLatency(&op, module);
+    if (!opLat)
+      return std::nullopt;
+    totalLatency += *opLat;
+  }
+  return totalLatency;
+}
+
+std::optional<int64_t> TimingAnalysis::computeOpLatency(Operation *op,
+                                                        ModuleOp module) {
+  // ProcEnableOp: Look up the step's latency
+  if (auto enable = dyn_cast<ProcEnableOp>(op)) {
+    auto stepName = enable.getStepName();
+    // Look up the step in the module
+    Operation *stepOp = module.lookupSymbol(stepName);
+    if (!stepOp)
+      return std::nullopt; // Step not found, can't compute
+
+    if (auto staticStep = dyn_cast<ProcStaticStepOp>(stepOp)) {
+      return staticStep.getLatency();
+    }
+    // Dynamic step (ProcStepOp) - latency is unknown
+    return std::nullopt;
+  }
+
+  // ProcSeqOp: Sum of children latencies
+  if (auto seq = dyn_cast<ProcSeqOp>(op)) {
+    return computeControlLatency(seq.getBody(), module);
+  }
+
+  // ProcParOp: Max of children latencies
+  if (auto par = dyn_cast<ProcParOp>(op)) {
+    int64_t maxLatency = 0;
+    for (Operation &child : par.getBody().front()) {
+      auto childLat = computeOpLatency(&child, module);
+      if (!childLat)
+        return std::nullopt;
+      maxLatency = std::max(maxLatency, *childLat);
+    }
+    return maxLatency;
+  }
+
+  // ProcStaticRepeatOp: count * body_latency
+  if (auto repeat = dyn_cast<ProcStaticRepeatOp>(op)) {
+    int64_t count = repeat.getCount();
+    // Use explicit body_latency if provided
+    if (auto bodyLat = repeat.getBodyLatency()) {
+      return count * *bodyLat;
+    }
+    // Otherwise compute from body
+    auto bodyLat = computeControlLatency(repeat.getBody(), module);
+    if (!bodyLat)
+      return std::nullopt;
+    return count * *bodyLat;
+  }
+
+  // ProcStaticIfOp: max of branch latencies
+  if (auto staticIf = dyn_cast<ProcStaticIfOp>(op)) {
+    int64_t thenLat = 0;
+    int64_t elseLat = 0;
+
+    // Get then latency
+    if (auto explicitThen = staticIf.getThenLatency()) {
+      thenLat = *explicitThen;
+    } else {
+      auto computed = computeControlLatency(staticIf.getThenRegion(), module);
+      if (!computed)
+        return std::nullopt;
+      thenLat = *computed;
+    }
+
+    // Get else latency
+    if (staticIf.getElseRegion().empty()) {
+      elseLat = 0;
+    } else if (auto explicitElse = staticIf.getElseLatency()) {
+      elseLat = *explicitElse;
+    } else {
+      auto computed = computeControlLatency(staticIf.getElseRegion(), module);
+      if (!computed)
+        return std::nullopt;
+      elseLat = *computed;
+    }
+
+    return std::max(thenLat, elseLat);
+  }
+
+  // Dynamic control constructs - can't compute static latency
+  if (isa<ProcIfOp, ProcWhileOp>(op))
+    return std::nullopt;
+
+  // Other ops (control_end, yield, etc.) - zero latency
+  return 0;
 }
 
 void TimingAnalysis::invalidate() {
