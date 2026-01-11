@@ -169,9 +169,8 @@ def create_proc_comprehensive_circuit():
             with rule.guard() as g:
                 g.always()
             with rule.control() as ctrl:
-                # Loop condition (simplified)
-                cond = ctrl.const(0, 1)  # Will not loop (for static test)
-                with ctrl.while_(cond) as loop:
+                # Loop condition function (simplified - returns false, so won't loop)
+                with ctrl.while_(lambda b: b.const(0, 1)) as loop:
                     with loop.seq():
                         loop.enable(m._steps["increment_counter"].ref())
 

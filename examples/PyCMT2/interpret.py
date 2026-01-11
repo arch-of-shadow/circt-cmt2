@@ -652,10 +652,9 @@ def test_while_loop() -> bool:
             with proc.guard() as g:
                 g.always()
             with proc.control() as ctrl:
-                # Use constant condition (0 = false, no iterations)
+                # Use constant condition function (0 = false, no iterations)
                 # This verifies the while structure is generated correctly
-                cond = ctrl.const(0, 1)
-                with ctrl.while_(cond) as loop:
+                with ctrl.while_(lambda b: b.const(0, 1)) as loop:
                     loop.enable(incr.ref())
 
     mlir = circuit.emit_mlir()

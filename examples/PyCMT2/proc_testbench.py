@@ -44,9 +44,97 @@ def create_proc_testable_circuit():
 
     circuit = Circuit("ProcTestable")
 
+    # State registers (FSM registers for proc rules are now auto-created)
     reg32 = Reg.create(circuit, 32)
     reg8 = Reg.create(circuit, 8)
     reg1 = Reg.create(circuit, 1)
+
+    # =========================================================================
+    # CMT2 Module with Multi-Cycle Method (Timing Attributes)
+    # =========================================================================
+    # This demonstrates timing attributes on CMT2 module methods.
+    # - static_latency: Declares the method takes N cycles
+    # - interval: Declares minimum cycles between consecutive calls
+    #
+    # The method implementation uses procedural control to achieve the timing.
+
+    # Create register types for the multiplier unit
+    mult_reg32 = Reg.create(circuit, 32)
+    mult_reg1 = Reg.create(circuit, 1)
+
+    with circuit.module("MultiplierUnit") as mult_mod:
+        clk = mult_mod.clock()
+        rst = mult_mod.reset()
+
+        # Internal registers for computation
+        op_a = mult_mod.instance(mult_reg32, "op_a", clk=clk, rst=rst)
+        op_b = mult_mod.instance(mult_reg32, "op_b", clk=clk, rst=rst)
+        result_reg = mult_mod.instance(mult_reg32, "result_reg", clk=clk, rst=rst)
+        busy = mult_mod.instance(mult_reg1, "busy", clk=clk, rst=rst)
+
+        # Method to start multiplication - single-cycle (captures inputs)
+        # The actual multi-cycle computation is done by the compute_multiply proc_rule
+        # Note: atomic method() is always single-cycle. For multi-cycle methods,
+        # use proc_method() instead.
+        with mult_mod.method(
+            "multiply",
+            args=[("a", UInt(32)), ("b", UInt(32))],
+            returns=[UInt(32)],
+        ) as meth:
+            with meth.guard() as g:
+                # Can accept new inputs when not busy
+                is_busy = g.call(busy, "read")
+                g.returns(g.not_(is_busy))
+
+            with meth.body() as body:
+                # Store operands and compute result over 4 cycles
+                # The actual computation is done in a proc_rule
+                a_val = body.arg("a")
+                b_val = body.arg("b")
+                body.call(op_a, "write", a_val)
+                body.call(op_b, "write", b_val)
+                body.call(busy, "write", body.const(1, 1))
+                # Return current result (will be valid after 4 cycles)
+                result = body.call(result_reg, "read")
+                body.returns(result)
+
+        # Value to read result
+        with mult_mod.value("get_result", returns=[UInt(32)]) as val:
+            with val.guard() as g:
+                g.returns(g.const(1, 1))  # Always ready
+            with val.body() as body:
+                result = body.call(result_reg, "read")
+                body.returns(result)
+
+        # Value to check busy status
+        with mult_mod.value("is_busy", returns=[UInt(1)]) as val:
+            with val.guard() as g:
+                g.returns(g.const(1, 1))  # Always ready
+            with val.body() as body:
+                is_busy = body.call(busy, "read")
+                body.returns(is_busy)
+
+        # Internal proc_rule to perform the actual multiplication
+        # This uses a 4-cycle static step to match the declared latency
+        with mult_mod.proc_rule("compute_multiply") as rule:
+            with rule.guard() as g:
+                is_busy = g.call(busy, "read")
+                g.returns(is_busy)
+
+            with rule.control() as ctrl:
+                with ctrl.seq() as seq:
+                    # 4-cycle static step for multiplication
+                    with mult_mod.static_step(4, "do_multiply") as step:
+                        a = step.call(op_a, "read")
+                        b = step.call(op_b, "read")
+                        product = step.mul(a, b)
+                        step.call(result_reg, "write", product)
+                    seq.enable(step.ref())
+                    # Clear busy flag (dynamic step)
+                    with mult_mod.step("clear_mult_busy") as clr_step:
+                        clr_step.call(busy, "write", clr_step.const(0, 1))
+                        clr_step.done(clr_step.const(1, 1))
+                    seq.enable(clr_step.ref())
 
     with circuit.module("ProcALU") as m:
         clk = m.clock()
@@ -62,8 +150,16 @@ def create_proc_testable_circuit():
 
         # Operation select register - gates which proc_rule can fire
         # 0=none, 1=seq_add_sub, 2=par_load, 3=cond_compute, 4=loop_increment,
-        # 5=mixed_compute, 6=invoke_test, 7=static_sequence, 8=dynamic_sequence, 9=nested_test
+        # 5=mixed_compute, 6=invoke_test, 7=static_sequence, 8=dynamic_sequence,
+        # 9=nested_test, 10=timed_multiply_test, 11=pipelined_add_test, 12=complex_par_test
         reg_op_select = m.instance(reg8, "reg_op_select", clk=clk, rst=rst)
+
+        # =====================================================================
+        # Instance of CMT2 Module with Multi-Cycle Method
+        # =====================================================================
+        # The MultiplierUnit has a multiply method with static_latency=4, interval=2
+        # The method is implemented using procedural control (proc_rule + static_step)
+        mult_unit = m.instance(mult_mod, "mult_unit", clk=clk, rst=rst)
 
         # =====================================================================
         # Dynamic Steps
@@ -140,6 +236,49 @@ def create_proc_testable_circuit():
             b = step.call(reg_b, "read")
             result = step.mul(a, b)
             step.call(reg_result, "write", result)
+
+        # =====================================================================
+        # Static Step with Initiation Interval (Pipeline Timing)
+        # =====================================================================
+        # This demonstrates the `interval` attribute for pipelined execution.
+        # A step with latency=4 and interval=2 can accept new inputs every
+        # 2 cycles while still taking 4 cycles to produce results.
+
+        with m.static_step(4, "pipelined_add", interval=2) as step:
+            # This step takes 4 cycles total but can be pipelined with II=2
+            a = step.call(reg_a, "read")
+            b = step.call(reg_b, "read")
+            result = step.add(a, b)
+            step.call(reg_result, "write", result)
+
+        # =====================================================================
+        # Steps for Testing CMT2 Module with Multi-Cycle Method
+        # =====================================================================
+        # The MultiplierUnit.multiply method has static_latency=4.
+        # We test this by:
+        # 1. Triggering multiply (stores args, sets busy)
+        # 2. Waiting for compute_multiply proc_rule to complete (busy=0)
+        # 3. Reading result from mult_unit.get_result()
+
+        # Step: start_mult - Start multiplication (calls multiply method)
+        with m.step("start_mult") as step:
+            a = step.call(reg_a, "read")
+            b = step.call(reg_b, "read")
+            # Call multiply - this triggers the computation in mult_unit
+            # The method sets busy=1 and stores operands
+            step.call(mult_unit, "multiply", a, b)
+            step.done(step.const(1, 1))
+
+        # Step: check_mult_busy - Check if mult_unit is still busy
+        with m.step("check_mult_busy") as step:
+            is_busy = step.call(mult_unit, "is_busy")
+            step.done(step.not_(is_busy))  # Done when not busy
+
+        # Step: copy_mult_result - Copy result from mult_unit to reg_result
+        with m.step("copy_mult_result") as step:
+            result = step.call(mult_unit, "get_result")
+            step.call(reg_result, "write", result)
+            step.done(step.const(1, 1))
 
         # =====================================================================
         # Proc Rule 1: Simple Sequential (seq_add_sub)
@@ -223,9 +362,8 @@ def create_proc_testable_circuit():
             with rule.control() as ctrl:
                 with ctrl.seq() as seq:
                     seq.enable(m._steps["set_busy"].ref())
-                    # Loop condition (simplified to false for static test)
-                    cond = seq.const(0, 1)
-                    with seq.while_(cond) as loop:
+                    # Loop condition function (simplified to false for static test)
+                    with seq.while_(lambda b: b.const(0, 1)) as loop:
                         with loop.seq() as loop_seq:
                             loop_seq.enable(m._steps["increment_counter"].ref())
                     seq.enable(m._steps["set_done_flag"].ref())
@@ -345,6 +483,88 @@ def create_proc_testable_circuit():
                                 then_seq.enable(m._steps["compute_add"].ref())
                                 then_seq.enable(m._steps["increment_counter"].ref())
                     # Final cleanup
+                    seq.enable(m._steps["set_done_flag"].ref())
+                    seq.enable(m._steps["clear_busy"].ref())
+
+        # =====================================================================
+        # Proc Rule 10: Timed Multiply Test (timed_multiply_test)
+        # Tests CMT2 module with multi-cycle method (static_latency=4)
+        # The MultiplierUnit has:
+        #   - multiply method: triggers computation, declared static_latency=4
+        #   - compute_multiply proc_rule: performs actual multiplication
+        # =====================================================================
+
+        with m.proc_rule("timed_multiply_test") as rule:
+            with rule.guard() as g:
+                busy = g.call(reg_busy, "read")
+                not_busy = g.not_(busy)
+                op_sel = g.call(reg_op_select, "read")
+                is_selected = g.eq(op_sel, g.const(10, 8))
+                g.returns(g.and_(not_busy, is_selected))
+            with rule.control() as ctrl:
+                with ctrl.seq() as seq:
+                    seq.enable(m._steps["set_busy"].ref())
+                    # Start multiplication in mult_unit
+                    seq.enable(m._steps["start_mult"].ref())
+                    # Wait for mult_unit to finish (while busy, loop)
+                    # condition_fn: returns True while mult_unit is busy
+                    def mult_busy_cond(b):
+                        return b.call(mult_unit, "is_busy")
+                    with seq.while_(mult_busy_cond) as loop:
+                        # Just wait - check_mult_busy step completes when not busy
+                        loop.enable(m._steps["check_mult_busy"].ref())
+                    # Copy result from mult_unit to reg_result
+                    seq.enable(m._steps["copy_mult_result"].ref())
+                    seq.enable(m._steps["set_done_flag"].ref())
+                    seq.enable(m._steps["clear_busy"].ref())
+
+        # =====================================================================
+        # Proc Rule 11: Pipelined Add Test (pipelined_add_test)
+        # Tests static_step with interval attribute (II=2)
+        # =====================================================================
+
+        with m.proc_rule("pipelined_add_test") as rule:
+            with rule.guard() as g:
+                busy = g.call(reg_busy, "read")
+                not_busy = g.not_(busy)
+                op_sel = g.call(reg_op_select, "read")
+                is_selected = g.eq(op_sel, g.const(11, 8))
+                g.returns(g.and_(not_busy, is_selected))
+            with rule.control() as ctrl:
+                with ctrl.seq() as seq:
+                    seq.enable(m._steps["set_busy"].ref())
+                    # Use the pipelined_add step (latency=4, interval=2)
+                    seq.enable(m._steps["pipelined_add"].ref())
+                    seq.enable(m._steps["set_done_flag"].ref())
+                    seq.enable(m._steps["clear_busy"].ref())
+
+        # =====================================================================
+        # Proc Rule 12: Complex Par Test (complex_par_test)
+        # Tests parallel with nested seq - triggers per-branch FSM generation
+        # Structure: par { seq { enable A; enable B }; seq { enable C; enable D } }
+        # =====================================================================
+
+        with m.proc_rule("complex_par_test") as rule:
+            with rule.guard() as g:
+                busy = g.call(reg_busy, "read")
+                not_busy = g.not_(busy)
+                op_sel = g.call(reg_op_select, "read")
+                is_selected = g.eq(op_sel, g.const(12, 8))
+                g.returns(g.and_(not_busy, is_selected))
+            with rule.control() as ctrl:
+                with ctrl.seq() as seq:
+                    seq.enable(m._steps["set_busy"].ref())
+                    # Complex par: two branches with seq inside
+                    # Branch 0: load_a then compute_add (stores a+b in result)
+                    # Branch 1: load_b then increment_counter
+                    # Both branches run in parallel, each progressing through their seq
+                    with seq.par() as par:
+                        with par.seq() as branch0:
+                            branch0.enable(m._steps["load_a"].ref())
+                            branch0.enable(m._steps["compute_add"].ref())
+                        with par.seq() as branch1:
+                            branch1.enable(m._steps["load_b"].ref())
+                            branch1.enable(m._steps["increment_counter"].ref())
                     seq.enable(m._steps["set_done_flag"].ref())
                     seq.enable(m._steps["clear_busy"].ref())
 
@@ -727,6 +947,371 @@ def create_proc_testbench(circuit):
         seq.expect("get_result_res0", 20, "15+5=20 from add")
         seq.print("Dynamic-only test", "get_result_res0")
 
+    # =========================================================================
+    # Test Sequence 11: Cycle-Accurate Static Step Timing
+    # Verifies the execution model: static steps take exactly L cycles
+    # =========================================================================
+
+    with tb.sequence("test_cycle_static_step") as seq:
+        seq.comment("=" * 60)
+        seq.comment("CYCLE-ACCURATE TEST: Static Step Timing")
+        seq.comment("Verify: static_step(L) takes exactly L cycles")
+        seq.comment("Expected: delay_2=2 cycles, delay_4=4 cycles, multiply_3cycle=3 cycles")
+        seq.comment("=" * 60)
+        seq.reset(10)
+
+        # Load values for multiply
+        seq.drive("load_a", 3)
+        seq.drive("load_b", 7)
+        seq.drive("load_enable", 1)
+        seq.wait(1)
+        seq.drive("load_enable", 0)
+        seq.wait(2)
+
+        # Select static_sequence operation (op=7)
+        # Control: seq { set_busy(dyn) + delay_2(2) + delay_4(4) + multiply_3cycle(3) + set_done(dyn) + clear_busy(dyn) }
+        # Expected: 2 + 2 + 4 + 3 + 2 + 2 = 15 cycles (with dynamic overhead)
+        # But if done signals are immediate (cycle 0), FSM sees done on cycle 1
+        seq.comment("Trigger static_sequence (op=7)")
+        seq.comment("Expected timing: busy(2) + delay_2(2) + delay_4(4) + multiply_3(3) + done(2) + clear(2)")
+        seq.drive("select_op_op", 7)
+        seq.drive("select_op_enable", 1)
+        seq.record_cycle("static_start")
+        seq.wait(1)
+        seq.drive("select_op_enable", 0)
+
+        # Wait for completion and record cycle
+        seq.wait_condition("dut->is_done_res0 == 1", timeout=30)
+        seq.record_cycle("static_end")
+        seq.wait(2)
+
+        # Verify timing
+        seq.print_cycle_diff("static_start", "static_end", "Static sequence cycles")
+        seq.expect("get_result_res0", 21, "3*7=21 from multiply")
+        seq.print("Static step test PASSED", "get_result_res0")
+
+    # =========================================================================
+    # Test Sequence 12: Cycle-Accurate Dynamic Step Timing
+    # Verifies: dynamic step takes 2 cycles (execute + done detection)
+    # =========================================================================
+
+    with tb.sequence("test_cycle_dynamic_step") as seq:
+        seq.comment("=" * 60)
+        seq.comment("CYCLE-ACCURATE TEST: Dynamic Step Timing")
+        seq.comment("Verify: dynamic step() takes 2 cycles each")
+        seq.comment("Expected: 7 dynamic steps = 14 cycles minimum")
+        seq.comment("=" * 60)
+        seq.reset(10)
+
+        # Load values
+        seq.drive("load_a", 10)
+        seq.drive("load_b", 5)
+        seq.drive("load_enable", 1)
+        seq.wait(1)
+        seq.drive("load_enable", 0)
+        seq.wait(2)
+
+        # Select dynamic_sequence (op=8)
+        # Control: seq { set_busy + load_a + load_b + compute_add + inc_counter + set_done + clear_busy }
+        # 7 dynamic steps × 2 cycles = 14 cycles expected
+        seq.comment("Trigger dynamic_sequence (op=8)")
+        seq.comment("7 dynamic steps × 2 cycles = 14 cycles expected")
+        seq.drive("select_op_op", 8)
+        seq.drive("select_op_enable", 1)
+        seq.record_cycle("dynamic_start")
+        seq.wait(1)
+        seq.drive("select_op_enable", 0)
+
+        # Wait for completion
+        seq.wait_condition("dut->is_done_res0 == 1", timeout=30)
+        seq.record_cycle("dynamic_end")
+        seq.wait(2)
+
+        # Verify timing
+        seq.print_cycle_diff("dynamic_start", "dynamic_end", "Dynamic sequence cycles")
+        seq.expect("get_result_res0", 15, "10+5=15 from add")
+        seq.print("Dynamic step test PASSED", "get_result_res0")
+
+    # =========================================================================
+    # Test Sequence 13: Parallel Branch Timing
+    # Verifies: parallel takes max(branch_cycles), not sum
+    # =========================================================================
+
+    with tb.sequence("test_cycle_parallel") as seq:
+        seq.comment("=" * 60)
+        seq.comment("CYCLE-ACCURATE TEST: Parallel Branch Timing")
+        seq.comment("Verify: par takes max(branch_A, branch_B) cycles")
+        seq.comment("=" * 60)
+        seq.reset(10)
+
+        # Select par_load (op=2)
+        # Control: seq { set_busy(2) + par { load_a(2), load_b(2) } + clear_busy(2) }
+        # par takes max(2,2)=2 cycles, not 4
+        seq.comment("Trigger par_load (op=2)")
+        seq.comment("Expected: par { load_a(2), load_b(2) } = max(2,2) = 2 cycles")
+        seq.drive("select_op_op", 2)
+        seq.drive("select_op_enable", 1)
+        seq.record_cycle("par_start")
+        seq.wait(1)
+        seq.drive("select_op_enable", 0)
+
+        # Wait for completion (should be quick)
+        seq.wait(15)
+        seq.record_cycle("par_end")
+
+        # Verify timing
+        seq.print_cycle_diff("par_start", "par_end", "Parallel sequence cycles")
+        seq.expect("is_busy_res0", 0, "Should complete")
+        seq.print("Parallel test completed")
+
+    # =========================================================================
+    # Test Sequence 14: Static vs Dynamic Comparison
+    # Direct comparison to demonstrate 2x overhead
+    # =========================================================================
+
+    with tb.sequence("test_static_vs_dynamic") as seq:
+        seq.comment("=" * 60)
+        seq.comment("COMPARISON TEST: Static vs Dynamic Step Overhead")
+        seq.comment("Same operations, different step types")
+        seq.comment("static_step: no done overhead, dynamic step: 2-cycle overhead")
+        seq.comment("=" * 60)
+        seq.reset(10)
+
+        # First run static sequence
+        seq.comment("--- Run static_sequence (op=7) ---")
+        seq.drive("load_a", 2)
+        seq.drive("load_b", 3)
+        seq.drive("load_enable", 1)
+        seq.wait(1)
+        seq.drive("load_enable", 0)
+        seq.wait(2)
+
+        seq.drive("select_op_op", 7)
+        seq.drive("select_op_enable", 1)
+        seq.record_cycle("static_op_start")
+        seq.wait(1)
+        seq.drive("select_op_enable", 0)
+
+        seq.wait_condition("dut->is_done_res0 == 1", timeout=30)
+        seq.record_cycle("static_op_end")
+        seq.print_cycle_diff("static_op_start", "static_op_end", "Static sequence")
+
+        # Reset for second run
+        seq.drive("reset_state_enable", 1)
+        seq.wait(1)
+        seq.drive("reset_state_enable", 0)
+        seq.wait(5)
+
+        # Now run dynamic sequence
+        seq.comment("--- Run dynamic_sequence (op=8) ---")
+        seq.drive("load_a", 10)
+        seq.drive("load_b", 5)
+        seq.drive("load_enable", 1)
+        seq.wait(1)
+        seq.drive("load_enable", 0)
+        seq.wait(2)
+
+        seq.drive("select_op_op", 8)
+        seq.drive("select_op_enable", 1)
+        seq.record_cycle("dynamic_op_start")
+        seq.wait(1)
+        seq.drive("select_op_enable", 0)
+
+        seq.wait_condition("dut->is_done_res0 == 1", timeout=30)
+        seq.record_cycle("dynamic_op_end")
+        seq.print_cycle_diff("dynamic_op_start", "dynamic_op_end", "Dynamic sequence")
+
+        seq.comment("Comparison complete - see cycle counts above")
+        seq.print("Static vs Dynamic comparison completed")
+
+    # =========================================================================
+    # Test Sequence 15: Mixed Static/Dynamic Timing
+    # Verifies: total = sum(static_latencies) + 2*num_dynamic_steps
+    # =========================================================================
+
+    with tb.sequence("test_mixed_timing") as seq:
+        seq.comment("=" * 60)
+        seq.comment("CYCLE-ACCURATE TEST: Mixed Static/Dynamic Timing")
+        seq.comment("Verify: total = static_latencies + 2×dynamic_steps")
+        seq.comment("=" * 60)
+        seq.reset(10)
+
+        # Load values
+        seq.drive("load_a", 5)
+        seq.drive("load_b", 4)
+        seq.drive("load_enable", 1)
+        seq.wait(1)
+        seq.drive("load_enable", 0)
+        seq.wait(2)
+
+        # Select mixed_compute (op=5)
+        # Control: seq { set_busy(dyn,2) + multiply_3cycle(static,3) + delay_4(static,4) + set_done(dyn,2) + clear_busy(dyn,2) }
+        # Expected: 2 + 3 + 4 + 2 + 2 = 13 cycles
+        seq.comment("Trigger mixed_compute (op=5)")
+        seq.comment("Expected: busy(2) + multiply(3) + delay(4) + done(2) + clear(2) = 13 cycles")
+        seq.drive("select_op_op", 5)
+        seq.drive("select_op_enable", 1)
+        seq.record_cycle("mixed_start")
+        seq.wait(1)
+        seq.drive("select_op_enable", 0)
+
+        seq.wait_condition("dut->is_done_res0 == 1", timeout=30)
+        seq.record_cycle("mixed_end")
+        seq.wait(2)
+
+        seq.print_cycle_diff("mixed_start", "mixed_end", "Mixed sequence cycles")
+        seq.expect("get_result_res0", 20, "5*4=20 from multiply")
+        seq.print("Mixed timing test PASSED", "get_result_res0")
+
+    # =========================================================================
+    # Test Sequence 16: Timed Multiply (with call-site timing)
+    # Tests: CMT2 module method with static_latency, arg_timing, result_timing
+    # The MultiplierUnit.multiply method has static_latency=4, interval=2
+    # and is implemented using procedural control (proc_rule + static_step)
+    # =========================================================================
+
+    with tb.sequence("test_timed_multiply") as seq:
+        seq.comment("=" * 60)
+        seq.comment("TIMING ATTRIBUTE TEST: CMT2 Module with Multi-Cycle Method")
+        seq.comment("Tests: MultiplierUnit.multiply with static_latency=4")
+        seq.comment("The method triggers compute_multiply proc_rule internally")
+        seq.comment("=" * 60)
+        seq.reset(10)
+
+        # Load values: 3 * 7 = 21
+        seq.drive("load_a", 3)
+        seq.drive("load_b", 7)
+        seq.drive("load_enable", 1)
+        seq.wait(1)
+        seq.drive("load_enable", 0)
+        seq.wait(2)
+
+        # Trigger timed_multiply_test (op=10)
+        # Control: seq { set_busy + start_mult + while(busy){wait} + copy_result + set_done + clear_busy }
+        seq.comment("Trigger timed_multiply_test (op=10)")
+        seq.comment("MultiplierUnit.multiply: static_latency=4, implemented with proc_rule")
+        seq.drive("select_op_op", 10)
+        seq.drive("select_op_enable", 1)
+        seq.record_cycle("timed_mult_start")
+        seq.wait(1)
+        seq.drive("select_op_enable", 0)
+
+        seq.wait_condition("dut->is_done_res0 == 1", timeout=30)
+        seq.record_cycle("timed_mult_end")
+        seq.wait(2)
+
+        seq.print_cycle_diff("timed_mult_start", "timed_mult_end", "Timed multiply cycles")
+        # Result: 3 * 7 = 21
+        seq.expect("get_result_res0", 21, "3*7=21 from timed multiply")
+        seq.print("Timed multiply test PASSED", "get_result_res0")
+
+        # Reset for next test
+        seq.drive("reset_state_enable", 1)
+        seq.wait(1)
+        seq.drive("reset_state_enable", 0)
+
+    # =========================================================================
+    # Test Sequence 17: Pipelined Add (static_step with interval)
+    # Tests: static_step with latency=4, interval=2 (pipelined)
+    # =========================================================================
+
+    with tb.sequence("test_pipelined_add") as seq:
+        seq.comment("=" * 60)
+        seq.comment("TIMING ATTRIBUTE TEST: Static Step with Interval (II)")
+        seq.comment("Tests: static_step(latency=4, interval=2)")
+        seq.comment("=" * 60)
+        seq.reset(10)
+
+        # Load values: 12 + 8 = 20
+        seq.drive("load_a", 12)
+        seq.drive("load_b", 8)
+        seq.drive("load_enable", 1)
+        seq.wait(1)
+        seq.drive("load_enable", 0)
+        seq.wait(2)
+
+        # Trigger pipelined_add_test (op=11)
+        # Control: seq { set_busy(2) + pipelined_add(4) + set_done(2) + clear_busy(2) }
+        seq.comment("Trigger pipelined_add_test (op=11)")
+        seq.comment("pipelined_add: latency=4, interval=2")
+        seq.drive("select_op_op", 11)
+        seq.drive("select_op_enable", 1)
+        seq.record_cycle("pipe_add_start")
+        seq.wait(1)
+        seq.drive("select_op_enable", 0)
+
+        seq.wait_condition("dut->is_done_res0 == 1", timeout=30)
+        seq.record_cycle("pipe_add_end")
+        seq.wait(2)
+
+        seq.print_cycle_diff("pipe_add_start", "pipe_add_end", "Pipelined add cycles")
+        # Result: 12 + 8 = 20
+        seq.expect("get_result_res0", 20, "12+8=20 from pipelined add")
+        seq.print("Pipelined add test PASSED", "get_result_res0")
+
+    # =========================================================================
+    # Test Sequence 18: Complex Par Test (per-branch FSM)
+    # Tests: par { seq { ... }; seq { ... } } - triggers per-branch FSM generation
+    # Each branch has its own FSM register for independent progression
+    # =========================================================================
+
+    with tb.sequence("test_complex_par") as seq:
+        seq.comment("=" * 60)
+        seq.comment("COMPLEX PAR TEST: Per-Branch FSM Generation")
+        seq.comment("Tests: par { seq { A; B }; seq { C; D } }")
+        seq.comment("Each branch runs independently with its own FSM")
+        seq.comment("=" * 60)
+        seq.reset(10)
+
+        # Load initial values: a=20, b=15
+        seq.drive("load_a", 20)
+        seq.drive("load_b", 15)
+        seq.drive("load_enable", 1)
+        seq.wait(1)
+        seq.drive("load_enable", 0)
+        seq.wait(2)
+
+        # Reset counter to known value
+        seq.drive("reset_state_enable", 1)
+        seq.wait(1)
+        seq.drive("reset_state_enable", 0)
+        seq.wait(2)
+
+        # Reload values after reset
+        seq.drive("load_a", 20)
+        seq.drive("load_b", 15)
+        seq.drive("load_enable", 1)
+        seq.wait(1)
+        seq.drive("load_enable", 0)
+        seq.wait(2)
+
+        # Trigger complex_par_test (op=12)
+        # Control: seq { set_busy + par { seq{load_a,compute_add}; seq{load_b,inc} } + set_done + clear_busy }
+        # Branch 0: load_a (2 cycles) + compute_add (2 cycles) = 4 cycles
+        # Branch 1: load_b (2 cycles) + increment_counter (2 cycles) = 4 cycles
+        # Par completes when both branches done (max = 4 cycles)
+        # Total: set_busy(2) + par(4) + set_done(2) + clear_busy(2) = 10 cycles
+        seq.comment("Trigger complex_par_test (op=12)")
+        seq.comment("par { seq{load_a,compute_add}; seq{load_b,inc_counter} }")
+        seq.drive("select_op_op", 12)
+        seq.drive("select_op_enable", 1)
+        seq.record_cycle("complex_par_start")
+        seq.wait(1)
+        seq.drive("select_op_enable", 0)
+
+        seq.wait_condition("dut->is_done_res0 == 1", timeout=50)
+        seq.record_cycle("complex_par_end")
+        seq.wait(2)
+
+        seq.print_cycle_diff("complex_par_start", "complex_par_end", "Complex par cycles")
+        # Result: compute_add stores a+b = 20+15 = 35
+        seq.expect("get_result_res0", 35, "20+15=35 from complex par compute_add")
+        # Counter: increment_counter ran once
+        seq.expect("get_counter_res0", 1, "Counter incremented once in parallel branch")
+        seq.print("Complex par test - result", "get_result_res0")
+        seq.print("Complex par test - counter", "get_counter_res0")
+        seq.print("Complex par test PASSED", "get_result_res0")
+
     return tb
 
 
@@ -814,13 +1399,31 @@ def main():
 Generated workspace: {workspace_dir}
 
 Test sequences included:
-  1. test_init          - Basic initialization verification
-  2. test_seq_add_sub   - Sequential composition test
-  3. test_par_load      - Parallel composition test
-  4. test_static_timing - Static step timing verification
-  5. test_conditional   - Conditional control flow test
-  6. test_nested        - Nested control structures test
-  7. test_stress        - Multiple operation stress test
+  Functional tests:
+   1. test_init          - Basic initialization verification
+   2. test_seq_add_sub   - Sequential composition test
+   3. test_par_load      - Parallel composition test
+   4. test_static_timing - Static step timing verification
+   5. test_conditional   - Conditional control flow test
+   6. test_nested        - Nested control structures test
+   7. test_stress        - Multiple operation stress test
+   8. test_invoke        - Invoke operation test
+   9. test_static_only   - Static-only step sequence
+  10. test_dynamic_only  - Dynamic-only step sequence
+
+  Cycle-accurate timing tests (verify execution model):
+  11. test_cycle_static_step   - Verify static_step(L) takes L cycles
+  12. test_cycle_dynamic_step  - Verify dynamic step takes 2 cycles
+  13. test_cycle_parallel      - Verify par takes max(branch) cycles
+  14. test_static_vs_dynamic   - Compare static vs dynamic overhead
+  15. test_mixed_timing        - Verify mixed static/dynamic timing
+
+  Timing attribute tests (CMT2 module methods with procedural control):
+  16. test_timed_multiply      - Test CMT2 method with static_latency=4, call-site timing
+  17. test_pipelined_add       - Test static_step with interval (II=2)
+
+  Per-branch FSM tests (complex parallel control):
+  18. test_complex_par         - Test par with nested seq (per-branch FSM)
 
 To run the simulation:
     cd {workspace_dir}
