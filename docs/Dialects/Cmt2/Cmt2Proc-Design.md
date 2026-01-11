@@ -98,9 +98,20 @@ cmt2.proc.if %cond {
 ```
 
 **Loop** (`proc.while`):
+
+The while loop has a condition region that supports `cmt2.call` for reading
+dynamic values:
+
 ```mlir
-cmt2.proc.while %cond {
+cmt2.proc.while {
+    // Condition region - can use cmt2.call
+    %val = cmt2.call @counter @read() : () -> !firrtl.uint<32>
+    %c0 = firrtl.constant 0 : !firrtl.uint<32>
+    %cond = firrtl.neq %val, %c0 : ...
+    cmt2.proc.while_cond %cond : !firrtl.uint<1>
+} do {
     cmt2.proc.enable @body_step
+    cmt2.proc.yield
 }
 ```
 
@@ -244,6 +255,323 @@ Input: Mixed static wrappers and dynamic control
 ## TDCC Algorithm
 
 Top-Down Compile Control assigns FSM states to control nodes.
+
+### Parallel Control: Per-Branch FSM Design
+
+For true parallel execution, each branch of a `par` construct requires its own FSM register. This section describes the complete design.
+
+#### Problem Statement
+
+A single FSM register can only be in one state at a time. For parallel branches with multi-step control flow:
+
+```mlir
+cmt2.proc.par {
+  cmt2.proc.seq {       // Branch 0: needs states 1,2,3
+    cmt2.proc.enable @A
+    cmt2.proc.enable @B
+  }
+  cmt2.proc.seq {       // Branch 1: needs states 4,5
+    cmt2.proc.enable @C
+  }
+}
+```
+
+Both branches must progress **simultaneously**, but a single FSM cannot be in state 1 AND state 4 at the same time.
+
+#### Solution: Hierarchical FSM Structure
+
+Each `par` block generates:
+1. **Main FSM states**: fork, join (managed by parent FSM)
+2. **Branch FSM registers**: One per branch, independent progression
+3. **Done signals**: Per-branch completion indicators
+
+```
+Main FSM: ... → fork_state → join_state → ...
+                    │              ▲
+                    │              │ (all branch_done signals)
+                    ▼              │
+         ┌─────────────────────────┴───────────────────┐
+         │                                             │
+    Branch 0 FSM                              Branch 1 FSM
+    ┌─────────────┐                          ┌─────────────┐
+    │ 0: idle     │                          │ 0: idle     │
+    │ 1: enable A │                          │ 1: enable C │
+    │ 2: enable B │                          │ 0: done     │
+    │ 0: done     │                          └─────────────┘
+    └─────────────┘
+```
+
+#### State Machine Semantics
+
+**Fork Phase** (Main FSM enters fork_state):
+```
+// When main FSM transitions to fork_state:
+branch_0_fsm <= 1;   // Initialize branch 0 to first state
+branch_1_fsm <= 1;   // Initialize branch 1 to first state
+```
+
+**Execution Phase** (Main FSM stays in fork_state):
+```
+// Each branch FSM advances independently based on its control flow:
+
+// Branch 0 FSM transitions:
+if (branch_0_fsm == 1 && step_A_done) branch_0_fsm <= 2;
+if (branch_0_fsm == 2 && step_B_done) branch_0_fsm <= 0;  // done
+
+// Branch 1 FSM transitions:
+if (branch_1_fsm == 1 && step_C_done) branch_1_fsm <= 0;  // done
+```
+
+**Join Phase** (Main FSM transitions from fork_state to join_state):
+```
+// Transition condition: all branches complete
+join_guard = (branch_0_fsm == 0) && (branch_1_fsm == 0);
+if (main_fsm == fork_state && join_guard) main_fsm <= join_state;
+```
+
+#### Branch FSM State Encoding
+
+Each branch FSM uses:
+- **State 0**: Idle/Done state (branch not active or completed)
+- **States 1..N**: Active states for branch control flow
+
+The branch is:
+- **Idle**: `branch_fsm == 0` before fork
+- **Active**: `branch_fsm != 0` during execution
+- **Done**: `branch_fsm == 0` after completion
+
+#### Nested Parallelism
+
+For nested `par` inside a branch:
+```mlir
+cmt2.proc.par {            // Outer par
+  cmt2.proc.seq {          // Branch 0
+    cmt2.proc.enable @A
+    cmt2.proc.par {        // Inner par (nested)
+      cmt2.proc.enable @B
+      cmt2.proc.enable @C
+    }
+  }
+  cmt2.proc.enable @D      // Branch 1
+}
+```
+
+Each level of nesting generates its own branch FSM registers:
+```
+Main FSM
+├── outer_branch_0_fsm
+│   └── inner_branch_0_fsm, inner_branch_1_fsm
+└── outer_branch_1_fsm
+```
+
+The naming convention: `__par_{par_id}_branch_{branch_idx}_fsm`
+
+#### Generated Hardware
+
+For `par { seq { enable @A; enable @B }; enable @C }`:
+
+```mlir
+// Branch FSM registers
+cmt2.instance @__par_0_branch_0_fsm = @Reg<2>(...) // 2-bit for states 0,1,2
+cmt2.instance @__par_0_branch_1_fsm = @Reg<1>(...) // 1-bit for states 0,1
+
+// Branch 0 tick rule
+cmt2.rule @__par_0_branch_0_tick () -> () {
+  %fsm = cmt2.call @__par_0_branch_0_fsm @read() : ...
+  %active = firrtl.neq %fsm, %c0 : ...
+  cmt2.return %active : !firrtl.uint<1>
+} {
+  %fsm = cmt2.call @__par_0_branch_0_fsm @read() : ...
+  // State 1 -> 2 when A done
+  // State 2 -> 0 when B done
+  ...
+}
+
+// Branch 0 enable rules
+cmt2.rule @__par_0_branch_0_enable_A () -> () {
+  %fsm = cmt2.call @__par_0_branch_0_fsm @read() : ...
+  %in_state_1 = firrtl.eq %fsm, %c1 : ...
+  cmt2.return %in_state_1 : !firrtl.uint<1>
+} {
+  // Execute step A actions
+  ...
+}
+
+// Branch done value (for join)
+cmt2.value @__par_0_branch_0_done () -> (!firrtl.uint<1>) {
+  cmt2.return
+} {
+  %fsm = cmt2.call @__par_0_branch_0_fsm @read() : ...
+  %done = firrtl.eq %fsm, %c0 : ...
+  cmt2.return %done : !firrtl.uint<1>
+}
+
+// Main FSM join transition uses branch done signals
+// Transition fork -> join when all branches done
+```
+
+#### Initialization and Reset
+
+**On module reset:**
+- All branch FSM registers reset to 0 (idle)
+- Main FSM resets to 0
+
+**On fork (main FSM enters fork_state):**
+- Branch FSM registers are set to their start state (1)
+- This is done by the fork rule, not the tick rule
+
+```mlir
+cmt2.rule @__par_0_fork () -> () {
+  %main = cmt2.call @__fsm @read() : ...
+  %in_fork = firrtl.eq %main, %fork_state : ...
+  %b0 = cmt2.call @__par_0_branch_0_fsm @read() : ...
+  %b0_idle = firrtl.eq %b0, %c0 : ...
+  %should_init = firrtl.and %in_fork, %b0_idle : ...
+  cmt2.return %should_init : !firrtl.uint<1>
+} {
+  cmt2.call @__par_0_branch_0_fsm @write(%c1) : ...
+  cmt2.call @__par_0_branch_1_fsm @write(%c1) : ...
+}
+```
+
+#### Simple Par Optimization
+
+When all branches are single enables (no nested control flow), an optimization avoids branch FSM registers:
+
+```mlir
+// Simple par: all enables share the same state
+cmt2.proc.par {
+  cmt2.proc.enable @A
+  cmt2.proc.enable @B
+}
+```
+
+Generated as:
+- Single state where both @A and @B are enabled simultaneously
+- Exit when all done signals are true (for dynamic steps) or after max latency (for static steps)
+- No branch FSM registers needed
+
+This optimization is applied when:
+1. All children of `par` are `proc.enable` operations (no seq, par, if, while)
+2. No nested control structures
+
+#### TDCC Pass Implementation
+
+The TDCC pass handles `par` in three phases:
+
+**Phase 1: State Allocation** (`computeUniqueIdsForOp`)
+```cpp
+.Case<ProcParOp>([&](ProcParOp par) {
+  if (isSimplePar(par)) {
+    // All enables get same state
+    return allocateSimplePar(par, curState);
+  } else {
+    // Complex par: reserve fork/join states for main FSM
+    // Branch states are handled by branch FSMs (0-indexed internally)
+    uint64_t forkState = curState;
+    uint64_t joinState = curState + 1;
+    stateIds[par] = forkState;
+    // Record branch info for later
+    parBranchInfo[par] = analyzeBranches(par);
+    return joinState + 1;
+  }
+})
+```
+
+**Phase 2: Schedule Building** (`calculateStatesRecur`)
+```cpp
+.Case<ProcParOp>([&](ProcParOp par) {
+  if (isSimplePar(par)) {
+    return buildSimpleParSchedule(par, preds);
+  } else {
+    // Add fork rule: initialize branch FSMs
+    // Add branch tick/enable rules (reference branch FSMs)
+    // Add join transition: wait for all branch FSMs == 0
+    return buildComplexParSchedule(par, preds);
+  }
+})
+```
+
+**Phase 3: Hardware Generation** (`realizeSchedule`)
+```cpp
+// For each complex par:
+for (auto &parInfo : schedule.parBlocks) {
+  if (parInfo.needsPerBranchFsm) {
+    // Generate branch FSM registers
+    for (auto &branch : parInfo.branches) {
+      generateBranchFsmRegister(branch);
+      generateBranchTickRule(branch);
+      generateBranchEnableRules(branch);
+      generateBranchDoneValue(branch);
+    }
+    // Generate fork initialization rule
+    generateForkRule(parInfo);
+  }
+}
+```
+
+#### Example: Complete Par Compilation
+
+**Input:**
+```mlir
+cmt2.proc.rule @example () -> () {
+  ...
+} control {
+  cmt2.proc.seq {
+    cmt2.proc.enable @init
+    cmt2.proc.par {
+      cmt2.proc.seq {
+        cmt2.proc.enable @A
+        cmt2.proc.enable @B
+      }
+      cmt2.proc.enable @C
+    }
+    cmt2.proc.enable @finish
+  }
+}
+```
+
+**Main FSM States:**
+```
+State 0: Idle
+State 1: Enable @init
+State 2: Par fork (initialize branch FSMs)
+State 3: Par join (wait for branches)
+State 4: Enable @finish
+State 0: Done (back to idle)
+```
+
+**Branch 0 FSM States:**
+```
+State 0: Idle/Done
+State 1: Enable @A
+State 2: Enable @B
+```
+
+**Branch 1 FSM States:**
+```
+State 0: Idle/Done
+State 1: Enable @C
+```
+
+**Generated Transitions:**
+```
+// Main FSM
+State 1 -> 2: init_done
+State 2 -> 2: !(branch_0_done && branch_1_done)  // Stay in fork
+State 2 -> 3: branch_0_done && branch_1_done     // Go to join
+State 3 -> 4: unconditional
+State 4 -> 0: finish_done
+
+// Branch 0 FSM
+State 0 -> 1: main_fsm == 2 && branch_0_fsm == 0  // Fork init
+State 1 -> 2: A_done
+State 2 -> 0: B_done
+
+// Branch 1 FSM
+State 0 -> 1: main_fsm == 2 && branch_1_fsm == 0  // Fork init
+State 1 -> 0: C_done
+```
 
 ### Node ID Assignment
 
@@ -438,6 +766,20 @@ cmt2.call @mult @op(%a) {
 } : ...
 // ERROR: method has output latency 4, cannot capture at cycle 2
 ```
+
+---
+
+## Precedence Handling During Proc Lowering
+
+When procedural rules are lowered to GAA rules, multiple FSM state rules are generated that need proper precedence handling.
+
+**For comprehensive documentation, see:** [tmp/PrecedenceHandling.md](tmp/PrecedenceHandling.md)
+
+The document covers:
+- Conflict categories (intra-FSM, step body, cross-module)
+- Current implementation analysis
+- Concrete example using `proc_pipeline.py`
+- Proposed three-phase architecture for systematic handling
 
 ---
 
