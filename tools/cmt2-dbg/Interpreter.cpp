@@ -602,26 +602,52 @@ std::vector<RuleResult> Cmt2Interpreter::step() {
   }
 
   // Continue executing any running proc.rules
-  for (auto &fsmEntry : procFSMStates_) {
-    ProcFSMState &fsm = fsmEntry.second;
-    if (fsm.isRunning && fsm.currentState > 0) {
-      // Find the proc.rule op
-      topModule_.walk([&](ProcRuleOp procRule) {
-        if (procRule.getSymName() == fsmEntry.first()) {
-          executeProcRuleStep(procRule, fsm);
-          return WalkResult::interrupt();
+  if (useDirectProcInterpretation_) {
+    // Direct interpretation path - check procExecStates_
+    for (auto &execEntry : procExecStates_) {
+      ProcRuleExecState &execState = execEntry.second;
+      if (execState.isRunning) {
+        // Execute one cycle of the proc.rule
+        ProcRuleOp procRule = execState.ruleOp;
+        auto fsmIt = procFSMStates_.find(execEntry.first());
+        if (fsmIt != procFSMStates_.end()) {
+          executeProcRuleStep(procRule, fsmIt->second);
         }
-        return WalkResult::advance();
-      });
 
-      // Add to results as running if not already there
-      bool alreadyInResults = firedRules.count(fsmEntry.first().str()) > 0;
-      if (!alreadyInResults) {
-        RuleResult result;
-        result.ruleName = fsmEntry.first().str();
-        result.guardEnabled = true;
-        result.fired = true;  // Running counts as fired
-        results.push_back(result);
+        // Add to results as running if not already there
+        bool alreadyInResults = firedRules.count(execEntry.first().str()) > 0;
+        if (!alreadyInResults) {
+          RuleResult result;
+          result.ruleName = execEntry.first().str();
+          result.guardEnabled = true;
+          result.fired = true;  // Running counts as fired
+          results.push_back(result);
+        }
+      }
+    }
+  } else {
+    // Legacy FSM path - check procFSMStates_
+    for (auto &fsmEntry : procFSMStates_) {
+      ProcFSMState &fsm = fsmEntry.second;
+      if (fsm.isRunning && fsm.currentState > 0) {
+        // Find the proc.rule op
+        topModule_.walk([&](ProcRuleOp procRule) {
+          if (procRule.getSymName() == fsmEntry.first()) {
+            executeProcRuleStep(procRule, fsm);
+            return WalkResult::interrupt();
+          }
+          return WalkResult::advance();
+        });
+
+        // Add to results as running if not already there
+        bool alreadyInResults = firedRules.count(fsmEntry.first().str()) > 0;
+        if (!alreadyInResults) {
+          RuleResult result;
+          result.ruleName = fsmEntry.first().str();
+          result.guardEnabled = true;
+          result.fired = true;  // Running counts as fired
+          results.push_back(result);
+        }
       }
     }
   }
@@ -1926,6 +1952,7 @@ void Cmt2Interpreter::applyStateUpdates() {
 
 void Cmt2Interpreter::initializeProcConstructs(cmt2::ModuleOp module) {
   procFSMStates_.clear();
+  procExecStates_.clear();
   procSteps_.clear();
   procStaticSteps_.clear();
 
@@ -1949,20 +1976,32 @@ void Cmt2Interpreter::initializeProcConstructs(cmt2::ModuleOp module) {
     fsm.currentState = 0;  // idle
     fsm.isRunning = false;
 
-    // Analyze control region to determine number of states
-    // For now, we use a simple heuristic: count proc.enable ops
-    unsigned stateCount = 0;
-    procRule.getControl().walk([&](ProcEnableOp enable) {
-      fsm.stateSteps.push_back(enable.getStepName().str());
-      stateCount++;
-    });
-
-    // States: 0 = idle, 1..n = running states, n+1 = done (transitions back to idle)
-    fsm.numStates = stateCount + 1;  // +1 for idle state
+    // Check if TDCC attributes are present
+    if (procRule->hasAttr("tdcc.num_states")) {
+      // Parse TDCC attributes for proper FSM control
+      parseTDCCAttributes(procRule, fsm);
+      LLVM_DEBUG(llvm::dbgs() << "  Found proc.rule: " << procRule.getSymName()
+                              << " with TDCC FSM (" << fsm.numStates << " states)\n");
+    } else {
+      // Fallback: use simple heuristic (count proc.enable ops)
+      unsigned stateCount = 0;
+      procRule.getControl().walk([&](ProcEnableOp enable) {
+        fsm.stateSteps.push_back(enable.getStepName().str());
+        stateCount++;
+      });
+      fsm.numStates = stateCount + 1;  // +1 for idle state
+      LLVM_DEBUG(llvm::dbgs() << "  Found proc.rule: " << procRule.getSymName()
+                              << " with " << stateCount << " steps (no TDCC)\n");
+    }
 
     procFSMStates_[procRule.getSymName()] = fsm;
-    LLVM_DEBUG(llvm::dbgs() << "  Found proc.rule: " << procRule.getSymName()
-                            << " with " << stateCount << " steps\n");
+
+    // Also initialize ProcRuleExecState for direct interpretation
+    ProcRuleExecState execState;
+    execState.ruleName = procRule.getSymName().str();
+    execState.isRunning = false;
+    execState.ruleOp = procRule;
+    procExecStates_[procRule.getSymName()] = std::move(execState);
   });
 }
 
@@ -2026,10 +2065,17 @@ bool Cmt2Interpreter::executeProcStep(StringRef stepName) {
 }
 
 bool Cmt2Interpreter::isProcRuleEnabled(ProcRuleOp procRule) {
-  // Check if FSM is idle
-  auto fsmIt = procFSMStates_.find(procRule.getSymName());
-  if (fsmIt != procFSMStates_.end() && fsmIt->second.isRunning) {
-    return false;  // Already running, can't start again
+  // Check if already running (using direct or legacy execution)
+  if (useDirectProcInterpretation_) {
+    auto execIt = procExecStates_.find(procRule.getSymName());
+    if (execIt != procExecStates_.end() && execIt->second.isRunning) {
+      return false;  // Already running, can't start again
+    }
+  } else {
+    auto fsmIt = procFSMStates_.find(procRule.getSymName());
+    if (fsmIt != procFSMStates_.end() && fsmIt->second.isRunning) {
+      return false;  // Already running, can't start again
+    }
   }
 
   // Evaluate the guard
@@ -2037,6 +2083,25 @@ bool Cmt2Interpreter::isProcRuleEnabled(ProcRuleOp procRule) {
 }
 
 void Cmt2Interpreter::executeProcRuleStep(ProcRuleOp procRule, ProcFSMState &fsm) {
+  // Use direct interpretation if enabled (preferred path)
+  if (useDirectProcInterpretation_) {
+    StringRef ruleName = procRule.getSymName();
+    auto it = procExecStates_.find(ruleName);
+    if (it != procExecStates_.end()) {
+      executeProcRuleDirect(procRule, it->second);
+      // Sync running state to legacy FSM for compatibility
+      fsm.isRunning = it->second.isRunning;
+      return;
+    }
+  }
+
+  // Use TDCC FSM execution if available
+  if (fsm.hasTDCC) {
+    executeProcRuleTDCC(procRule, fsm);
+    return;
+  }
+
+  // Legacy simple FSM execution
   if (fsm.currentState == 0) {
     // Starting from idle - begin execution
     if (!fsm.stateSteps.empty()) {
@@ -2070,4 +2135,906 @@ void Cmt2Interpreter::executeProcRuleStep(ProcRuleOp procRule, ProcFSMState &fsm
       executeProcStep(currentStep);
     }
   }
+}
+
+//===----------------------------------------------------------------------===//
+// TDCC FSM Support for Procedural Rules
+//===----------------------------------------------------------------------===//
+
+void Cmt2Interpreter::parseTDCCAttributes(ProcRuleOp procRule, ProcFSMState &fsm) {
+  fsm.hasTDCC = true;
+
+  // Parse num_states
+  if (auto numStatesAttr = procRule->getAttrOfType<IntegerAttr>("tdcc.num_states")) {
+    fsm.numStates = numStatesAttr.getInt();
+  }
+
+  // Parse done_state
+  if (auto doneStateAttr = procRule->getAttrOfType<IntegerAttr>("tdcc.done_state")) {
+    fsm.doneState = doneStateAttr.getInt();
+  }
+
+  // Parse transitions
+  if (auto transitionsAttr = procRule->getAttrOfType<ArrayAttr>("tdcc.transitions")) {
+    for (auto transAttr : transitionsAttr) {
+      auto dict = cast<DictionaryAttr>(transAttr);
+      TDCCTransition trans;
+      trans.fromState = dict.getAs<IntegerAttr>("from").getInt();
+      trans.toState = dict.getAs<IntegerAttr>("to").getInt();
+
+      if (auto guardIdAttr = dict.getAs<IntegerAttr>("guard_op_id")) {
+        trans.guardOpId = guardIdAttr.getInt();
+      }
+      if (auto guardInvAttr = dict.getAs<BoolAttr>("guard_inverted")) {
+        trans.guardInverted = guardInvAttr.getValue();
+      }
+      if (auto doneStepAttr = dict.getAs<StringAttr>("done_step")) {
+        trans.doneStep = doneStepAttr.getValue().str();
+      }
+      if (auto parJoinAttr = dict.getAs<ArrayAttr>("par_join_branches")) {
+        for (auto branchAttr : parJoinAttr) {
+          trans.parJoinBranches.push_back(cast<StringAttr>(branchAttr).getValue().str());
+        }
+      }
+
+      fsm.transitions.push_back(trans);
+    }
+  }
+
+  // Parse enables
+  if (auto enablesAttr = procRule->getAttrOfType<ArrayAttr>("tdcc.enables")) {
+    for (auto enableAttr : enablesAttr) {
+      auto dict = cast<DictionaryAttr>(enableAttr);
+      TDCCStepEnable enable;
+      enable.state = dict.getAs<IntegerAttr>("state").getInt();
+
+      // Step can be FlatSymbolRefAttr (e.g., @push_static) or StringAttr
+      if (auto stepSymRef = dict.getAs<FlatSymbolRefAttr>("step")) {
+        enable.stepName = stepSymRef.getValue().str();
+      } else if (auto stepStr = dict.getAs<StringAttr>("step")) {
+        enable.stepName = stepStr.getValue().str();
+        // Remove leading '@' from step name if present
+        if (!enable.stepName.empty() && enable.stepName[0] == '@') {
+          enable.stepName = enable.stepName.substr(1);
+        }
+      }
+
+      if (auto iterAttr = dict.getAs<IntegerAttr>("iteration")) {
+        enable.iteration = iterAttr.getInt();
+      }
+      fsm.enables.push_back(enable);
+
+      // Build state-to-step map
+      fsm.stateToStep[enable.state] = enable.stepName;
+    }
+  }
+
+  // Parse par_blocks
+  if (auto parBlocksAttr = procRule->getAttrOfType<ArrayAttr>("tdcc.par_blocks")) {
+    for (auto blockAttr : parBlocksAttr) {
+      auto dict = cast<DictionaryAttr>(blockAttr);
+      TDCCParBlock parBlock;
+      parBlock.forkState = dict.getAs<IntegerAttr>("fork_state").getInt();
+      parBlock.joinState = dict.getAs<IntegerAttr>("join_state").getInt();
+      if (auto needsFsmAttr = dict.getAs<BoolAttr>("needs_per_branch_fsm")) {
+        parBlock.needsPerBranchFsm = needsFsmAttr.getValue();
+      }
+
+      if (auto branchesAttr = dict.getAs<ArrayAttr>("branches")) {
+        for (auto branchAttr : branchesAttr) {
+          auto brDict = cast<DictionaryAttr>(branchAttr);
+          TDCCParBranch branch;
+          branch.name = brDict.getAs<StringAttr>("name").getValue().str();
+          branch.firstState = brDict.getAs<IntegerAttr>("first_state").getInt();
+          branch.lastState = brDict.getAs<IntegerAttr>("last_state").getInt();
+          branch.exitState = brDict.getAs<IntegerAttr>("exit_state").getInt();
+          if (auto needsFsmAttr = brDict.getAs<BoolAttr>("needs_separate_fsm")) {
+            branch.needsSeparateFsm = needsFsmAttr.getValue();
+          }
+          parBlock.branches.push_back(branch);
+
+          // Initialize branch FSM state
+          fsm.branchFSMStates[branch.name] = 0;  // Start idle
+        }
+      }
+      fsm.parBlocks.push_back(parBlock);
+    }
+  }
+
+  // Parse cond_ops
+  if (auto condOpsAttr = procRule->getAttrOfType<ArrayAttr>("tdcc.cond_ops")) {
+    for (auto condAttr : condOpsAttr) {
+      auto dict = cast<DictionaryAttr>(condAttr);
+      TDCCCondOp condOp;
+      condOp.id = dict.getAs<IntegerAttr>("id").getInt();
+      condOp.type = dict.getAs<StringAttr>("type").getValue().str();
+      fsm.condOps.push_back(condOp);
+    }
+  }
+
+  // Build state-to-transitions map (using indices to avoid pointer invalidation)
+  for (size_t i = 0; i < fsm.transitions.size(); ++i) {
+    fsm.stateTransitions[fsm.transitions[i].fromState].push_back(i);
+  }
+
+  LLVM_DEBUG({
+    llvm::dbgs() << "    TDCC FSM: " << fsm.numStates << " states, done=" << fsm.doneState << "\n";
+    llvm::dbgs() << "    Enables: " << fsm.enables.size() << "\n";
+    llvm::dbgs() << "    Transitions: " << fsm.transitions.size() << "\n";
+    llvm::dbgs() << "    Par blocks: " << fsm.parBlocks.size() << "\n";
+    llvm::dbgs() << "    Cond ops: " << fsm.condOps.size() << "\n";
+  });
+}
+
+void Cmt2Interpreter::executeProcRuleTDCC(ProcRuleOp procRule, ProcFSMState &fsm) {
+  LLVM_DEBUG(llvm::dbgs() << "  TDCC execution: state=" << fsm.currentState
+                          << " running=" << fsm.isRunning << "\n");
+
+  // State 0 = idle - transition to state 1 to start
+  if (fsm.currentState == 0) {
+    fsm.isRunning = true;
+    fsm.currentState = 1;
+
+    // Initialize branch FSMs if we have par blocks
+    for (auto &parBlock : fsm.parBlocks) {
+      for (auto &branch : parBlock.branches) {
+        fsm.branchFSMStates[branch.name] = 0;  // 0 = not started
+      }
+    }
+    os_ << "    [TDCC] Started: transitioning to state 1\n";
+    return;  // Will execute step on next call
+  }
+
+  // Check for done state
+  if (fsm.currentState == fsm.doneState) {
+    fsm.currentState = 0;
+    fsm.isRunning = false;
+    os_ << "    [TDCC] Completed: returning to idle\n";
+    return;
+  }
+
+  // Check if we're at a fork state (need to initialize branches)
+  for (auto &parBlock : fsm.parBlocks) {
+    if (fsm.currentState == parBlock.forkState) {
+      // Check if branches are already initialized (non-zero)
+      bool alreadyInitialized = false;
+      for (auto &branch : parBlock.branches) {
+        auto it = fsm.branchFSMStates.find(branch.name);
+        if (it != fsm.branchFSMStates.end() && it->second != 0) {
+          alreadyInitialized = true;
+          break;
+        }
+      }
+
+      if (!alreadyInitialized) {
+        // Initialize branch FSMs to their first states
+        for (auto &branch : parBlock.branches) {
+          fsm.branchFSMStates[branch.name] = branch.firstState;
+          os_ << "    [TDCC] Fork: branch " << branch.name << " -> state " << branch.firstState << "\n";
+        }
+      }
+    }
+  }
+
+  // Check if we're in a parallel region (between fork and join)
+  for (auto &parBlock : fsm.parBlocks) {
+    // Check if any branch is active in this parallel block
+    bool hasActiveBranch = false;
+    for (auto &branch : parBlock.branches) {
+      auto it = fsm.branchFSMStates.find(branch.name);
+      if (it != fsm.branchFSMStates.end() && it->second != 0 &&
+          it->second != parBlock.joinState) {
+        hasActiveBranch = true;
+        break;
+      }
+    }
+
+    if (!hasActiveBranch)
+      continue;
+
+    // Execute all active branches in parallel
+    bool allBranchesDone = true;
+    for (auto &branch : parBlock.branches) {
+      auto branchStateIt = fsm.branchFSMStates.find(branch.name);
+      if (branchStateIt == fsm.branchFSMStates.end())
+        continue;
+
+      unsigned branchState = branchStateIt->second;
+
+      // Skip if branch not started yet
+      if (branchState == 0) {
+        allBranchesDone = false;
+        continue;
+      }
+      // Branch is done only when it reaches the join state
+      if (branchState == parBlock.joinState) {
+        continue;  // Branch is done
+      }
+
+      os_ << "    [TDCC] Branch " << branch.name << " at state " << branchState << "\n";
+
+      // Execute step for branch's current state
+      auto stepIt = fsm.stateToStep.find(branchState);
+      if (stepIt != fsm.stateToStep.end()) {
+        StringRef stepName = stepIt->second;
+        os_ << "    [TDCC]   Executing step: " << stepName << "\n";
+        executeProcStep(stepName);
+      }
+
+      // Find next state for this branch
+      auto transIt = fsm.stateTransitions.find(branchState);
+      if (transIt != fsm.stateTransitions.end()) {
+        for (size_t transIdx : transIt->second) {
+          const TDCCTransition &trans = fsm.transitions[transIdx];
+          // Only consider transitions within this branch's range
+          if (trans.toState < branch.firstState ||
+              (trans.toState > branch.lastState && trans.toState != branch.exitState &&
+               trans.toState != parBlock.joinState))
+            continue;
+
+          bool canTake = true;
+
+          // Check done signal guard
+          if (!trans.doneStep.empty()) {
+            if (!stepsDoneThisCycle_.count(trans.doneStep)) {
+              canTake = false;
+            }
+          }
+
+          // Check while condition guard
+          if (trans.guardOpId >= 0) {
+            bool condValue = evaluateTDCCWhileCondition(procRule, trans.guardOpId);
+            if (trans.guardInverted) {
+              condValue = !condValue;
+            }
+            if (!condValue) {
+              canTake = false;
+            }
+          }
+
+          if (canTake) {
+            fsm.branchFSMStates[branch.name] = trans.toState;
+            os_ << "    [TDCC]   Branch " << branch.name << " -> state " << trans.toState << "\n";
+
+            // Check if branch reached join state
+            if (trans.toState == parBlock.joinState) {
+              os_ << "    [TDCC]   Branch " << branch.name << " completed (reached join)\n";
+            }
+            break;
+          }
+        }
+      }
+
+      // Check if this branch is done now (reached join state)
+      unsigned newBranchState = fsm.branchFSMStates[branch.name];
+      if (newBranchState != parBlock.joinState) {
+        allBranchesDone = false;
+      }
+    }
+
+    // If all branches done, move to join state
+    if (allBranchesDone) {
+      os_ << "    [TDCC] All branches completed, moving to join state " << parBlock.joinState << "\n";
+      fsm.currentState = parBlock.joinState;
+
+      // Now check transition from join state
+      uint64_t nextState = getNextTDCCState(procRule, fsm);
+      if (nextState != fsm.currentState) {
+        os_ << "    [TDCC] Post-join: state " << fsm.currentState << " -> " << nextState << "\n";
+        fsm.currentState = nextState;
+      }
+    }
+    return;  // Parallel region handled
+  }
+
+  // Non-parallel execution: single state machine
+  // Execute step for current state if any
+  auto stepIt = fsm.stateToStep.find(fsm.currentState);
+  if (stepIt != fsm.stateToStep.end()) {
+    StringRef stepName = stepIt->second;
+    os_ << "    [TDCC] Executing step: " << stepName << " (state " << fsm.currentState << ")\n";
+    executeProcStep(stepName);
+  }
+
+  // Determine next state based on transitions
+  uint64_t nextState = getNextTDCCState(procRule, fsm);
+  if (nextState != fsm.currentState) {
+    os_ << "    [TDCC] State " << fsm.currentState << " -> " << nextState << "\n";
+  }
+
+  fsm.currentState = nextState;
+}
+
+bool Cmt2Interpreter::evaluateTDCCWhileCondition(ProcRuleOp procRule, int64_t condOpId) {
+  // Find the while condition with the given ID
+  // The conditions are stored in proc.while operations in the control region
+  bool condValue = false;
+  int64_t currentCondId = 0;
+
+  procRule.getControl().walk([&](ProcWhileOp whileOp) {
+    if (currentCondId == condOpId) {
+      // Evaluate the condition region
+      Region &condRegion = whileOp.getCondRegion();
+      if (!condRegion.empty()) {
+        Block &condBlock = condRegion.front();
+        valueMap_.clear();
+
+        for (Operation &op : condBlock) {
+          if (auto whileCond = dyn_cast<ProcWhileCondYieldOp>(op)) {
+            InterpValue val = getValue(whileCond.getCond());
+            condValue = val != 0;
+            break;
+          }
+          executeOp(&op);
+        }
+      }
+    }
+    currentCondId++;
+  });
+
+  LLVM_DEBUG(llvm::dbgs() << "    While cond " << condOpId << " = " << condValue << "\n");
+  return condValue;
+}
+
+bool Cmt2Interpreter::areAllBranchesDone(const ProcFSMState &fsm, const TDCCParBlock &parBlock) {
+  for (const auto &branch : parBlock.branches) {
+    auto it = fsm.branchFSMStates.find(branch.name);
+    if (it == fsm.branchFSMStates.end() || it->second != 3) {  // 3 = done state
+      return false;
+    }
+  }
+  return true;
+}
+
+uint64_t Cmt2Interpreter::getNextTDCCState(ProcRuleOp procRule, ProcFSMState &fsm) {
+  uint64_t currentState = fsm.currentState;
+
+  // Check for parallel join first - if at join state, need all branches done
+  for (auto &parBlock : fsm.parBlocks) {
+    if (currentState == parBlock.joinState) {
+      if (!areAllBranchesDone(fsm, parBlock)) {
+        return currentState;  // Stay at join state until all branches done
+      }
+    }
+  }
+
+  // Find transitions from current state
+  auto transIt = fsm.stateTransitions.find(currentState);
+  if (transIt == fsm.stateTransitions.end()) {
+    return currentState;  // No transitions, stay in current state
+  }
+
+  // Evaluate each outgoing transition
+  for (size_t transIdx : transIt->second) {
+    const TDCCTransition &trans = fsm.transitions[transIdx];
+    bool canTake = true;
+
+    // Check done signal guard
+    if (!trans.doneStep.empty()) {
+      if (!stepsDoneThisCycle_.count(trans.doneStep)) {
+        canTake = false;  // Step not done yet
+      }
+    }
+
+    // Check while condition guard
+    if (trans.guardOpId >= 0) {
+      bool condValue = evaluateTDCCWhileCondition(procRule, trans.guardOpId);
+      if (trans.guardInverted) {
+        condValue = !condValue;  // Invert for else/exit branches
+      }
+      if (!condValue) {
+        canTake = false;
+      }
+    }
+
+    // Check parallel join guard
+    if (!trans.parJoinBranches.empty()) {
+      for (const auto &branchName : trans.parJoinBranches) {
+        auto it = fsm.branchFSMStates.find(branchName);
+        if (it == fsm.branchFSMStates.end() || it->second != 3) {  // 3 = done
+          canTake = false;
+          break;
+        }
+      }
+    }
+
+    if (canTake) {
+      // Update branch FSM states if transitioning within a branch
+      for (auto &parBlock : fsm.parBlocks) {
+        for (auto &branch : parBlock.branches) {
+          if (trans.fromState >= branch.firstState && trans.fromState <= branch.lastState) {
+            // This transition is within a branch
+            if (trans.toState == branch.exitState || trans.toState > branch.lastState) {
+              // Transition to exit state - mark branch as done
+              fsm.branchFSMStates[branch.name] = 3;  // done
+              LLVM_DEBUG(llvm::dbgs() << "    Branch " << branch.name << " completed\n");
+            }
+          }
+        }
+      }
+
+      return trans.toState;
+    }
+  }
+
+  return currentState;  // No transition taken, stay in current state
+}
+
+//===----------------------------------------------------------------------===//
+// Direct Proc Interpretation (New Architecture)
+//===----------------------------------------------------------------------===//
+
+std::unique_ptr<ProcExecState> ProcExecState::createFor(Operation *op) {
+  auto state = std::make_unique<ProcExecState>();
+  state->op = op;
+  state->status = ProcExecStatus::Idle;
+
+  if (isa<ProcSeqOp>(op)) {
+    state->state = SeqExecState{};
+  } else if (isa<ProcParOp>(op)) {
+    state->state = ParExecState{};
+  } else if (isa<ProcWhileOp>(op)) {
+    state->state = WhileExecState{};
+  } else if (auto repeatOp = dyn_cast<ProcStaticRepeatOp>(op)) {
+    StaticRepeatExecState repeatState;
+    repeatState.totalIterations = repeatOp.getCount();
+    state->state = repeatState;
+  } else if (auto enableOp = dyn_cast<ProcEnableOp>(op)) {
+    EnableExecState enableState;
+    enableState.stepName = enableOp.getStepName().str();
+    state->state = enableState;
+  } else if (isa<ProcIfOp>(op)) {
+    // If uses same state as Seq (single child at a time)
+    state->state = SeqExecState{};
+  }
+
+  return state;
+}
+
+void Cmt2Interpreter::executeProcRuleDirect(ProcRuleOp procRule,
+                                            ProcRuleExecState &execState) {
+  LLVM_DEBUG(llvm::dbgs() << "  Direct interpretation: running="
+                          << execState.isRunning << "\n");
+
+  // If idle, initialize control state for the control region
+  if (!execState.isRunning) {
+    execState.isRunning = true;
+    Region &controlRegion = procRule.getControl();
+    if (!controlRegion.empty()) {
+      Block &controlBlock = controlRegion.front();
+      // The control region should have a single top-level control construct
+      for (Operation &op : controlBlock) {
+        if (isa<ProcSeqOp, ProcParOp, ProcWhileOp, ProcStaticRepeatOp,
+                ProcEnableOp, ProcIfOp>(&op)) {
+          execState.controlState = ProcExecState::createFor(&op);
+          os_ << "    [Direct] Started: initializing control state\n";
+          break;
+        }
+      }
+    }
+    if (!execState.controlState) {
+      // No control region or empty - immediately done
+      execState.isRunning = false;
+      os_ << "    [Direct] No control region, immediately done\n";
+      return;
+    }
+  }
+
+  // Advance the control state by one cycle
+  if (execState.controlState) {
+    advanceState(*execState.controlState);
+
+    // Check for completion
+    if (execState.controlState->status == ProcExecStatus::Done) {
+      execState.isRunning = false;
+      execState.controlState.reset();
+      os_ << "    [Direct] Control completed, returning to idle\n";
+    }
+  }
+}
+
+void Cmt2Interpreter::advanceState(ProcExecState &state) {
+  if (!state.op)
+    return;
+
+  if (auto seqOp = dyn_cast<ProcSeqOp>(state.op)) {
+    advanceSeq(seqOp, state);
+  } else if (auto parOp = dyn_cast<ProcParOp>(state.op)) {
+    advancePar(parOp, state);
+  } else if (auto whileOp = dyn_cast<ProcWhileOp>(state.op)) {
+    advanceWhile(whileOp, state);
+  } else if (auto repeatOp = dyn_cast<ProcStaticRepeatOp>(state.op)) {
+    advanceStaticRepeat(repeatOp, state);
+  } else if (auto enableOp = dyn_cast<ProcEnableOp>(state.op)) {
+    advanceEnable(enableOp, state);
+  } else if (auto ifOp = dyn_cast<ProcIfOp>(state.op)) {
+    advanceIf(ifOp, state);
+  }
+}
+
+void Cmt2Interpreter::advanceSeq(ProcSeqOp seqOp, ProcExecState &state) {
+  auto *seqState = state.getState<SeqExecState>();
+  if (!seqState)
+    return;
+
+  Block &seqBlock = seqOp.getBody().front();
+  SmallVector<Operation *, 8> children;
+  for (Operation &op : seqBlock) {
+    if (isa<ProcSeqOp, ProcParOp, ProcWhileOp, ProcStaticRepeatOp,
+            ProcEnableOp, ProcIfOp>(&op)) {
+      children.push_back(&op);
+    }
+  }
+
+  if (children.empty()) {
+    state.status = ProcExecStatus::Done;
+    return;
+  }
+
+  // Initialize on first call
+  if (state.status == ProcExecStatus::Idle) {
+    state.status = ProcExecStatus::Running;
+    seqState->currentChildIndex = 0;
+    state.children.clear();
+    state.children.push_back(ProcExecState::createFor(children[0]));
+    os_ << "    [Direct] Seq: starting child 0\n";
+  }
+
+  if (state.status == ProcExecStatus::Running) {
+    if (state.children.empty() || !state.children[0])
+      return;
+
+    // Advance current child
+    advanceState(*state.children[0]);
+
+    // Check if current child is done
+    if (state.children[0]->status == ProcExecStatus::Done) {
+      seqState->currentChildIndex++;
+      os_ << "    [Direct] Seq: child " << (seqState->currentChildIndex - 1)
+          << " done\n";
+
+      if (seqState->currentChildIndex >= children.size()) {
+        // All children done
+        state.status = ProcExecStatus::Done;
+        os_ << "    [Direct] Seq: all children done\n";
+      } else {
+        // Move to next child
+        state.children[0] = ProcExecState::createFor(
+            children[seqState->currentChildIndex]);
+        os_ << "    [Direct] Seq: starting child "
+            << seqState->currentChildIndex << "\n";
+      }
+    }
+  }
+}
+
+void Cmt2Interpreter::advancePar(ProcParOp parOp, ProcExecState &state) {
+  auto *parState = state.getState<ParExecState>();
+  if (!parState)
+    return;
+
+  Block &parBlock = parOp.getBody().front();
+  SmallVector<Operation *, 8> children;
+  for (Operation &op : parBlock) {
+    if (isa<ProcSeqOp, ProcParOp, ProcWhileOp, ProcStaticRepeatOp,
+            ProcEnableOp, ProcIfOp>(&op)) {
+      children.push_back(&op);
+    }
+  }
+
+  if (children.empty()) {
+    state.status = ProcExecStatus::Done;
+    return;
+  }
+
+  // Initialize on first call - start all children
+  if (state.status == ProcExecStatus::Idle) {
+    state.status = ProcExecStatus::Running;
+    parState->childDone.resize(children.size(), false);
+    parState->allStarted = true;
+    state.children.clear();
+    for (size_t i = 0; i < children.size(); ++i) {
+      state.children.push_back(ProcExecState::createFor(children[i]));
+    }
+    os_ << "    [Direct] Par: starting " << children.size()
+        << " parallel branches\n";
+  }
+
+  if (state.status == ProcExecStatus::Running) {
+    bool allDone = true;
+
+    // Advance all non-done children
+    for (size_t i = 0; i < state.children.size(); ++i) {
+      if (parState->childDone[i])
+        continue;
+
+      if (!state.children[i])
+        continue;
+
+      advanceState(*state.children[i]);
+
+      if (state.children[i]->status == ProcExecStatus::Done) {
+        parState->childDone[i] = true;
+        os_ << "    [Direct] Par: branch " << i << " done\n";
+      } else {
+        allDone = false;
+      }
+    }
+
+    if (allDone) {
+      state.status = ProcExecStatus::Done;
+      os_ << "    [Direct] Par: all branches done (fork-join complete)\n";
+    }
+  }
+}
+
+void Cmt2Interpreter::advanceWhile(ProcWhileOp whileOp, ProcExecState &state) {
+  auto *whileState = state.getState<WhileExecState>();
+  if (!whileState)
+    return;
+
+  // Initialize on first call
+  if (state.status == ProcExecStatus::Idle) {
+    state.status = ProcExecStatus::Running;
+    whileState->evaluatingCond = true;
+    state.children.clear();
+    os_ << "    [Direct] While: starting condition evaluation\n";
+  }
+
+  if (state.status == ProcExecStatus::Running) {
+    if (whileState->evaluatingCond) {
+      // Evaluate condition region
+      Region &condRegion = whileOp.getCondRegion();
+      bool condValue = false;
+
+      if (!condRegion.empty()) {
+        Block &condBlock = condRegion.front();
+        valueMap_.clear();
+
+        for (Operation &op : condBlock) {
+          if (auto condYield = dyn_cast<ProcWhileCondYieldOp>(op)) {
+            InterpValue val = getValue(condYield.getCond());
+            condValue = val != 0;
+            break;
+          }
+          executeOp(&op);
+        }
+      }
+
+      os_ << "    [Direct] While: condition = " << condValue << "\n";
+
+      if (!condValue) {
+        // Condition false - exit loop
+        state.status = ProcExecStatus::Done;
+        os_ << "    [Direct] While: exiting (condition false)\n";
+      } else {
+        // Condition true - start body
+        whileState->evaluatingCond = false;
+        Region &bodyRegion = whileOp.getBody();
+        if (!bodyRegion.empty()) {
+          Block &bodyBlock = bodyRegion.front();
+          for (Operation &op : bodyBlock) {
+            if (isa<ProcSeqOp, ProcParOp, ProcWhileOp, ProcStaticRepeatOp,
+                    ProcEnableOp, ProcIfOp>(&op)) {
+              state.children.clear();
+              state.children.push_back(ProcExecState::createFor(&op));
+              os_ << "    [Direct] While: starting body\n";
+              break;
+            }
+          }
+        }
+      }
+    } else {
+      // Body is active - advance it
+      if (!state.children.empty() && state.children[0]) {
+        advanceState(*state.children[0]);
+
+        if (state.children[0]->status == ProcExecStatus::Done) {
+          // Body complete - re-evaluate condition next cycle
+          whileState->evaluatingCond = true;
+          state.children.clear();
+          os_ << "    [Direct] While: body done, re-evaluating condition\n";
+        }
+      } else {
+        // No body - re-evaluate condition
+        whileState->evaluatingCond = true;
+      }
+    }
+  }
+}
+
+void Cmt2Interpreter::advanceStaticRepeat(ProcStaticRepeatOp repeatOp,
+                                          ProcExecState &state) {
+  auto *repeatState = state.getState<StaticRepeatExecState>();
+  if (!repeatState)
+    return;
+
+  // Initialize on first call
+  if (state.status == ProcExecStatus::Idle) {
+    state.status = ProcExecStatus::Running;
+    repeatState->currentIteration = 0;
+    repeatState->totalIterations = repeatOp.getCount();
+
+    if (repeatState->totalIterations == 0) {
+      state.status = ProcExecStatus::Done;
+      os_ << "    [Direct] StaticRepeat: 0 iterations, done\n";
+      return;
+    }
+
+    // Initialize first iteration's body
+    Region &bodyRegion = repeatOp.getBody();
+    if (!bodyRegion.empty()) {
+      Block &bodyBlock = bodyRegion.front();
+      for (Operation &op : bodyBlock) {
+        if (isa<ProcSeqOp, ProcParOp, ProcWhileOp, ProcStaticRepeatOp,
+                ProcEnableOp, ProcIfOp>(&op)) {
+          state.children.clear();
+          state.children.push_back(ProcExecState::createFor(&op));
+          os_ << "    [Direct] StaticRepeat: starting iteration 0/"
+              << repeatState->totalIterations << "\n";
+          break;
+        }
+      }
+    }
+  }
+
+  if (state.status == ProcExecStatus::Running) {
+    // Advance body
+    if (!state.children.empty() && state.children[0]) {
+      advanceState(*state.children[0]);
+
+      if (state.children[0]->status == ProcExecStatus::Done) {
+        repeatState->currentIteration++;
+        os_ << "    [Direct] StaticRepeat: iteration "
+            << (repeatState->currentIteration - 1) << " done\n";
+
+        if (repeatState->currentIteration >= repeatState->totalIterations) {
+          // All iterations done
+          state.status = ProcExecStatus::Done;
+          os_ << "    [Direct] StaticRepeat: all iterations done\n";
+        } else {
+          // Start next iteration
+          Region &bodyRegion = repeatOp.getBody();
+          if (!bodyRegion.empty()) {
+            Block &bodyBlock = bodyRegion.front();
+            for (Operation &op : bodyBlock) {
+              if (isa<ProcSeqOp, ProcParOp, ProcWhileOp, ProcStaticRepeatOp,
+                      ProcEnableOp, ProcIfOp>(&op)) {
+                state.children[0] = ProcExecState::createFor(&op);
+                os_ << "    [Direct] StaticRepeat: starting iteration "
+                    << repeatState->currentIteration << "/"
+                    << repeatState->totalIterations << "\n";
+                break;
+              }
+            }
+          }
+        }
+      }
+    } else {
+      // No body - all iterations trivially done
+      state.status = ProcExecStatus::Done;
+    }
+  }
+}
+
+void Cmt2Interpreter::advanceEnable(ProcEnableOp enableOp,
+                                    ProcExecState &state) {
+  auto *enableState = state.getState<EnableExecState>();
+  if (!enableState)
+    return;
+
+  StringRef stepName = enableOp.getStepName();
+
+  // Initialize on first call
+  if (state.status == ProcExecStatus::Idle) {
+    state.status = ProcExecStatus::Running;
+    enableState->stepName = stepName.str();
+    enableState->activated = false;
+    enableState->cycleCount = 0;
+
+    // Determine if this is a static or dynamic step
+    auto staticStepIt = procStaticSteps_.find(stepName);
+    if (staticStepIt != procStaticSteps_.end()) {
+      enableState->isStatic = true;
+      enableState->staticLatency = staticStepIt->second.getLatency();
+      os_ << "    [Direct] Enable: activating static step '" << stepName
+          << "' (latency=" << enableState->staticLatency << ")\n";
+    } else {
+      enableState->isStatic = false;
+      os_ << "    [Direct] Enable: activating dynamic step '" << stepName
+          << "'\n";
+    }
+  }
+
+  if (state.status == ProcExecStatus::Running) {
+    // Activate the step (execute its body)
+    if (!enableState->activated) {
+      activateStep(stepName);
+      enableState->activated = true;
+    }
+
+    // Check for completion
+    if (enableState->isStatic) {
+      // Static step: done after latency cycles
+      enableState->cycleCount++;
+      if (enableState->cycleCount >= enableState->staticLatency) {
+        state.status = ProcExecStatus::Done;
+        os_ << "    [Direct] Enable: static step '" << stepName
+            << "' done (after " << enableState->cycleCount << " cycles)\n";
+      }
+    } else {
+      // Dynamic step: check done signal
+      if (isStepDone(stepName)) {
+        state.status = ProcExecStatus::Done;
+        os_ << "    [Direct] Enable: dynamic step '" << stepName
+            << "' signaled done\n";
+      }
+    }
+  }
+}
+
+void Cmt2Interpreter::advanceIf(ProcIfOp ifOp, ProcExecState &state) {
+  // For now, treat if similar to seq - evaluate condition and execute
+  // appropriate branch
+  auto *seqState = state.getState<SeqExecState>();
+  if (!seqState)
+    return;
+
+  // Initialize on first call - evaluate condition
+  if (state.status == ProcExecStatus::Idle) {
+    state.status = ProcExecStatus::Running;
+
+    // Evaluate the if condition - ProcIfOp takes condition as a value
+    InterpValue condVal = getValue(ifOp.getCond());
+    bool condValue = condVal != 0;
+
+    os_ << "    [Direct] If: condition = " << condValue << "\n";
+
+    // Select appropriate branch
+    Region &thenRegion = ifOp.getThenRegion();
+    Region &elseRegion = ifOp.getElseRegion();
+    Region *selectedRegion = condValue ? &thenRegion : &elseRegion;
+
+    if (!selectedRegion->empty()) {
+      Block &block = selectedRegion->front();
+      for (Operation &op : block) {
+        if (isa<ProcSeqOp, ProcParOp, ProcWhileOp, ProcStaticRepeatOp,
+                ProcEnableOp, ProcIfOp>(&op)) {
+          state.children.clear();
+          state.children.push_back(ProcExecState::createFor(&op));
+          os_ << "    [Direct] If: executing "
+              << (condValue ? "then" : "else") << " branch\n";
+          break;
+        }
+      }
+    }
+
+    if (state.children.empty()) {
+      // No branch to execute
+      state.status = ProcExecStatus::Done;
+    }
+  }
+
+  if (state.status == ProcExecStatus::Running) {
+    if (!state.children.empty() && state.children[0]) {
+      advanceState(*state.children[0]);
+
+      if (state.children[0]->status == ProcExecStatus::Done) {
+        state.status = ProcExecStatus::Done;
+        os_ << "    [Direct] If: branch done\n";
+      }
+    } else {
+      state.status = ProcExecStatus::Done;
+    }
+  }
+}
+
+bool Cmt2Interpreter::isStepDone(StringRef stepName) {
+  // Check if the step signaled done this cycle
+  return stepsDoneThisCycle_.count(stepName) > 0;
+}
+
+void Cmt2Interpreter::activateStep(StringRef stepName) {
+  // Execute the step's body
+  executeProcStep(stepName);
 }

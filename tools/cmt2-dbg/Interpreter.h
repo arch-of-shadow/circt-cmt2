@@ -36,6 +36,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <variant>
 #include <vector>
 
 namespace circt {
@@ -61,13 +62,169 @@ struct PendingCall {
   bool executed = false;
 };
 
-/// FSM state for procedural rules
+/// Transition info parsed from TDCC attributes
+struct TDCCTransition {
+  uint64_t fromState;
+  uint64_t toState;
+  int64_t guardOpId = -1;      // -1 = unconditional
+  bool guardInverted = false;  // true for else/exit branches
+  std::string doneStep;        // non-empty = guarded by step done signal
+  std::vector<std::string> parJoinBranches;  // non-empty = parallel join
+};
+
+/// Step enable info parsed from TDCC attributes
+struct TDCCStepEnable {
+  uint64_t state;
+  std::string stepName;
+  int64_t iteration = -1;  // -1 = not in static_repeat
+};
+
+/// Parallel branch info parsed from TDCC attributes
+struct TDCCParBranch {
+  std::string name;
+  uint64_t firstState;
+  uint64_t lastState;
+  uint64_t exitState;
+  bool needsSeparateFsm;
+};
+
+/// Parallel block info
+struct TDCCParBlock {
+  uint64_t forkState;
+  uint64_t joinState;
+  bool needsPerBranchFsm;
+  std::vector<TDCCParBranch> branches;
+};
+
+/// Condition operation info (for while loops)
+struct TDCCCondOp {
+  int64_t id;
+  std::string type;  // "while"
+};
+
+/// FSM state for procedural rules - enhanced with TDCC support
+/// DEPRECATED: Will be replaced by ProcRuleExecState for direct interpretation
 struct ProcFSMState {
   std::string ruleName;
   unsigned currentState = 0;  // 0 = idle
   unsigned numStates = 1;
+  unsigned doneState = 0;
   bool isRunning = false;
+
+  // Legacy simple FSM (for backward compatibility)
   std::vector<std::string> stateSteps; // step name for each state
+
+  // TDCC FSM structure
+  bool hasTDCC = false;
+  std::vector<TDCCTransition> transitions;
+  std::vector<TDCCStepEnable> enables;
+  std::vector<TDCCParBlock> parBlocks;
+  std::vector<TDCCCondOp> condOps;
+
+  // Per-branch FSM state for proc.par (branch_name -> current_state)
+  // State encoding: 0=idle, 1=header, 2=body, 3=done
+  llvm::StringMap<unsigned> branchFSMStates;
+
+  // Map from state to step name (built from enables)
+  llvm::DenseMap<uint64_t, std::string> stateToStep;
+
+  // Map from fromState to indices in transitions vector
+  llvm::DenseMap<uint64_t, llvm::SmallVector<size_t, 4>> stateTransitions;
+};
+
+//===----------------------------------------------------------------------===//
+// Direct Proc Interpretation (New Architecture)
+//===----------------------------------------------------------------------===//
+// These structures support direct interpretation of proc operations without
+// requiring TDCC lowering. The interpreter maintains hierarchical execution
+// state that mirrors the control structure.
+
+/// Execution status for a control construct
+enum class ProcExecStatus { Idle, Running, Done };
+
+/// Forward declaration for recursive state
+struct ProcExecState;
+
+/// Execution state for proc.seq (sequential composition)
+struct SeqExecState {
+  size_t currentChildIndex = 0;  // Which child is currently executing
+};
+
+/// Execution state for proc.par (parallel composition)
+struct ParExecState {
+  std::vector<bool> childDone;   // Which children have completed
+  bool allStarted = false;       // Have all children been started
+};
+
+/// Execution state for proc.while (dynamic loop)
+struct WhileExecState {
+  bool evaluatingCond = true;    // true = evaluating condition, false = body active
+};
+
+/// Execution state for proc.static_repeat (static loop)
+struct StaticRepeatExecState {
+  size_t currentIteration = 0;   // Current iteration number (0-based)
+  size_t totalIterations = 0;    // Total number of iterations
+};
+
+/// Execution state for proc.enable (step activation)
+struct EnableExecState {
+  std::string stepName;          // Name of the step being executed
+  bool isStatic = false;         // true = proc.static_step, false = proc.step
+  size_t cycleCount = 0;         // Cycles since activation (for static steps)
+  size_t staticLatency = 0;      // Latency for static steps
+  bool activated = false;        // Has the step been activated this cycle
+};
+
+/// Execution state for a control construct (polymorphic via variant)
+struct ProcExecState {
+  ProcExecStatus status = ProcExecStatus::Idle;
+
+  /// The MLIR operation this state corresponds to
+  mlir::Operation *op = nullptr;
+
+  /// State specific to the control construct type
+  std::variant<
+    std::monostate,        // Default/empty
+    SeqExecState,          // proc.seq
+    ParExecState,          // proc.par
+    WhileExecState,        // proc.while
+    StaticRepeatExecState, // proc.static_repeat
+    EnableExecState        // proc.enable
+  > state;
+
+  /// Child states (for nested control structures)
+  /// - proc.seq: single active child
+  /// - proc.par: one per parallel branch
+  /// - proc.while: single body child
+  /// - proc.static_repeat: single body child
+  std::vector<std::unique_ptr<ProcExecState>> children;
+
+  /// Create state for a specific control construct
+  static std::unique_ptr<ProcExecState> createFor(mlir::Operation *op);
+
+  /// Check if this state is for a specific operation type
+  template <typename OpT>
+  bool isFor() const { return mlir::isa<OpT>(op); }
+
+  /// Get typed state (returns nullptr if wrong type)
+  template <typename StateT>
+  StateT *getState() { return std::get_if<StateT>(&state); }
+
+  template <typename StateT>
+  const StateT *getState() const { return std::get_if<StateT>(&state); }
+};
+
+/// Root execution state for a proc.rule (direct interpretation)
+struct ProcRuleExecState {
+  std::string ruleName;
+  bool isRunning = false;
+
+  /// State for the control region (nullptr when idle)
+  std::unique_ptr<ProcExecState> controlState;
+
+  /// Reference to the proc.rule operation
+  ProcRuleOp ruleOp;
 };
 
 /// Breakpoint types
@@ -275,6 +432,22 @@ public:
   }
 
   //===--------------------------------------------------------------------===//
+  // Direct Proc Interpretation (Experimental)
+  //===--------------------------------------------------------------------===//
+
+  /// Enable/disable direct proc interpretation.
+  /// When enabled, proc.rule execution uses hierarchical state tracking
+  /// instead of TDCC-based FSM simulation.
+  void setDirectProcInterpretation(bool enabled) {
+    useDirectProcInterpretation_ = enabled;
+  }
+
+  /// Check if direct proc interpretation is enabled.
+  bool isDirectProcInterpretationEnabled() const {
+    return useDirectProcInterpretation_;
+  }
+
+  //===--------------------------------------------------------------------===//
   // Output
   //===--------------------------------------------------------------------===//
 
@@ -325,6 +498,55 @@ private:
 
   /// Execute proc.rule state transition
   void executeProcRuleStep(ProcRuleOp procRule, ProcFSMState &fsm);
+
+  /// Execute proc.rule with TDCC FSM semantics
+  void executeProcRuleTDCC(ProcRuleOp procRule, ProcFSMState &fsm);
+
+  /// Parse TDCC attributes from proc.rule
+  void parseTDCCAttributes(ProcRuleOp procRule, ProcFSMState &fsm);
+
+  /// Evaluate while condition for TDCC
+  bool evaluateTDCCWhileCondition(ProcRuleOp procRule, int64_t condOpId);
+
+  /// Check if all parallel branches are done (for join state)
+  bool areAllBranchesDone(const ProcFSMState &fsm, const TDCCParBlock &parBlock);
+
+  /// Get next state based on current state and conditions
+  uint64_t getNextTDCCState(ProcRuleOp procRule, ProcFSMState &fsm);
+
+  //===--------------------------------------------------------------------===//
+  // Direct Proc Interpretation (New Architecture)
+  //===--------------------------------------------------------------------===//
+
+  /// Execute proc.rule using direct interpretation (not TDCC-based)
+  void executeProcRuleDirect(ProcRuleOp procRule, ProcRuleExecState &execState);
+
+  /// Advance execution state for a control construct by one cycle
+  void advanceState(ProcExecState &state);
+
+  /// Advance proc.seq - sequential composition
+  void advanceSeq(ProcSeqOp seqOp, ProcExecState &state);
+
+  /// Advance proc.par - parallel composition (fork-join)
+  void advancePar(ProcParOp parOp, ProcExecState &state);
+
+  /// Advance proc.while - dynamic loop with condition
+  void advanceWhile(ProcWhileOp whileOp, ProcExecState &state);
+
+  /// Advance proc.static_repeat - static loop with fixed iterations
+  void advanceStaticRepeat(ProcStaticRepeatOp repeatOp, ProcExecState &state);
+
+  /// Advance proc.enable - step activation
+  void advanceEnable(ProcEnableOp enableOp, ProcExecState &state);
+
+  /// Advance proc.if - conditional control (if supported)
+  void advanceIf(ProcIfOp ifOp, ProcExecState &state);
+
+  /// Check if a step is done (for dynamic steps)
+  bool isStepDone(llvm::StringRef stepName);
+
+  /// Activate a step (set go signal, execute body)
+  void activateStep(llvm::StringRef stepName);
 
   /// Get value from SSA value
   InterpValue getValue(mlir::Value value);
@@ -386,7 +608,15 @@ private:
   llvm::DenseMap<mlir::Operation *, unsigned> rulePriorities_;
 
   /// Procedural FSM states (keyed by proc.rule name)
+  /// DEPRECATED: Will be replaced by procExecStates_ for direct interpretation
   llvm::StringMap<ProcFSMState> procFSMStates_;
+
+  /// Procedural execution states for direct interpretation (keyed by proc.rule name)
+  /// New architecture: hierarchical state that mirrors control structure
+  llvm::StringMap<ProcRuleExecState> procExecStates_;
+
+  /// Flag to enable direct proc interpretation (vs legacy TDCC-based)
+  bool useDirectProcInterpretation_ = false;
 
   /// Proc step definitions (keyed by step name)
   llvm::StringMap<ProcStepOp> procSteps_;

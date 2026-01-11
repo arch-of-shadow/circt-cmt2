@@ -98,6 +98,11 @@ static cl::opt<unsigned>
     maxCycles("max-cycles", cl::desc("Maximum cycles to run"),
               cl::init(1000000), cl::cat(mainCategory));
 
+static cl::opt<bool> directProcInterp(
+    "direct-proc",
+    cl::desc("Use direct proc interpretation (experimental - doesn't require TDCC)"),
+    cl::init(false), cl::cat(mainCategory));
+
 //===----------------------------------------------------------------------===//
 // REPL Implementation
 //===----------------------------------------------------------------------===//
@@ -526,6 +531,12 @@ int main(int argc, char **argv) {
 
   // Create interpreter
   Cmt2Interpreter interp(*module, outs());
+
+  // Enable direct proc interpretation if requested
+  if (directProcInterp) {
+    interp.setDirectProcInterpretation(true);
+    outs() << "Direct proc interpretation enabled\n";
+  }
 
   // Find circuit name if not specified
   std::string circuitArg = circuitName;
