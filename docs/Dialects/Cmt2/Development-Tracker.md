@@ -28,10 +28,10 @@
 
 | # | Task | Status | Files |
 |---|------|--------|-------|
-| T1 | Add `SyncTokenType` to Cmt2Types.td | [ ] | `Cmt2Types.td`, `Cmt2Types.cpp` |
-| T2 | Add `TokenValidOp`, `TokenDataOp`, `TokenCreateOp`, `TokenJoinOp` | [ ] | `Cmt2Ops.td`, `Cmt2Ops.cpp` |
-| T3 | Extend `RuleOp` signatures with `tokens_in`/`tokens_out` | [ ] | `Cmt2Ops.td`, `Cmt2Ops.cpp` |
-| T4 | Add verifiers for token operations | [ ] | `Cmt2Ops.cpp` |
+| T1 | Add `SyncTokenType` to Cmt2Types.td | [x] | `Cmt2Types.td`, `Cmt2Types.cpp` |
+| T2 | Add `TokenValidOp`, `TokenDataOp`, `TokenCreateOp`, `TokenJoinOp` | [x] | `Cmt2Ops.td`, `Cmt2Ops.cpp` |
+| T3 | Extend `RuleOp` signatures with `tokens_in`/`tokens_out` | [x] | `Cmt2Ops.td`, `Cmt2Ops.cpp` |
+| T4 | Add verifiers for token operations | [x] | `Cmt2Ops.cpp` |
 
 ### Phase 2: Dataflow Construct
 
@@ -216,7 +216,8 @@ When proc rules are lowered to GAA rules, precedence should be determined by con
 | Timing | 8 | Pass |
 | Integration | 6 | Pass |
 | PyCMT2 | 5 | Pass |
-| **Total** | **39** | **100%** |
+| Token/Dataflow | 1 | Pass |
+| **Total** | **41** | **100%** |
 
 ---
 
