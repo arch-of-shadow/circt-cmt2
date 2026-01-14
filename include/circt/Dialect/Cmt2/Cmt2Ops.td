@@ -579,6 +579,9 @@ def RuleOp : Cmt2Op<
     - `function_type`: The function type of the rule (typically no arguments).
     - `argNames`: Names of the shared input arguments (typically empty for rules).
     - `bodyResNames`: Names of the body region results.
+    - `token_in_types`: Types of input tokens for synchronization.
+    - `token_in_names`: Names of input token arguments.
+    - `token_out_types`: Types of output tokens produced by the rule.
 
     Results: None
 
@@ -588,7 +591,15 @@ def RuleOp : Cmt2Op<
 
     Assembly format:
     ```mlir
+    // Basic rule without tokens
     cmt2.rule @rule1() -> (i1) { guard } { body }
+
+    // Rule with token inputs and outputs
+    cmt2.rule @consumer(%data_arg: !firrtl.uint<8>)
+        tokens_in(%tok_a: !cmt2.sync_token<data = !firrtl.uint<32>>,
+                  %tok_b: !cmt2.sync_token<data = !firrtl.uint<16>>)
+        tokens_out(!cmt2.sync_token<data = !firrtl.uint<32>>)
+        -> (!firrtl.uint<8>) { guard } { body }
     ```
   }];
   let regions = (region
@@ -601,14 +612,58 @@ def RuleOp : Cmt2Op<
     StrArrayAttr:$argNames,
     StrArrayAttr:$bodyResNames,
     OptionalAttr<ArrayAttr>:$arg_attrs,
-    OptionalAttr<ArrayAttr>:$res_attrs
+    OptionalAttr<ArrayAttr>:$res_attrs,
+    // Token-based synchronization for pipelined dataflow
+    OptionalAttr<TypeArrayAttr>:$token_in_types,
+    OptionalAttr<StrArrayAttr>:$token_in_names,
+    OptionalAttr<TypeArrayAttr>:$token_out_types
   );
 
   let hasCustomAssemblyFormat = 1;
 
+  // Backward-compatible builder (without token attributes)
+  let builders = [
+    OpBuilder<(ins "::mlir::StringAttr":$sym_name,
+                   "::mlir::TypeAttr":$function_type,
+                   "::mlir::ArrayAttr":$argNames,
+                   "::mlir::ArrayAttr":$bodyResNames,
+                   "::mlir::ArrayAttr":$arg_attrs,
+                   "::mlir::ArrayAttr":$res_attrs), [{
+      build($_builder, $_state, sym_name, function_type, argNames, bodyResNames,
+            arg_attrs, res_attrs,
+            /*token_in_types=*/nullptr, /*token_in_names=*/nullptr,
+            /*token_out_types=*/nullptr);
+    }]>
+  ];
+
   let extraClassDeclaration = [{
     void getAsmBlockArgumentNames(mlir::Region &region,
                                   mlir::OpAsmSetValueNameFn setNameFn);
+
+    /// Returns true if this rule has token inputs
+    bool hasTokenInputs() {
+      return getTokenInTypes() && !getTokenInTypes()->empty();
+    }
+
+    /// Returns true if this rule has token outputs
+    bool hasTokenOutputs() {
+      return getTokenOutTypes() && !getTokenOutTypes()->empty();
+    }
+
+    /// Get the number of token input arguments
+    size_t getNumTokenInputs() {
+      return getTokenInTypes() ? getTokenInTypes()->size() : 0;
+    }
+
+    /// Get the number of token output types
+    size_t getNumTokenOutputs() {
+      return getTokenOutTypes() ? getTokenOutTypes()->size() : 0;
+    }
+
+    /// Get all block arguments (regular args + token args)
+    size_t getNumAllBlockArgs() {
+      return getFunctionType().getNumInputs() + getNumTokenInputs();
+    }
   }];
 
   let extraClassDefinition = [{
@@ -1761,6 +1816,121 @@ def ProcMethodOp : Cmt2Op<
       return getLatencyOrZero();
     }
   }];
+}
+
+//===----------------------------------------------------------------------===//
+// Token Operations for Pipelined Dataflow
+//===----------------------------------------------------------------------===//
+
+def TokenValidOp : Cmt2Op<"token.valid", [Pure]> {
+  let summary = "Extract valid signal from a sync token";
+  let description = [{
+    The `cmt2.token.valid` operation extracts the valid signal from a
+    synchronization token. This is typically used in rule guards to
+    check if a token is ready.
+
+    Example:
+    ```mlir
+    %valid = cmt2.token.valid %tok : !cmt2.sync_token<data = !firrtl.uint<32>> -> !firrtl.uint<1>
+    ```
+  }];
+
+  let arguments = (ins AnySyncTokenType:$token);
+  let results = (outs FIRRTLBaseType:$valid);
+
+  let assemblyFormat = [{
+    $token attr-dict `:` qualified(type($token)) `->` qualified(type($valid))
+  }];
+
+  let hasVerifier = 1;
+}
+
+def TokenDataOp : Cmt2Op<"token.data", [Pure]> {
+  let summary = "Extract data payload from a sync token";
+  let description = [{
+    The `cmt2.token.data` operation extracts the data payload from a
+    synchronization token. This should only be used in rule bodies
+    after the guard has ensured the token is valid.
+
+    The token must carry data (i.e., have a dataType parameter).
+
+    Example:
+    ```mlir
+    %data = cmt2.token.data %tok : !cmt2.sync_token<data = !firrtl.uint<32>> -> !firrtl.uint<32>
+    ```
+  }];
+
+  let arguments = (ins AnySyncTokenType:$token);
+  let results = (outs AnyType:$data);
+
+  let assemblyFormat = [{
+    $token attr-dict `:` qualified(type($token)) `->` qualified(type($data))
+  }];
+
+  let hasVerifier = 1;
+}
+
+def TokenCreateOp : Cmt2Op<"token.create", [Pure]> {
+  let summary = "Create a sync token with optional data payload";
+  let description = [{
+    The `cmt2.token.create` operation creates a new synchronization token,
+    optionally carrying a data payload. The token mode (LS/LI) is specified
+    in the result type.
+
+    Examples:
+    ```mlir
+    // Token without data
+    %tok = cmt2.token.create : !cmt2.sync_token
+
+    // Token with data
+    %tok = cmt2.token.create %data : !firrtl.uint<32> -> !cmt2.sync_token<data = !firrtl.uint<32>>
+    ```
+  }];
+
+  let arguments = (ins Optional<AnyType>:$data);
+  let results = (outs AnySyncTokenType:$token);
+
+  let hasCustomAssemblyFormat = 1;
+  let hasVerifier = 1;
+
+  let builders = [
+    // Token without data
+    OpBuilder<(ins "::mlir::Type":$tokenType), [{
+      build($_builder, $_state, tokenType, /*data=*/mlir::Value());
+    }]>,
+    // Token with data
+    OpBuilder<(ins "::mlir::Type":$tokenType, "::mlir::Value":$data), [{
+      build($_builder, $_state, tokenType, data);
+    }]>
+  ];
+}
+
+def TokenJoinOp : Cmt2Op<"token.join", [Pure]> {
+  let summary = "Join multiple sync tokens into one";
+  let description = [{
+    The `cmt2.token.join` operation synchronizes multiple tokens into a
+    single output token. All input tokens must be valid for the output
+    to be valid.
+
+    Mode inference: if any input token is LI (latency-insensitive),
+    the output token is also LI.
+
+    Example:
+    ```mlir
+    %joined = cmt2.token.join %tok_a, %tok_b : (!cmt2.sync_token<data = !firrtl.uint<32>>,
+                                                 !cmt2.sync_token<data = !firrtl.uint<16>>)
+                                              -> !cmt2.sync_token
+    ```
+  }];
+
+  let arguments = (ins Variadic<AnySyncTokenType>:$tokens);
+  let results = (outs AnySyncTokenType:$result);
+
+  let assemblyFormat = [{
+    $tokens attr-dict `:` functional-type($tokens, $result)
+  }];
+
+  let hasVerifier = 1;
 }
 
 #endif // CIRCT_DIALECT_Cmt2_Cmt2OPS_TD

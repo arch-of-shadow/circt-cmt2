@@ -13,6 +13,9 @@
 #ifndef CIRCT_DIALECT_Cmt2_TYPES_H
 #define CIRCT_DIALECT_Cmt2_TYPES_H
 
+#include "circt/Dialect/Cmt2/Cmt2Attributes.h"
+#include "mlir/IR/Types.h"
+
 #define GET_TYPEDEF_CLASSES
 #include "circt/Dialect/Cmt2/Cmt2Types.h.inc"
 

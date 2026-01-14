@@ -10,6 +10,7 @@
 //
 //===----------------------------------------------------------------------===//
 #include "circt/Dialect/Cmt2/Cmt2Ops.h"
+#include "circt/Dialect/Cmt2/Cmt2Types.h"
 #include "circt/Dialect/FIRRTL/FIRRTLTypes.h"
 #include "circt/Dialect/HW/HWOps.h"
 #include "circt/Dialect/HW/HWTypes.h"
@@ -320,19 +321,225 @@ static void printFunctionLikeOp(OpAsmPrinter &p, Operation *op,
 //===----------------------------------------------------------------------===//
 
 ParseResult RuleOp::parse(OpAsmParser &parser, OperationState &result) {
-  return parseFunctionLikeOp(parser, result);
+  auto builder = parser.getBuilder();
+
+  // Parse the symbol name
+  StringAttr nameAttr;
+  if (parser.parseSymbolName(nameAttr, SymbolTable::getSymbolAttrName(),
+                             result.attributes))
+    return failure();
+
+  // Parse the regular argument list
+  SmallVector<OpAsmParser::Argument> args;
+  if (parser.parseArgumentList(args, OpAsmParser::Delimiter::OptionalParen,
+                                /*allowType=*/true, /*allowAttrs=*/false))
+    return failure();
+
+  // Extract argument names and types
+  SmallVector<StringRef> argNames;
+  SmallVector<Type> argTypes;
+  for (auto &arg : args) {
+    argNames.push_back(arg.ssaName.name.drop_front());
+    argTypes.push_back(arg.type);
+  }
+
+  // Parse optional tokens_in
+  SmallVector<OpAsmParser::Argument> tokenArgs;
+  SmallVector<StringRef> tokenInNames;
+  SmallVector<Type> tokenInTypes;
+  if (succeeded(parser.parseOptionalKeyword("tokens_in"))) {
+    if (parser.parseArgumentList(tokenArgs, OpAsmParser::Delimiter::Paren,
+                                  /*allowType=*/true, /*allowAttrs=*/false))
+      return failure();
+    for (auto &arg : tokenArgs) {
+      tokenInNames.push_back(arg.ssaName.name.drop_front());
+      tokenInTypes.push_back(arg.type);
+    }
+  }
+
+  // Parse optional tokens_out
+  SmallVector<Type> tokenOutTypes;
+  if (succeeded(parser.parseOptionalKeyword("tokens_out"))) {
+    if (parser.parseLParen())
+      return failure();
+    if (parser.parseOptionalRParen()) {
+      if (parser.parseTypeList(tokenOutTypes) || parser.parseRParen())
+        return failure();
+    }
+  }
+
+  // Parse optional `->` and result types (for body region)
+  SmallVector<Type> bodyResTypes;
+  if (succeeded(parser.parseOptionalArrow())) {
+    if (parser.parseLParen())
+      return failure();
+    if (parser.parseOptionalRParen()) {
+      if (parser.parseTypeList(bodyResTypes) || parser.parseRParen())
+        return failure();
+    }
+  }
+
+  // Store argument names and function type
+  result.addAttribute("argNames", builder.getStrArrayAttr(argNames));
+
+  // The function_type represents the shared arguments
+  auto funcType = builder.getFunctionType(argTypes, bodyResTypes);
+  result.addAttribute("function_type", TypeAttr::get(funcType));
+
+  // Initialize empty bodyResNames
+  SmallVector<Attribute> resNames;
+  for (size_t i = 0; i < bodyResTypes.size(); ++i)
+    resNames.push_back(builder.getStringAttr("res" + std::to_string(i)));
+  result.addAttribute("bodyResNames", builder.getArrayAttr(resNames));
+
+  // Store token attributes if present
+  if (!tokenInTypes.empty()) {
+    result.addAttribute("token_in_types", builder.getTypeArrayAttr(tokenInTypes));
+    result.addAttribute("token_in_names", builder.getStrArrayAttr(tokenInNames));
+  }
+  if (!tokenOutTypes.empty()) {
+    result.addAttribute("token_out_types", builder.getTypeArrayAttr(tokenOutTypes));
+  }
+
+  // Parse optional attribute dict
+  if (parser.parseOptionalAttrDictWithKeyword(result.attributes))
+    return failure();
+
+  // Combine regular args and token args for region parsing
+  SmallVector<OpAsmParser::Argument> allArgs;
+  allArgs.append(args.begin(), args.end());
+  allArgs.append(tokenArgs.begin(), tokenArgs.end());
+
+  // All argument types for block creation
+  SmallVector<Type> allArgTypes;
+  allArgTypes.append(argTypes.begin(), argTypes.end());
+  allArgTypes.append(tokenInTypes.begin(), tokenInTypes.end());
+
+  // Parse guard region
+  auto *guardRegion = result.addRegion();
+  if (parser.parseRegion(*guardRegion, allArgs))
+    return failure();
+
+  // Parse body region
+  auto *bodyRegion = result.addRegion();
+  if (parser.parseRegion(*bodyRegion, allArgs))
+    return failure();
+
+  // Ensure both regions have blocks with implicit terminators
+  OpBuilder opBuilder(builder.getContext());
+
+  // Handle guard region
+  if (guardRegion->empty()) {
+    Block *guardBlock = new Block();
+    guardBlock->addArguments(
+        allArgTypes, SmallVector<Location>(allArgTypes.size(), result.location));
+    guardRegion->push_back(guardBlock);
+  }
+
+  Block &guardBlock = guardRegion->front();
+  if (guardBlock.empty() || !guardBlock.back().hasTrait<OpTrait::IsTerminator>()) {
+    opBuilder.setInsertionPointToEnd(&guardBlock);
+    opBuilder.create<ReturnOp>(result.location);
+  }
+
+  // Handle body region
+  if (bodyRegion->empty()) {
+    Block *bodyBlock = new Block();
+    bodyBlock->addArguments(
+        allArgTypes, SmallVector<Location>(allArgTypes.size(), result.location));
+    bodyRegion->push_back(bodyBlock);
+  }
+
+  Block &bodyBlock = bodyRegion->front();
+  if (bodyBlock.empty() || !bodyBlock.back().hasTrait<OpTrait::IsTerminator>()) {
+    opBuilder.setInsertionPointToEnd(&bodyBlock);
+    opBuilder.create<ReturnOp>(result.location);
+  }
+
+  return success();
 }
 
 void RuleOp::print(OpAsmPrinter &p) {
   p << ' ';
   p.printSymbolName(getSymName());
-  printFunctionLikeOp(p, *this, getArgNames(), getFunctionType(),
-                      getGuard(), getBody());
+
+  // Get types
+  auto argTypes = getFunctionType().getInputs();
+  auto resTypes = getFunctionType().getResults();
+  Block &guardBlock = getGuard().front();
+
+  // Print regular arguments
+  p << '(';
+  size_t numRegularArgs = argTypes.size();
+  for (size_t i = 0; i < numRegularArgs; ++i) {
+    if (i > 0) p << ", ";
+    p.printOperand(guardBlock.getArgument(i));
+    p << ": ";
+    p.printType(argTypes[i]);
+  }
+  p << ')';
+
+  // Print tokens_in if present
+  if (hasTokenInputs()) {
+    p << " tokens_in(";
+    auto tokenInTypes = getTokenInTypes();
+    for (size_t i = 0; i < getNumTokenInputs(); ++i) {
+      if (i > 0) p << ", ";
+      p.printOperand(guardBlock.getArgument(numRegularArgs + i));
+      p << ": ";
+      p.printType(cast<TypeAttr>((*tokenInTypes)[i]).getValue());
+    }
+    p << ')';
+  }
+
+  // Print tokens_out if present
+  if (hasTokenOutputs()) {
+    p << " tokens_out(";
+    auto tokenOutTypes = getTokenOutTypes();
+    llvm::interleaveComma(*tokenOutTypes, p, [&](Attribute attr) {
+      p.printType(cast<TypeAttr>(attr).getValue());
+    });
+    p << ')';
+  }
+
+  // Print result types
+  p << " -> (";
+  llvm::interleaveComma(resTypes, p, [&](Type type) {
+    p.printType(type);
+  });
+  p << ')';
+
+  // Print attributes (excluding the ones we handle specially)
+  SmallVector<StringRef> elidedAttrs = {"sym_name", "function_type", "argNames",
+                                         "guardResName", "bodyResNames",
+                                         "token_in_types", "token_in_names",
+                                         "token_out_types"};
+  p.printOptionalAttrDictWithKeyword((*this)->getAttrs(), elidedAttrs);
+
+  // Print regions
+  p << ' ';
+  p.printRegion(getGuard(), /*printEntryBlockArgs=*/false);
+  p << ' ';
+  p.printRegion(getBody(), /*printEntryBlockArgs=*/false);
 }
 
 void RuleOp::getAsmBlockArgumentNames(Region &region,
                                        OpAsmSetValueNameFn setNameFn) {
+  // Set names for regular arguments
   getAsmBlockArgumentNamesImpl(getArgNames(), region, setNameFn);
+
+  // Set names for token arguments
+  if (hasTokenInputs()) {
+    auto tokenNames = getTokenInNames();
+    size_t numRegularArgs = getFunctionType().getNumInputs();
+    Block &block = region.front();
+    for (size_t i = 0; i < getNumTokenInputs(); ++i) {
+      if (numRegularArgs + i < block.getNumArguments()) {
+        setNameFn(block.getArgument(numRegularArgs + i),
+                  cast<StringAttr>((*tokenNames)[i]).getValue());
+      }
+    }
+  }
 }
 
 // Cmt2FunctionLike methods for RuleOp
@@ -1247,6 +1454,103 @@ LogicalResult ProcStaticStepOp::verify() {
     }
   }
 
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// Token Operations
+//===----------------------------------------------------------------------===//
+
+LogicalResult TokenValidOp::verify() {
+  // The result should be a 1-bit uint
+  auto resultType = getValid().getType();
+  if (auto uintType = dyn_cast<firrtl::UIntType>(resultType)) {
+    if (uintType.getWidth().has_value() && uintType.getWidth().value() != 1) {
+      return emitOpError("result must be a 1-bit uint, got width ")
+             << uintType.getWidth().value();
+    }
+  }
+  return success();
+}
+
+LogicalResult TokenDataOp::verify() {
+  auto tokenType = cast<SyncTokenType>(getToken().getType());
+  if (!tokenType.hasData()) {
+    return emitOpError("token must carry data, but got ") << tokenType;
+  }
+  // Check that the result type matches the token's data type
+  if (tokenType.getDataType() != getData().getType()) {
+    return emitOpError("result type ")
+           << getData().getType() << " must match token data type "
+           << tokenType.getDataType();
+  }
+  return success();
+}
+
+LogicalResult TokenCreateOp::verify() {
+  auto tokenType = cast<SyncTokenType>(getToken().getType());
+  if (getData()) {
+    // If data is provided, token must have data type
+    if (!tokenType.hasData()) {
+      return emitOpError("token type must have data when data operand is provided");
+    }
+    // Check that data type matches
+    if (tokenType.getDataType() != getData().getType()) {
+      return emitOpError("data type ")
+             << getData().getType() << " must match token data type "
+             << tokenType.getDataType();
+    }
+  } else {
+    // If no data provided, token should not have data type
+    if (tokenType.hasData()) {
+      return emitOpError("token type has data but no data operand provided");
+    }
+  }
+  return success();
+}
+
+// Custom assembly format for TokenCreateOp
+// Without data: %tok = cmt2.token.create : !cmt2.sync_token
+// With data: %tok = cmt2.token.create %data : !firrtl.uint<32> -> !cmt2.sync_token<data = !firrtl.uint<32>>
+ParseResult TokenCreateOp::parse(OpAsmParser &parser, OperationState &result) {
+  OpAsmParser::UnresolvedOperand dataOperand;
+  Type dataType;
+  Type tokenType;
+
+  // Try to parse an operand
+  auto parseOperandResult = parser.parseOptionalOperand(dataOperand);
+  if (parseOperandResult.has_value()) {
+    if (parser.parseColonType(dataType) || parser.parseArrow() ||
+        parser.parseType(tokenType)) {
+      return failure();
+    }
+    if (parser.resolveOperand(dataOperand, dataType, result.operands)) {
+      return failure();
+    }
+  } else {
+    if (parser.parseColonType(tokenType)) {
+      return failure();
+    }
+  }
+
+  result.addTypes(tokenType);
+  return success();
+}
+
+void TokenCreateOp::print(OpAsmPrinter &p) {
+  p << " ";
+  if (getData()) {
+    p << getData() << " : " << getData().getType() << " -> ";
+  } else {
+    p << ": ";
+  }
+  p << getToken().getType();
+}
+
+LogicalResult TokenJoinOp::verify() {
+  if (getTokens().empty()) {
+    return emitOpError("must have at least one input token");
+  }
   return success();
 }
 

@@ -178,6 +178,18 @@ def IntervalAttr : AttrDef<Cmt2Dialect, "Interval"> {
 }
 
 //===----------------------------------------------------------------------===//
+// Token Mode Enum (for SyncToken)
+//===----------------------------------------------------------------------===//
+
+/// TokenMode enum for synchronization token timing mode
+def Cmt2TokenMode : I32EnumAttr<"TokenMode", "Token timing mode", [
+  I32EnumAttrCase<"LS", 0, "ls">,   // Latency-sensitive: fixed timing, shift register
+  I32EnumAttrCase<"LI", 1, "li">,   // Latency-insensitive: variable timing, FIFO
+]> {
+  let cppNamespace = "::circt::cmt2";
+}
+
+//===----------------------------------------------------------------------===//
 // Port Kind Enum and Attributes
 //===----------------------------------------------------------------------===//
 
