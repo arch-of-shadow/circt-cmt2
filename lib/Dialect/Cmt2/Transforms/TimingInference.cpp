@@ -13,6 +13,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "circt/Dialect/Cmt2/Analysis/TimingAnalysis.h"
+#include "circt/Dialect/Cmt2/Analysis/TokenAnalysis.h"
 #include "circt/Dialect/Cmt2/Cmt2Ops.h"
 #include "circt/Dialect/Cmt2/Cmt2Passes.h"
 #include "mlir/IR/Builders.h"
@@ -66,6 +67,12 @@ private:
   /// Check if a method's body has deterministic timing.
   std::optional<int64_t> computeMethodLatency(ProcMethodOp method,
                                                TimingAnalysis &analysis);
+
+  /// Process a proc.dataflow for timing inference.
+  void processDataflow(ProcDataflowOp dataflow);
+
+  /// Infer timing for dataflow tasks based on token dependencies.
+  void inferDataflowTaskTiming(ProcDataflowOp dataflow);
 };
 
 } // end anonymous namespace
@@ -237,6 +244,137 @@ void TimingInferencePass::inferMethodTiming(ProcMethodOp method,
 }
 
 //===----------------------------------------------------------------------===//
+// Dataflow Timing Inference
+//===----------------------------------------------------------------------===//
+
+void TimingInferencePass::inferDataflowTaskTiming(ProcDataflowOp dataflow) {
+  OpBuilder builder(dataflow.getContext());
+
+  // Build a map from task name to task op for easy lookup
+  llvm::DenseMap<StringRef, DataflowTaskOp> taskMap;
+  dataflow.walk([&](DataflowTaskOp task) {
+    taskMap[task.getSymName()] = task;
+  });
+
+  // Track inferred timing per task
+  llvm::DenseMap<DataflowTaskOp, int64_t> inferredStart;
+  llvm::DenseMap<DataflowTaskOp, int64_t> inferredEnd;
+
+  // Initialize tasks without token inputs at cycle 0
+  dataflow.walk([&](DataflowTaskOp task) {
+    if (task.getTokenInputs().empty()) {
+      // Source task - starts at cycle 0
+      if (!task.getTiming()) {
+        inferredStart[task] = 0;
+        inferredEnd[task] = 1; // Default 1-cycle latency
+      } else {
+        auto timing = task.getTiming();
+        inferredStart[task] = timing->getStart();
+        inferredEnd[task] = timing->getEnd();
+      }
+    }
+  });
+
+  // Propagate timing through token dependencies (iterate until fixpoint)
+  bool changed = true;
+  int maxIterations = 100;
+  int iteration = 0;
+
+  while (changed && iteration < maxIterations) {
+    changed = false;
+    iteration++;
+
+    dataflow.walk([&](DataflowTaskOp task) {
+      if (task.getTokenInputs().empty())
+        return; // Already handled
+
+      // Check if all input token producers have timing
+      int64_t maxInputEnd = 0;
+      bool allInputsKnown = true;
+
+      for (Value tokenInput : task.getTokenInputs()) {
+        Operation *producer = tokenInput.getDefiningOp();
+        if (!producer) {
+          allInputsKnown = false;
+          break;
+        }
+
+        // Find the producer task
+        DataflowTaskOp producerTask = dyn_cast<DataflowTaskOp>(producer);
+        if (!producerTask) {
+          // Could be from elsewhere, use timing attribute if available
+          if (auto timing = producer->getAttrOfType<TimingIntervalAttr>("timing")) {
+            maxInputEnd = std::max(maxInputEnd, timing.getEnd());
+          } else {
+            allInputsKnown = false;
+            break;
+          }
+          continue;
+        }
+
+        // Check if producer has inferred timing
+        auto it = inferredEnd.find(producerTask);
+        if (it == inferredEnd.end()) {
+          allInputsKnown = false;
+          break;
+        }
+        maxInputEnd = std::max(maxInputEnd, it->second);
+      }
+
+      if (!allInputsKnown)
+        return;
+
+      // Infer timing for this task
+      int64_t taskLatency = 1; // Default 1-cycle latency
+
+      // Check if task already has timing
+      if (auto existingTiming = task.getTiming()) {
+        taskLatency = existingTiming->getEnd() - existingTiming->getStart();
+      }
+
+      int64_t newStart = maxInputEnd;
+      int64_t newEnd = newStart + taskLatency;
+
+      // Update if changed
+      auto startIt = inferredStart.find(task);
+      if (startIt == inferredStart.end() || startIt->second != newStart) {
+        inferredStart[task] = newStart;
+        inferredEnd[task] = newEnd;
+        changed = true;
+      }
+    });
+  }
+
+  // Apply inferred timing to tasks that don't have it
+  dataflow.walk([&](DataflowTaskOp task) {
+    if (task.getTiming())
+      return; // Already has timing
+
+    auto startIt = inferredStart.find(task);
+    auto endIt = inferredEnd.find(task);
+    if (startIt == inferredStart.end() || endIt == inferredEnd.end())
+      return;
+
+    // Set timing attribute
+    auto timing = TimingIntervalAttr::get(builder.getContext(),
+                                           startIt->second, endIt->second);
+    task->setAttr("timing", timing);
+
+    LLVM_DEBUG(llvm::dbgs() << "  Inferred timing for task @" << task.getSymName()
+                            << ": [" << startIt->second << ", " << endIt->second
+                            << ")\n");
+  });
+}
+
+void TimingInferencePass::processDataflow(ProcDataflowOp dataflow) {
+  LLVM_DEBUG(llvm::dbgs() << "Processing dataflow @" << dataflow.getSymName()
+                          << "\n");
+
+  // Infer timing for tasks
+  inferDataflowTaskTiming(dataflow);
+}
+
+//===----------------------------------------------------------------------===//
 // Module Processing
 //===----------------------------------------------------------------------===//
 
@@ -285,6 +423,11 @@ void TimingInferencePass::runOnOperation() {
   for (auto &op : circuit.getBodyRegion().front()) {
     if (auto module = dyn_cast<cmt2::ModuleOp>(op)) {
       processModule(module, analysis);
+
+      // Also process any proc.dataflow operations in this module
+      module.walk([&](ProcDataflowOp dataflow) {
+        processDataflow(dataflow);
+      });
     }
   }
 }

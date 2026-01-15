@@ -5,6 +5,9 @@ add_circt_dialect_library(CIRCTCmt2Transforms
   CompileInvoke.cpp
   CompileStatic.cpp
   ControlCollapsing.cpp
+  DataflowLowering.cpp
+  TokenLowering.cpp
+  StallControllerGen.cpp
   Diagnostics.cpp
   SimplifyStaticGuards.cpp
   StaticFSMAllocation.cpp
