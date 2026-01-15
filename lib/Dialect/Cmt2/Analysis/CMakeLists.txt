@@ -1,6 +1,9 @@
 add_circt_library(CIRCTCmt2Analysis
   TimingAnalysis.cpp
   TimingCompatibility.cpp
+  TokenAnalysis.cpp
+  FIFODepthAnalysis.cpp
+  DeadlockAnalysis.cpp
 
   ADDITIONAL_HEADER_DIRS
   ${CIRCT_MAIN_INCLUDE_DIR}/circt/Dialect/Cmt2/Analysis
