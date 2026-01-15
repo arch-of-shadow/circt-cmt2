@@ -126,6 +126,9 @@ declare_mlir_python_sources(CIRCTBindingsPythonSources.PyCmt2
     pycmt2/testbench.py
     pycmt2/diagnostics.py
     pycmt2/interpreter.py
+    pycmt2/dataflow_builders.py
+    pycmt2/pipeline_builders.py
+    pycmt2/timing.py
 )
 
 ################################################################################

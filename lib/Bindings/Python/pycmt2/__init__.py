@@ -42,6 +42,7 @@ from .types import (
     Reset,
     AsyncReset,
     Bool,
+    SyncToken,
 )
 
 from .signals import Signal
@@ -95,6 +96,34 @@ from .interpreter import (
     CycleTrace,
 )
 
+from .dataflow_builders import (
+    DataflowBuilder,
+    TaskBuilder,
+    Token,
+    pipeline_dataflow,
+)
+
+from .pipeline_builders import (
+    Pipeline,
+    ForkJoinPipeline,
+    PipelineStage,
+)
+
+from .timing import (
+    TimingInterval,
+    timing_interval,
+    single_cycle,
+    pipeline_timing,
+    interleaved_timing,
+    total_latency,
+    validate_timing,
+    timing_to_attr_tuple,
+    timing_list_to_tuples,
+    arg_timing,
+    result_timing,
+    IMMEDIATE,
+)
+
 __all__ = [
     # Types
     "Cmt2Type",
@@ -109,11 +138,34 @@ __all__ = [
     "Reset",
     "AsyncReset",
     "Bool",
+    "SyncToken",
     # Signals
     "Signal",
     # Builders
     "Circuit",
     "ModuleBuilder",
+    # Dataflow
+    "DataflowBuilder",
+    "TaskBuilder",
+    "Token",
+    "pipeline_dataflow",
+    # Pipeline shortcuts
+    "Pipeline",
+    "ForkJoinPipeline",
+    "PipelineStage",
+    # Timing helpers
+    "TimingInterval",
+    "timing_interval",
+    "single_cycle",
+    "pipeline_timing",
+    "interleaved_timing",
+    "total_latency",
+    "validate_timing",
+    "timing_to_attr_tuple",
+    "timing_list_to_tuples",
+    "arg_timing",
+    "result_timing",
+    "IMMEDIATE",
     # References
     "MethodRef",
     "ValueRef",

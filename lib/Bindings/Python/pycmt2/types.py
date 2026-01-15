@@ -166,6 +166,81 @@ class Vector(Cmt2Type):
         return f"Vector({self.element}, {self.size})"
 
 
+@dataclass(frozen=True)
+class SyncToken(Cmt2Type):
+    """Synchronization token type for dataflow pipelines.
+
+    Tokens carry optional data payloads and synchronize pipeline stages.
+    They support two modes:
+    - LS (Latency Sensitive): Implemented as shift registers
+    - LI (Latency Insensitive): Implemented as FIFOs
+
+    Args:
+        data_type: Optional data type carried by the token (default: None for void token)
+        mode: Token mode - "ls" or "li" (default: "ls")
+
+    Example:
+        # Token without data
+        void_token = SyncToken()
+
+        # Token carrying 32-bit data
+        data_token = SyncToken(UInt(32))
+
+        # Latency-insensitive token
+        li_token = SyncToken(UInt(32), mode="li")
+    """
+
+    data_type: Cmt2Type | None = None
+    mode: str = "ls"  # "ls" or "li"
+
+    def __post_init__(self):
+        if self.mode not in ("ls", "li"):
+            raise ValueError(f"Mode must be 'ls' or 'li', got '{self.mode}'")
+
+    def to_firrtl_type(self, ctx: MlirContext) -> MlirType:
+        """Convert to CMT2 SyncTokenType MLIR type."""
+        from circt.ir import Type
+
+        # Build type string
+        parts = []
+        if self.data_type is not None:
+            data_mlir = self.data_type.to_firrtl_type(ctx)
+            parts.append(f"data = {data_mlir}")
+        if self.mode == "li":
+            parts.append("mode = li")
+
+        if parts:
+            type_str = f"!cmt2.sync_token<{', '.join(parts)}>"
+        else:
+            type_str = "!cmt2.sync_token"
+
+        return Type.parse(type_str, context=ctx)
+
+    def bit_width(self) -> int:
+        """Bit width of the data payload (1 for void token)."""
+        if self.data_type is None:
+            return 1  # Just valid bit
+        return self.data_type.bit_width()
+
+    def has_data(self) -> bool:
+        """Return True if this token carries data."""
+        return self.data_type is not None
+
+    def is_latency_insensitive(self) -> bool:
+        """Return True if this is a latency-insensitive token."""
+        return self.mode == "li"
+
+    def __repr__(self) -> str:
+        parts = []
+        if self.data_type is not None:
+            parts.append(f"data={self.data_type}")
+        if self.mode != "ls":
+            parts.append(f"mode={self.mode}")
+        if parts:
+            return f"SyncToken({', '.join(parts)})"
+        return "SyncToken()"
+
+
 # Singleton instances for common types
 Clock = ClockType()
 Reset = ResetType()
