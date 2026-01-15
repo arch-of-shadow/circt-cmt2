@@ -1554,6 +1554,352 @@ LogicalResult TokenJoinOp::verify() {
   return success();
 }
 
+//===----------------------------------------------------------------------===//
+// Dataflow Operations
+//===----------------------------------------------------------------------===//
+
+//===----------------------------------------------------------------------===//
+// ProcDataflowOp
+//===----------------------------------------------------------------------===//
+
+ParseResult ProcDataflowOp::parse(OpAsmParser &parser, OperationState &result) {
+  auto builder = parser.getBuilder();
+
+  // Parse the symbol name
+  StringAttr nameAttr;
+  if (parser.parseSymbolName(nameAttr, mlir::SymbolTable::getSymbolAttrName(),
+                             result.attributes))
+    return failure();
+
+  // Parse the argument list
+  SmallVector<OpAsmParser::Argument> args;
+  if (parser.parseArgumentList(args, OpAsmParser::Delimiter::OptionalParen,
+                                /*allowType=*/true, /*allowAttrs=*/false))
+    return failure();
+
+  // Extract argument names and types
+  SmallVector<StringRef> argNames;
+  SmallVector<Type> argTypes;
+  for (auto &arg : args) {
+    argNames.push_back(arg.ssaName.name.drop_front());
+    argTypes.push_back(arg.type);
+  }
+
+  // Parse optional `->` and result types
+  SmallVector<Type> resTypes;
+  if (succeeded(parser.parseOptionalArrow())) {
+    if (parser.parseLParen())
+      return failure();
+    if (parser.parseOptionalRParen()) {
+      if (parser.parseTypeList(resTypes) || parser.parseRParen())
+        return failure();
+    }
+  }
+
+  // Store attributes
+  result.addAttribute("argNames", builder.getStrArrayAttr(argNames));
+  auto funcType = builder.getFunctionType(argTypes, resTypes);
+  result.addAttribute("function_type", TypeAttr::get(funcType));
+
+  // Parse optional attribute dict
+  if (parser.parseOptionalAttrDictWithKeyword(result.attributes))
+    return failure();
+
+  // Parse the body region
+  auto *bodyRegion = result.addRegion();
+  if (parser.parseRegion(*bodyRegion, args))
+    return failure();
+
+  return success();
+}
+
+void ProcDataflowOp::print(OpAsmPrinter &p) {
+  p << ' ';
+  p.printSymbolName(getSymName());
+
+  auto funcType = getFunctionType();
+  auto argTypes = funcType.getInputs();
+  auto resTypes = funcType.getResults();
+
+  // Print arguments
+  if (!argTypes.empty()) {
+    Block &bodyBlock = getBody().front();
+    p << '(';
+    llvm::interleaveComma(llvm::zip(getArgNames(), bodyBlock.getArguments()), p,
+                         [&](auto tuple) {
+                           auto [name, arg] = tuple;
+                           p.printOperand(arg);
+                           p << ": ";
+                           p.printType(arg.getType());
+                         });
+    p << ')';
+  } else {
+    p << "()";
+  }
+
+  // Print result types
+  if (!resTypes.empty()) {
+    p << " -> (";
+    llvm::interleaveComma(resTypes, p, [&](Type type) {
+      p.printType(type);
+    });
+    p << ')';
+  }
+
+  // Print attributes
+  SmallVector<StringRef> elidedAttrs = {"sym_name", "function_type", "argNames"};
+  p.printOptionalAttrDictWithKeyword((*this)->getAttrs(), elidedAttrs);
+
+  // Print body
+  p << ' ';
+  p.printRegion(getBody(), /*printEntryBlockArgs=*/false);
+}
+
+void ProcDataflowOp::getAsmBlockArgumentNames(Region &region,
+                                               OpAsmSetValueNameFn setNameFn) {
+  getAsmBlockArgumentNamesImpl(getArgNames(), region, setNameFn);
+}
+
+LogicalResult ProcDataflowOp::verify() {
+  // Check that the body is not empty
+  if (getBody().empty()) {
+    return emitOpError("body region must not be empty");
+  }
+
+  // Check that interval is positive if specified
+  if (auto interval = getInterval()) {
+    if (*interval <= 0) {
+      return emitOpError("interval must be positive, got ") << *interval;
+    }
+  }
+
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// DataflowTaskOp
+//===----------------------------------------------------------------------===//
+
+ParseResult DataflowTaskOp::parse(OpAsmParser &parser, OperationState &result) {
+  auto builder = parser.getBuilder();
+
+  // Parse the symbol name
+  StringAttr nameAttr;
+  if (parser.parseSymbolName(nameAttr, mlir::SymbolTable::getSymbolAttrName(),
+                             result.attributes))
+    return failure();
+
+  // Parse optional ()
+  if (succeeded(parser.parseOptionalLParen())) {
+    if (parser.parseRParen())
+      return failure();
+  }
+
+  // Parse optional tokens_in
+  SmallVector<OpAsmParser::UnresolvedOperand> tokenOperands;
+  SmallVector<Type> tokenTypes;
+  SmallVector<StringRef> tokenNames;
+  if (succeeded(parser.parseOptionalKeyword("tokens_in"))) {
+    if (parser.parseLParen())
+      return failure();
+
+    // Parse comma-separated list of "name: type" pairs
+    if (parser.parseOptionalRParen()) {
+      do {
+        OpAsmParser::UnresolvedOperand operand;
+        Type type;
+        if (parser.parseOperand(operand) || parser.parseColonType(type))
+          return failure();
+        tokenOperands.push_back(operand);
+        tokenTypes.push_back(type);
+        tokenNames.push_back(operand.name.drop_front());
+      } while (succeeded(parser.parseOptionalComma()));
+      if (parser.parseRParen())
+        return failure();
+    }
+  }
+
+  // Store token_in_names
+  result.addAttribute("token_in_names", builder.getStrArrayAttr(tokenNames));
+
+  // Resolve token operands
+  if (parser.resolveOperands(tokenOperands, tokenTypes, parser.getCurrentLocation(),
+                             result.operands))
+    return failure();
+
+  // Parse optional `->` and result types (token outputs)
+  SmallVector<Type> resTypes;
+  if (succeeded(parser.parseOptionalArrow())) {
+    if (parser.parseLParen())
+      return failure();
+    if (parser.parseOptionalRParen()) {
+      if (parser.parseTypeList(resTypes) || parser.parseRParen())
+        return failure();
+    }
+  }
+
+  // Add result types
+  result.addTypes(resTypes);
+
+  // Parse optional attribute dict BEFORE region (uses "attributes" keyword)
+  if (parser.parseOptionalAttrDictWithKeyword(result.attributes))
+    return failure();
+
+  // Parse the body region (no block arguments - tokens are accessed as operands)
+  auto *bodyRegion = result.addRegion();
+  if (parser.parseRegion(*bodyRegion, {}))
+    return failure();
+
+  // Ensure body block has a terminator
+  if (bodyRegion->empty()) {
+    bodyRegion->emplaceBlock();
+  }
+
+  return success();
+}
+
+void DataflowTaskOp::print(OpAsmPrinter &p) {
+  p << ' ';
+  p.printSymbolName(getSymName());
+  p << "()";
+
+  // Print tokens_in if present
+  if (!getTokenInputs().empty()) {
+    p << " tokens_in(";
+    llvm::interleaveComma(llvm::enumerate(getTokenInputs()), p,
+                         [&](auto enumVal) {
+                           p.printOperand(enumVal.value());
+                           p << ": ";
+                           p.printType(enumVal.value().getType());
+                         });
+    p << ')';
+  }
+
+  // Print result types (token outputs)
+  if (!getTokenOutputs().empty()) {
+    p << " -> (";
+    llvm::interleaveComma(getTokenOutputs().getTypes(), p, [&](Type type) {
+      p.printType(type);
+    });
+    p << ')';
+  }
+
+  // Print attributes
+  SmallVector<StringRef> elidedAttrs = {"sym_name", "token_in_names"};
+  p.printOptionalAttrDictWithKeyword((*this)->getAttrs(), elidedAttrs);
+
+  // Print body
+  p << ' ';
+  p.printRegion(getBody(), /*printEntryBlockArgs=*/false);
+}
+
+void DataflowTaskOp::getAsmBlockArgumentNames(Region &region,
+                                               OpAsmSetValueNameFn setNameFn) {
+  // DataflowTaskOp has no block arguments - token inputs are operands
+  // accessed from outer scope (not IsolatedFromAbove)
+}
+
+LogicalResult DataflowTaskOp::verify() {
+  // Check that the body is not empty
+  if (getBody().empty()) {
+    return emitOpError("body region must not be empty");
+  }
+
+  // Check that token_in_names matches token_inputs count
+  if (getTokenInNames().size() != getTokenInputs().size()) {
+    return emitOpError("token_in_names count (")
+           << getTokenInNames().size() << ") must match token_inputs count ("
+           << getTokenInputs().size() << ")";
+  }
+
+  // Check that terminator is either DataflowYieldOp or DataflowReturnOp
+  Block &block = getBody().front();
+  if (block.empty()) {
+    return emitOpError("body block must not be empty");
+  }
+
+  auto *terminator = block.getTerminator();
+  if (!isa<DataflowYieldOp, DataflowReturnOp>(terminator)) {
+    return emitOpError("body must end with cmt2.dataflow.yield or "
+                       "cmt2.dataflow.return");
+  }
+
+  // If terminator is DataflowYieldOp, check that token counts match
+  if (auto yieldOp = dyn_cast<DataflowYieldOp>(terminator)) {
+    if (yieldOp.getTokens().size() != getTokenOutputs().size()) {
+      return emitOpError("dataflow.yield token count (")
+             << yieldOp.getTokens().size() << ") must match task result count ("
+             << getTokenOutputs().size() << ")";
+    }
+    // Check token types match
+    for (auto [yieldType, resultType] :
+         llvm::zip(yieldOp.getTokens().getTypes(), getTokenOutputs().getTypes())) {
+      if (yieldType != resultType) {
+        return emitOpError("yield token type ")
+               << yieldType << " does not match result type " << resultType;
+      }
+    }
+  }
+
+  // If terminator is DataflowReturnOp, this should be a final task with no token outputs
+  if (auto returnOp = dyn_cast<DataflowReturnOp>(terminator)) {
+    if (!getTokenOutputs().empty()) {
+      return emitOpError("task with dataflow.return cannot have token outputs");
+    }
+  }
+
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// DataflowYieldOp
+//===----------------------------------------------------------------------===//
+
+LogicalResult DataflowYieldOp::verify() {
+  // Verify parent is DataflowTaskOp
+  auto taskOp = dyn_cast<DataflowTaskOp>(getOperation()->getParentOp());
+  if (!taskOp) {
+    return emitOpError("must be inside a cmt2.dataflow.task");
+  }
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// DataflowReturnOp
+//===----------------------------------------------------------------------===//
+
+LogicalResult DataflowReturnOp::verify() {
+  // Verify parent is DataflowTaskOp
+  auto taskOp = dyn_cast<DataflowTaskOp>(getOperation()->getParentOp());
+  if (!taskOp) {
+    return emitOpError("must be inside a cmt2.dataflow.task");
+  }
+
+  // Get the enclosing ProcDataflowOp to check result types
+  auto dataflowOp = taskOp->getParentOfType<ProcDataflowOp>();
+  if (!dataflowOp) {
+    return emitOpError("task must be inside a cmt2.proc.dataflow");
+  }
+
+  // Check that return types match dataflow result types
+  auto dataflowResults = dataflowOp.getResultTypes();
+  if (getResults().size() != dataflowResults.size()) {
+    return emitOpError("return count (")
+           << getResults().size() << ") must match dataflow result count ("
+           << dataflowResults.size() << ")";
+  }
+
+  for (auto [returnType, expectedType] :
+       llvm::zip(getResults().getTypes(), dataflowResults)) {
+    if (returnType != expectedType) {
+      return emitOpError("return type ")
+             << returnType << " does not match expected type " << expectedType;
+    }
+  }
+
+  return success();
+}
+
 } // namespace cmt2
 } // namespace circt
 

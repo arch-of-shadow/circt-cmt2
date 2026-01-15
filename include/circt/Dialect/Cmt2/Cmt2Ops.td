@@ -1896,11 +1896,13 @@ def TokenCreateOp : Cmt2Op<"token.create", [Pure]> {
   let builders = [
     // Token without data
     OpBuilder<(ins "::mlir::Type":$tokenType), [{
-      build($_builder, $_state, tokenType, /*data=*/mlir::Value());
+      $_state.addTypes(tokenType);
     }]>,
     // Token with data
     OpBuilder<(ins "::mlir::Type":$tokenType, "::mlir::Value":$data), [{
-      build($_builder, $_state, tokenType, data);
+      $_state.addTypes(tokenType);
+      if (data)
+        $_state.addOperands(data);
     }]>
   ];
 }
@@ -1928,6 +1930,224 @@ def TokenJoinOp : Cmt2Op<"token.join", [Pure]> {
 
   let assemblyFormat = [{
     $tokens attr-dict `:` functional-type($tokens, $result)
+  }];
+
+  let hasVerifier = 1;
+}
+
+//===----------------------------------------------------------------------===//
+// Dataflow Pipeline Operations (cmt2.proc.dataflow, cmt2.dataflow.*)
+//===----------------------------------------------------------------------===//
+
+def ProcDataflowOp : Cmt2Op<
+  "proc.dataflow", [
+    HasParent<"ModuleOp">,
+    IsolatedFromAbove,
+    Symbol,
+    SymbolTable,
+    SingleBlock,
+    NoTerminator,
+    OpAsmOpInterface
+  ]> {
+  let summary = "Dataflow pipeline container";
+  let description = [{
+    The `cmt2.proc.dataflow` operation defines a dataflow pipeline, which
+    contains tasks connected by synchronization tokens. Tasks execute when
+    their input tokens are valid and produce output tokens for downstream
+    tasks.
+
+    This is the unified construct for all pipeline/dataflow patterns:
+    - Linear pipelines (stage0 -> stage1 -> ... -> stageN)
+    - Fork-join patterns (one producer, multiple consumers)
+    - Variable latency flows (LS/LI token mixing)
+
+    Attributes:
+    - `sym_name`: The symbol name of the dataflow.
+    - `interval`: Optional initiation interval (defaults to 1).
+
+    Arguments:
+    - Block arguments are the dataflow's inputs.
+
+    Regions:
+    - `body`: Contains DataflowTaskOp operations connected by tokens.
+
+    Assembly format:
+    ```mlir
+    cmt2.proc.dataflow @divider(%dividend: !firrtl.uint<32>, %divisor: !firrtl.uint<32>)
+        -> !firrtl.uint<32> {
+      %tok0 = cmt2.dataflow.task @stage0(...) tokens_out(...) {...}
+      %tok1 = cmt2.dataflow.task @stage1() tokens_in(%tok0) tokens_out(...) {...}
+      // ...
+      cmt2.dataflow.task @final() tokens_in(%tokN) {
+        // ...
+        cmt2.dataflow.return %result : !firrtl.uint<32>
+      }
+    }
+    ```
+  }];
+
+  let arguments = (ins
+    SymbolNameAttr:$sym_name,
+    TypeAttrOf<FunctionType>:$function_type,
+    StrArrayAttr:$argNames,
+    OptionalAttr<I64Attr>:$interval
+  );
+
+  let regions = (region SizedRegion<1>:$body);
+
+  let hasCustomAssemblyFormat = 1;
+
+  let extraClassDeclaration = [{
+    void getAsmBlockArgumentNames(mlir::Region &region,
+                                  mlir::OpAsmSetValueNameFn setNameFn);
+
+    /// Get the initiation interval (default 1)
+    int64_t getInitiationInterval() {
+      return getInterval().value_or(1);
+    }
+
+    /// Get the result types of the dataflow
+    mlir::TypeRange getResultTypes() {
+      return getFunctionType().getResults();
+    }
+
+    /// Get the argument types of the dataflow
+    mlir::TypeRange getArgumentTypes() {
+      return getFunctionType().getInputs();
+    }
+  }];
+
+  let hasVerifier = 1;
+}
+
+def DataflowTaskOp : Cmt2Op<
+  "dataflow.task", [
+    HasParent<"ProcDataflowOp">,
+    Symbol,
+    SingleBlock,
+    OpAsmOpInterface
+  ]> {
+  let summary = "Task within a dataflow pipeline";
+  let description = [{
+    The `cmt2.dataflow.task` operation defines a task within a dataflow
+    pipeline. Tasks consume input tokens, perform computation, and produce
+    output tokens for downstream tasks.
+
+    Tasks are connected via synchronization tokens:
+    - Input tokens (tokens_in): Tokens this task waits for
+    - Output tokens (results): Tokens this task produces
+
+    Attributes:
+    - `sym_name`: The symbol name of the task.
+    - `timing`: Optional timing interval (start, end cycles).
+
+    Multi-consumer pattern: A token can be used by multiple tasks,
+    implying synchronization between them (fork pattern).
+
+    Assembly format:
+    ```mlir
+    // Task with explicit token connections
+    %tok_out = cmt2.dataflow.task @stage1()
+        tokens_in(%tok_in: !cmt2.sync_token<data = !firrtl.uint<32>>)
+        -> !cmt2.sync_token<data = !firrtl.uint<32>>
+        {timing = #cmt2.timing<1, 2>} {
+      %data = cmt2.token.data %tok_in : ...
+      %result = firrtl.add %data, %data : ...
+      %tok = cmt2.token.create %result : ...
+      cmt2.dataflow.yield %tok : !cmt2.sync_token<data = !firrtl.uint<32>>
+    }
+
+    // Final task with return
+    cmt2.dataflow.task @final()
+        tokens_in(%tok: !cmt2.sync_token<data = !firrtl.uint<32>>)
+        {timing = #cmt2.timing<7, 8>} {
+      %data = cmt2.token.data %tok : ...
+      cmt2.dataflow.return %data : !firrtl.uint<32>
+    }
+    ```
+  }];
+
+  let arguments = (ins
+    SymbolNameAttr:$sym_name,
+    Variadic<AnySyncTokenType>:$token_inputs,
+    StrArrayAttr:$token_in_names,
+    OptionalAttr<Cmt2_TimingIntervalAttr>:$timing
+  );
+
+  let results = (outs Variadic<AnySyncTokenType>:$token_outputs);
+
+  let regions = (region SizedRegion<1>:$body);
+
+  let hasCustomAssemblyFormat = 1;
+
+  let extraClassDeclaration = [{
+    void getAsmBlockArgumentNames(mlir::Region &region,
+                                  mlir::OpAsmSetValueNameFn setNameFn);
+
+    /// Get the number of input tokens
+    size_t getNumTokenInputs() { return getTokenInputs().size(); }
+
+    /// Get the number of output tokens
+    size_t getNumTokenOutputs() { return getTokenOutputs().size(); }
+
+    /// Check if this task has timing specified
+    bool hasTiming() { return getTiming().has_value(); }
+  }];
+
+  let hasVerifier = 1;
+}
+
+def DataflowYieldOp : Cmt2Op<
+  "dataflow.yield", [
+    Terminator,
+    HasParent<"DataflowTaskOp">
+  ]> {
+  let summary = "Yield tokens from a dataflow task";
+  let description = [{
+    The `cmt2.dataflow.yield` operation terminates a dataflow task and
+    yields the output tokens. The number and types of yielded tokens must
+    match the task's result types.
+
+    Assembly format:
+    ```mlir
+    cmt2.dataflow.yield %tok1, %tok2 : !cmt2.sync_token<data = !firrtl.uint<32>>,
+                                        !cmt2.sync_token<data = !firrtl.uint<16>>
+    ```
+  }];
+
+  let arguments = (ins Variadic<AnySyncTokenType>:$tokens);
+
+  let assemblyFormat = [{
+    attr-dict ($tokens^ `:` qualified(type($tokens)))?
+  }];
+
+  let hasVerifier = 1;
+}
+
+def DataflowReturnOp : Cmt2Op<
+  "dataflow.return", [
+    Terminator,
+    HasParent<"DataflowTaskOp">
+  ]> {
+  let summary = "Return final result from a dataflow pipeline";
+  let description = [{
+    The `cmt2.dataflow.return` operation terminates the final task in a
+    dataflow pipeline and returns the result values. This is used instead
+    of `dataflow.yield` when a task produces the pipeline's output rather
+    than tokens for further processing.
+
+    The return types must match the enclosing ProcDataflowOp's result types.
+
+    Assembly format:
+    ```mlir
+    cmt2.dataflow.return %result : !firrtl.uint<32>
+    ```
+  }];
+
+  let arguments = (ins Variadic<AnyType>:$results);
+
+  let assemblyFormat = [{
+    attr-dict ($results^ `:` qualified(type($results)))?
   }];
 
   let hasVerifier = 1;
