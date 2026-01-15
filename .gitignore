@@ -30,3 +30,5 @@ calyx
 
 # Pdf
 *.pdf
+# Generated simulation workspaces
+examples/PyCMT2/*_sim/
