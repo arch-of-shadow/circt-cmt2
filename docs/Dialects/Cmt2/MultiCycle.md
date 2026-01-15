@@ -755,8 +755,22 @@ with m.step("dynamic_op") as step:
 
 ---
 
+## Integration with Dataflow/Pipeline
+
+Multi-cycle proc control can be used within dataflow tasks for complex pipeline stages. See [tmp/PipelinedDesign-Implementation.md](tmp/PipelinedDesign-Implementation.md) Section 11 for:
+
+- Task bodies containing `static_repeat`, `while` loops
+- FSM composition (task-level + dataflow-level)
+- Stall controller interaction with task FSMs
+- Timing attribute unification
+
+**Status:** Design complete, implementation pending (Phase 7 in Development-Tracker.md)
+
+---
+
 ## Next Steps
 
 - [Operations.md](Operations.md) - All CMT2 operations
 - [Attributes.md](Attributes.md) - Attribute reference
 - [Passes.md](Passes.md) - Transformation passes
+- [tmp/PipelinedDesign-Implementation.md](tmp/PipelinedDesign-Implementation.md) - Dataflow/pipeline design

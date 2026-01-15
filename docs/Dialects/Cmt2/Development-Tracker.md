@@ -13,7 +13,8 @@
 | PyCMT2 | **~95%** | STL complete |
 | Timing Validation | **100%** | TV1-TV7 complete |
 | Interpreter | **~90%** | Plugin architecture complete |
-| Dataflow/Pipeline | **0%** | New - token-based pipelining |
+| Dataflow/Pipeline | **100%** | Phase 1-6 complete, tests and examples |
+| Dataflow-Proc Compat | **~10%** | Phase 7: Integration with multi-cycle proc |
 | Documentation | **~80%** | Needs updates |
 
 ---
@@ -37,46 +38,70 @@
 
 | # | Task | Status | Files |
 |---|------|--------|-------|
-| D1 | Add `ProcDataflowOp`, `DataflowTaskOp`, `DataflowYieldOp` | [ ] | `Cmt2Ops.td` |
-| D2 | Add `ProcPipelineOp` as syntactic sugar | [ ] | `Cmt2Ops.td` |
-| D3 | Implement dataflow-to-rules lowering | [ ] | `Transforms/DataflowLowering.cpp` |
+| D1 | Add `ProcDataflowOp`, `DataflowTaskOp`, `DataflowYieldOp`, `DataflowReturnOp` | [x] | `Cmt2Ops.td`, `Cmt2Ops.cpp` |
+| D2 | ~~Add `ProcPipelineOp` as syntactic sugar~~ | [deferred] | Existing `static_step` provides same functionality; rename later |
+| D3 | Implement dataflow-to-rules lowering | [x] | `Transforms/DataflowLowering.cpp` |
 
 ### Phase 3: Analysis
 
 | # | Task | Status | Files |
 |---|------|--------|-------|
-| A1 | Implement `TokenAnalysis` using def-use chains | [ ] | `Analysis/TokenAnalysis.cpp` |
-| A2 | Implement FIFO depth inference | [ ] | `Analysis/FIFODepthAnalysis.cpp` |
-| A3 | Implement deadlock detection | [ ] | `Analysis/DeadlockAnalysis.cpp` |
-| A4 | Implement timing inference pass | [ ] | `Transforms/TimingInference.cpp` |
+| A1 | Implement `TokenAnalysis` using def-use chains | [x] | `Analysis/TokenAnalysis.cpp` |
+| A2 | Implement FIFO depth inference | [x] | `Analysis/FIFODepthAnalysis.cpp` |
+| A3 | Implement deadlock detection | [x] | `Analysis/DeadlockAnalysis.cpp` |
+| A4 | Implement timing inference pass | [x] | `Transforms/TimingInference.cpp` (extended) |
 
 ### Phase 4: Lowering
 
 | # | Task | Status | Files |
 |---|------|--------|-------|
-| L1 | Implement token lowering (LS → shift reg, LI → FIFO) | [ ] | `Transforms/TokenLowering.cpp` |
-| L2a | Design stall controller interface | [ ] | `Transforms/StallControllerGen.cpp` |
-| L2b | Implement single-LI-boundary stall controller | [ ] | `Transforms/StallControllerGen.cpp` |
-| L2c | Implement multi-LI-boundary composition | [ ] | `Transforms/StallControllerGen.cpp` |
-| L3 | Implement multi-consumer fork lowering | [ ] | `Transforms/TokenLowering.cpp` |
-| L4 | Integrate with cmt2-to-firrtl | [ ] | `Transforms/*.cpp` |
+| L1 | Implement token lowering (LS → shift reg, LI → FIFO) | [x] | `Transforms/TokenLowering.cpp` |
+| L2 | Implement stall controller generation | [x] | `Transforms/StallControllerGen.cpp` |
+| L3 | Implement multi-consumer fork lowering | [x] | `Transforms/TokenLowering.cpp` (integrated) |
+| L4 | Integrate with cmt2-to-firrtl | [x] | `Transforms/Cmt2ToFIRRTLPipeline.cpp` |
 
 ### Phase 5: PyCMT2
 
 | # | Task | Status | Files |
 |---|------|--------|-------|
-| P1 | Add unified dataflow builder | [ ] | `pycmt2/dataflow_builders.py` |
-| P2 | Add pipeline shorthand builder | [ ] | `pycmt2/pipeline_builders.py` |
-| P3 | Add timing helpers | [ ] | `pycmt2/timing.py` |
+| P1 | Add unified dataflow builder | [x] | `pycmt2/dataflow_builders.py` |
+| P2 | Add pipeline shorthand builder | [x] | `pycmt2/pipeline_builders.py` |
+| P3 | Add timing helpers | [x] | `pycmt2/timing.py` |
 
 ### Phase 6: Testing
 
 | # | Task | Status | Files |
 |---|------|--------|-------|
-| E1 | Division pipeline example | [ ] | `examples/PyCMT2/division_pipeline.py` |
-| E2 | Fork-join dataflow example | [ ] | `examples/PyCMT2/dataflow_forkjoin.py` |
-| E3 | Test suite | [ ] | `test/Dialect/Cmt2/token-*.mlir` |
-| E4 | End-to-end simulation test | [ ] | `examples/PyCMT2/pipeline_e2e.py` |
+| E1 | Division pipeline example | [x] | `examples/PyCMT2/division_pipeline.py` |
+| E2 | Fork-join dataflow example | [x] | `examples/PyCMT2/dataflow_forkjoin.py` |
+| E3 | Test suite | [x] | `test/Dialect/Cmt2/token-lowering.mlir` |
+| E4 | End-to-end simulation test | [x] | `examples/PyCMT2/pipeline_e2e.py` |
+
+### Phase 7: Dataflow-Proc Compatibility
+
+**Goal:** Full integration between dataflow/pipeline features and existing multi-cycle proc lowering.
+
+**Design Document:** [tmp/PipelinedDesign-Implementation.md](tmp/PipelinedDesign-Implementation.md) Section 11
+
+| # | Task | Status | Notes |
+|---|------|--------|-------|
+| C1 | Task body proc lowering | [ ] | Apply TDCC/CompileStatic to DataflowTaskOp bodies |
+| C2 | Task done signal extraction | [ ] | Connect internal FSM done to token production |
+| C3 | Unified timing validation | [ ] | Cross-validate task timing with internal control |
+| C4 | Stall propagation to task FSMs | [ ] | Gate task-internal FSM registers on stall |
+| C5 | Automatic LS/LI mode inference | [ ] | Infer token mode from task body analysis |
+| C6 | Nested dataflow support | [ ] | Hierarchical dataflow composition |
+| C7 | PyCMT2 task control builders | [ ] | Python API for control flow in tasks |
+
+**Compatibility Scenarios:**
+
+| Scenario | Status | Notes |
+|----------|--------|-------|
+| Static tasks (single-cycle) | [x] | Current implementation |
+| Static tasks (multi-cycle, fixed timing) | [ ] | Needs C1-C2 |
+| Dynamic tasks (while loops) | [ ] | Needs C1-C2, requires LI mode |
+| Mixed LS/LI regions | [~] | Stall controller exists, needs C4 |
+| Tasks calling external modules with timing | [ ] | Needs C3 |
 
 ---
 
@@ -216,8 +241,8 @@ When proc rules are lowered to GAA rules, precedence should be determined by con
 | Timing | 8 | Pass |
 | Integration | 6 | Pass |
 | PyCMT2 | 5 | Pass |
-| Token/Dataflow | 1 | Pass |
-| **Total** | **41** | **100%** |
+| Token/Dataflow | 5 | Pass |
+| **Total** | **45** | **100%** |
 
 ---
 
@@ -241,7 +266,7 @@ PYTHONPATH=tools/circt/python_packages/circt_core python3 ../examples/PyCMT2/gcd
 
 | Document | Content |
 |----------|---------|
-| [tmp/PipelinedDesign-Implementation.md](tmp/PipelinedDesign-Implementation.md) | Token-based dataflow/pipeline design |
+| [tmp/PipelinedDesign-Implementation.md](tmp/PipelinedDesign-Implementation.md) | Token-based dataflow/pipeline design + Proc compatibility (Sec 11) |
 | [tmp/PrecedenceHandling.md](tmp/PrecedenceHandling.md) | FSM rule precedence design |
 | [tmp/ProcInterpreterDesign.md](tmp/ProcInterpreterDesign.md) | Direct proc interpretation |
 | [tmp/InterpreterModularization-Design.md](tmp/InterpreterModularization-Design.md) | Plugin architecture |

@@ -1037,7 +1037,317 @@ def DataflowReturnOp : Cmt2_Op<"dataflow.return", [
 
 ---
 
-## 11. Glossary
+## 11. Compatibility with Multi-Cycle Proc Pipeline
+
+### 11.1 Overview
+
+The dataflow/pipeline features must integrate seamlessly with the existing multi-cycle procedural control infrastructure. This section analyzes compatibility and defines the unified compilation model.
+
+**Key Integration Points:**
+
+| Feature | Dataflow | Proc Control | Integration |
+|---------|----------|--------------|-------------|
+| Timing model | `#cmt2.timing<start, end>` | `static_latency`, `interval` | Unified timing attributes |
+| Control flow | Token-based task ordering | FSM-based seq/par/while | Tasks may contain proc control |
+| Synchronization | SyncTokens (LS/LI) | Done signals, FSM states | Token production on task done |
+| Hardware | Shift regs, FIFOs, stall ctrl | FSM registers, enables | Composed hardware generation |
+
+### 11.2 Dataflow Tasks with Internal Control Flow
+
+A `DataflowTaskOp` may contain multi-cycle operations internally. This enables complex patterns like:
+
+```mlir
+cmt2.proc.dataflow @iterative_pipeline(%input: !firrtl.uint<32>) -> !firrtl.uint<32> {
+    // Task with internal loop
+    %tok0 = cmt2.dataflow.task @iterative_stage() tokens_out(...) {
+        // Internal procedural control
+        cmt2.proc.static_repeat 4 {
+            cmt2.proc.enable @iteration_step
+        }
+        %result = ...
+        %tok = cmt2.token.create %result : ...
+        cmt2.dataflow.yield %tok
+    } {timing = #cmt2.timing<start=0, end=4>}  // 4 cycles total
+
+    // Simple single-cycle task
+    %tok1 = cmt2.dataflow.task @simple_stage() tokens_in(%tok0) tokens_out(...) {
+        %data = cmt2.token.data %tok0 : ...
+        %result = firrtl.add %data, %const : ...
+        %tok = cmt2.token.create %result : ...
+        cmt2.dataflow.yield %tok
+    } {timing = #cmt2.timing<start=4, end=5>}  // 1 cycle
+
+    cmt2.dataflow.task @final() tokens_in(%tok1) {
+        %data = cmt2.token.data %tok1 : ...
+        cmt2.dataflow.return %data
+    } {timing = #cmt2.timing<start=5, end=6>}
+}
+```
+
+**Task Body Categories:**
+
+| Category | Body Contents | Internal FSM | Token Mode | Example |
+|----------|---------------|--------------|------------|---------|
+| Combinational | Pure logic | None | LS | `firrtl.add`, `firrtl.mux` |
+| Single-cycle | One static_step | None | LS | `static_step(1)` |
+| Static multi-cycle | `static_repeat`, `static_step(N)` | Counter | LS | Known iteration loops |
+| Dynamic | `while`, `proc.step` | Full FSM | LI | Data-dependent termination |
+
+### 11.3 Token Production and Task Completion
+
+Token production is tied to task completion:
+
+**Static Tasks (LS tokens):**
+- Token valid signal is derived from cycle counter
+- No handshake needed - producer and consumer are cycle-synchronized
+- Task timing attribute determines exact validity cycle
+
+```
+Task timing = [start, end)
+Token valid at cycle = end - 1 (last cycle of task)
+Consumer guard: cycle == producer_end - 1
+```
+
+**Dynamic Tasks (LI tokens):**
+- Token valid when task's internal FSM reaches done state
+- FIFO buffering decouples producer/consumer timing
+- Task produces token via explicit `done` signal
+
+```
+Task with internal while loop:
+  - FSM tracks loop progress
+  - Done signal = loop_exit_condition
+  - Token enqueued to FIFO when done
+  - Consumer dequeues when FIFO not empty
+```
+
+### 11.4 Lowering Pipeline Order
+
+The compilation order must handle both dataflow structure and internal task control:
+
+```
+Input: proc.dataflow with potentially complex task bodies
+         │
+         ▼
+┌─────────────────────────────────────────────────────────────────┐
+│ Phase A: Task Body Lowering (per-task)                          │
+│                                                                 │
+│   For each DataflowTaskOp with internal control:                │
+│   1. Apply TDCC to generate task-local FSM                      │
+│   2. Apply CompileStatic for static control                     │
+│   3. Generate task done signal from FSM state                   │
+│   4. Connect done signal to token production                    │
+└─────────────────────────────────────────────────────────────────┘
+         │
+         ▼
+┌─────────────────────────────────────────────────────────────────┐
+│ Phase B: Dataflow Analysis                                      │
+│                                                                 │
+│   1. Build token dependency graph (def-use)                     │
+│   2. Classify tokens: LS (static tasks) vs LI (dynamic tasks)   │
+│   3. Infer FIFO depths for LI tokens                            │
+│   4. Check for deadlocks                                        │
+└─────────────────────────────────────────────────────────────────┘
+         │
+         ▼
+┌─────────────────────────────────────────────────────────────────┐
+│ Phase C: Dataflow-to-Rules Lowering                             │
+│                                                                 │
+│   1. Convert each task to a cmt2.rule                           │
+│   2. Task's FSM becomes rule body                               │
+│   3. Token inputs/outputs become rule arguments                 │
+│   4. Add guard: all input tokens valid                          │
+└─────────────────────────────────────────────────────────────────┘
+         │
+         ▼
+┌─────────────────────────────────────────────────────────────────┐
+│ Phase D: Token Lowering                                         │
+│                                                                 │
+│   1. LS tokens → shift registers (fanout for multi-consumer)    │
+│   2. LI tokens → FIFOs (broadcast for multi-consumer)           │
+│   3. Generate stall controllers at LS/LI boundaries             │
+└─────────────────────────────────────────────────────────────────┘
+         │
+         ▼
+    Standard CMT2 lowering (cmt2-to-firrtl)
+```
+
+### 11.5 Timing Attribute Unification
+
+**Current Timing Systems:**
+
+| System | Attribute | Meaning | Used By |
+|--------|-----------|---------|---------|
+| Dataflow | `#cmt2.timing<start, end>` | Task active interval | DataflowTaskOp |
+| Proc | `static_latency` | Total cycles to complete | ProcMethodOp |
+| Proc | `interval` | Initiation interval | ProcMethodOp, ExternalModuleOp |
+| Call | `arg_timing`, `result_timing` | Per-call port timing | CallOp |
+
+**Unification Rules:**
+
+1. **Task with timing attribute:**
+   ```mlir
+   cmt2.dataflow.task @t {timing = #cmt2.timing<[2, 5]>}
+   // Equivalent to: static_latency = 3 (cycles 2, 3, 4)
+   // Task starts at global cycle 2, ends before cycle 5
+   ```
+
+2. **Task without timing (dynamic):**
+   ```mlir
+   cmt2.dataflow.task @t {mode = "li"}
+   // No static_latency - completion determined by internal FSM
+   // LI mode requires FIFO buffering
+   ```
+
+3. **Internal call timing:**
+   ```mlir
+   cmt2.dataflow.task @t {timing = #cmt2.timing<[0, 4]>} {
+       // Call timing is relative to task start
+       %result = cmt2.call @mem @read(%addr) {
+           arg_timing = [#cmt2.timing<[0, 1]>],    // Cycle 0 relative to task
+           result_timing = [#cmt2.timing<[2, 3]>]  // Cycle 2 relative to task
+       } : ...
+   }
+   ```
+
+### 11.6 FSM Composition Patterns
+
+When tasks have internal FSMs, multiple FSM levels exist:
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│  Dataflow Level: Token-based scheduling                             │
+│                                                                     │
+│    task0 ──token──> task1 ──token──> task2                         │
+│      │                │                │                            │
+│      ▼                ▼                ▼                            │
+│  ┌───────┐        ┌───────┐        ┌───────┐                        │
+│  │FSM_t0 │        │FSM_t1 │        │FSM_t2 │   Task-level FSMs      │
+│  │(loop) │        │(seq)  │        │(comb) │   (may be trivial)     │
+│  └───────┘        └───────┘        └───────┘                        │
+│                                                                     │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+**FSM Interaction:**
+
+| Pattern | Task FSM | Token Production | Hardware |
+|---------|----------|------------------|----------|
+| Comb task | None | Immediate | Wire |
+| Static task | Counter | At cycle N | Counter + comparator |
+| Dynamic task | Full FSM | When done=1 | FSM + done output |
+| Pipelined task | Counter + II | Every II cycles | Counter mod II |
+
+### 11.7 Stall Controller with Internal FSMs
+
+When LS regions contain tasks with internal FSMs, stall propagation must reach all registers:
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│  LS Region with Complex Tasks                                       │
+│                                                                     │
+│    ┌─────────────────────────┐                                      │
+│    │ Task with internal FSM  │                                      │
+│    │  ┌─────────────────┐    │                                      │
+│    │  │ FSM register    │◄───┼──── stall_all (from stall ctrl)     │
+│    │  │ Data registers  │◄───┼──── stall_all                        │
+│    │  │ Pipeline regs   │◄───┼──── stall_all                        │
+│    │  └─────────────────┘    │                                      │
+│    │         │               │                                      │
+│    │         ▼ done          │                                      │
+│    └─────────┼───────────────┘                                      │
+│              │                                                      │
+│              ▼                                                      │
+│    ┌─────────────────────────┐                                      │
+│    │ Token shift register    │◄───── stall_all                      │
+│    └─────────────────────────┘                                      │
+│              │                                                      │
+│              ▼                                                      │
+│    ┌─────────────────────────┐                                      │
+│    │ LI FIFO (boundary)      │────── ready/valid to stall ctrl     │
+│    └─────────────────────────┘                                      │
+│                                                                     │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+**Stall Propagation Rules:**
+
+1. **All registers in LS region** must be gated by global stall
+2. **Task FSM registers** are included in LS region gating
+3. **Token shift registers** between tasks are gated
+4. **LI FIFOs** provide ready/valid signals to stall controller
+5. **Stall signal** = NOT(all LI interfaces ready AND valid)
+
+### 11.8 Example: Division Pipeline with Internal Loops
+
+```python
+# Division pipeline: 8 iterations, each iteration uses static_repeat
+with m.dataflow("divider", args=[("dividend", UInt(32)), ("divisor", UInt(32))],
+                returns=[UInt(32)]) as df:
+
+    # Stage 0: Initialize (1 cycle)
+    with df.task("init", timing=(0, 1)) as task:
+        state = task.call(init_div, df.dividend, df.divisor)
+        tok = task.create_token(state, DivState)
+        task.yield_tokens(tok)
+
+    # Stages 1-7: Iteration stages (each uses static_repeat internally)
+    prev_tok = tok
+    for i in range(1, 8):
+        with df.task(f"iter_{i}", tokens_in=[prev_tok],
+                     timing=(i, i+1)) as task:
+            # Single-cycle iteration step
+            state = task.token_data(prev_tok)
+            next_state = task.call(iter_div, state)
+            next_tok = task.create_token(next_state, DivState)
+            task.yield_tokens(next_tok)
+        prev_tok = next_tok
+
+    # Final stage: Extract result
+    with df.task("result", tokens_in=[prev_tok], timing=(8, 9)) as task:
+        state = task.token_data(prev_tok)
+        quotient = task.call(extract_quotient, state)
+        task.return_values(quotient)
+```
+
+**Alternative: Single task with internal static_repeat:**
+
+```python
+with m.dataflow("divider_compact", args=[...], returns=[...]) as df:
+    # Single task with 8-iteration internal loop
+    with df.task("compute", timing=(0, 8)) as task:
+        state = task.call(init_div, df.dividend, df.divisor)
+
+        # Internal static_repeat (generates counter-based FSM)
+        with task.static_repeat(7) as loop:
+            state = task.call(iter_div, state)
+
+        quotient = task.call(extract_quotient, state)
+        task.return_values(quotient)
+```
+
+### 11.9 Compatibility Constraints and Limitations
+
+**Current Limitations:**
+
+| Constraint | Status | Workaround |
+|------------|--------|------------|
+| Internal proc control in tasks | Planned | Use external modules or flatten |
+| Nested dataflow | Not supported | Flatten to single level |
+| Dynamic tasks in LS region | Requires LI | Use LI mode at boundaries |
+| Timing inference across tasks | Partial | Explicit timing attributes |
+
+**Future Work:**
+
+1. **C1: Task body proc lowering** - Apply TDCC/CompileStatic to task bodies
+2. **C2: Task done signal extraction** - Connect internal FSM done to token
+3. **C3: Unified timing validation** - Cross-validate task timing with internal control
+4. **C4: Nested dataflow** - Hierarchical dataflow composition
+5. **C5: Automatic LS/LI boundary insertion** - Infer mode from task body analysis
+
+---
+
+## 12. Glossary
 
 | Term | Definition |
 |------|------------|
@@ -1049,10 +1359,12 @@ def DataflowReturnOp : Cmt2_Op<"dataflow.return", [
 | **Timing Attribute** | `#cmt2.timing<start, end>` format |
 | **Stall Controller** | Hardware gating LS registers when blocked by LI edge |
 | **FIFO Depth** | Buffer size for LI tokens, inferred by analysis |
+| **Task FSM** | Internal FSM for tasks with multi-cycle control flow |
+| **Task Done** | Signal indicating task completion, triggers token production |
 
 ---
 
-## 12. References
+## 13. References
 
 1. Clamp MICRO 2025 Paper: "Temporal Hardware Transactions"
 2. cuTile: NVIDIA's tile-centric GPU programming with token-based memory ordering
