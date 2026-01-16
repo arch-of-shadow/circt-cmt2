@@ -33,7 +33,7 @@ using namespace circt::cmt2::ecmt2::stl;
 //===----------------------------------------------------------------------===//
 // STLLibrary Implementation
 //===----------------------------------------------------------------------===//
-Module* STLLibrary::createWireModule(unsigned width, Circuit& circuit) {
+ExternalModule* STLLibrary::createWireModule(unsigned width, Circuit& circuit) {
   llvm::StringMap<int64_t> params;
   params["width"] = width;
 
@@ -106,7 +106,7 @@ Module* STLLibrary::createWireDefaultModule(unsigned width, unsigned init, Circu
   return wireDefaultMod;
 }
 
-Module* STLLibrary::createRegModule(unsigned width, unsigned init, Circuit& circuit) {
+ExternalModule* STLLibrary::createRegModule(unsigned width, unsigned init, Circuit& circuit) {
   // Create external module directly - no wrapper needed
   llvm::StringMap<int64_t> params;
   params["width"] = width;
@@ -576,7 +576,7 @@ Module* STLLibrary::createFIFO2IModule(unsigned dataWidth, Circuit& circuit) {
   return fifoMod;
 }
 
-Module* STLLibrary::createMem1r1w1cModule( unsigned dataWidth, unsigned addrWidth, unsigned depth, Circuit& circuit) {
+ExternalModule* STLLibrary::createMem1r1w1cModule( unsigned dataWidth, unsigned addrWidth, unsigned depth, Circuit& circuit) {
   // Create external memory module with Mem1r1w binding
   llvm::StringMap<int64_t> params;
   params["data_width"] = dataWidth;
@@ -599,7 +599,7 @@ Module* STLLibrary::createMem1r1w1cModule( unsigned dataWidth, unsigned addrWidt
   return memMod;
 }
 
-Module* STLLibrary::createMem1r1w0cModule( unsigned dataWidth, unsigned addrWidth, unsigned depth, Circuit& circuit) {
+ExternalModule* STLLibrary::createMem1r1w0cModule( unsigned dataWidth, unsigned addrWidth, unsigned depth, Circuit& circuit) {
   // Create external memory module with Mem1r1w binding
   llvm::StringMap<int64_t> params;
   params["data_width"] = dataWidth;
@@ -625,7 +625,7 @@ Module* STLLibrary::createMem1r1w0cModule( unsigned dataWidth, unsigned addrWidt
 // Floating-point IP modules (external Verilog via firrtl.extmodule)
 //===----------------------------------------------------------------------===//
 
-Module* STLLibrary::createFloatAddModule(unsigned width, unsigned latency, Circuit& circuit) {
+ExternalModule* STLLibrary::createFloatAddModule(unsigned width, unsigned latency, Circuit& circuit) {
   llvm::StringMap<int64_t> params;
   params["width"] = width;
   params["latency"] = latency;
@@ -648,7 +648,7 @@ Module* STLLibrary::createFloatAddModule(unsigned width, unsigned latency, Circu
   return mod;
 }
 
-Module* STLLibrary::createFloatSubModule(unsigned width, unsigned latency , Circuit& circuit) {
+ExternalModule* STLLibrary::createFloatSubModule(unsigned width, unsigned latency , Circuit& circuit) {
   llvm::StringMap<int64_t> params;
   params["width"] = width;
   params["latency"] = latency;
@@ -668,7 +668,7 @@ Module* STLLibrary::createFloatSubModule(unsigned width, unsigned latency , Circ
   return mod;
 }
 
-Module* STLLibrary::createFloatMulModule(unsigned width, unsigned latency, Circuit& circuit) {
+ExternalModule* STLLibrary::createFloatMulModule(unsigned width, unsigned latency, Circuit& circuit) {
   llvm::StringMap<int64_t> params;
   params["width"] = width;
   params["latency"] = latency;
@@ -688,7 +688,7 @@ Module* STLLibrary::createFloatMulModule(unsigned width, unsigned latency, Circu
   return mod;
 }
 
-Module* STLLibrary::createFloatDivModule(unsigned width, unsigned latency, Circuit& circuit) {
+ExternalModule* STLLibrary::createFloatDivModule(unsigned width, unsigned latency, Circuit& circuit) {
   llvm::StringMap<int64_t> params;
   params["width"] = width;
   params["latency"] = latency;
@@ -708,7 +708,7 @@ Module* STLLibrary::createFloatDivModule(unsigned width, unsigned latency, Circu
   return mod;
 }
 
-Module* STLLibrary::createFloatSqrtModule(unsigned width, unsigned latency, Circuit& circuit) {
+ExternalModule* STLLibrary::createFloatSqrtModule(unsigned width, unsigned latency, Circuit& circuit) {
   llvm::StringMap<int64_t> params;
   params["width"] = width;
   params["latency"] = latency;
@@ -729,7 +729,7 @@ Module* STLLibrary::createFloatSqrtModule(unsigned width, unsigned latency, Circ
   return mod;
 }
 
-Module* STLLibrary::createFloatExpModule(unsigned width, unsigned latency, Circuit& circuit) {
+ExternalModule* STLLibrary::createFloatExpModule(unsigned width, unsigned latency, Circuit& circuit) {
   llvm::StringMap<int64_t> params;
   params["width"] = width;
   params["latency"] = latency;
@@ -750,7 +750,7 @@ Module* STLLibrary::createFloatExpModule(unsigned width, unsigned latency, Circu
   return mod;
 }
 
-Module* STLLibrary::createFloatLogModule(unsigned width, unsigned latency, Circuit& circuit) {
+ExternalModule* STLLibrary::createFloatLogModule(unsigned width, unsigned latency, Circuit& circuit) {
   llvm::StringMap<int64_t> params;
   params["width"] = width;
   params["latency"] = latency;
@@ -771,7 +771,7 @@ Module* STLLibrary::createFloatLogModule(unsigned width, unsigned latency, Circu
   return mod;
 }
 
-Module* STLLibrary::createInt2FloatModule(unsigned width, unsigned latency, Circuit& circuit) {
+ExternalModule* STLLibrary::createInt2FloatModule(unsigned width, unsigned latency, Circuit& circuit) {
   llvm::StringMap<int64_t> params;
   params["width"] = width;
   params["latency"] = latency;
@@ -792,7 +792,7 @@ Module* STLLibrary::createInt2FloatModule(unsigned width, unsigned latency, Circ
   return mod;
 }
 
-Module* STLLibrary::createFloat2IntModule(unsigned width, unsigned latency, Circuit& circuit) {
+ExternalModule* STLLibrary::createFloat2IntModule(unsigned width, unsigned latency, Circuit& circuit) {
   llvm::StringMap<int64_t> params;
   params["width"] = width;
   params["latency"] = latency;
@@ -813,7 +813,7 @@ Module* STLLibrary::createFloat2IntModule(unsigned width, unsigned latency, Circ
   return mod;
 }
 
-Module* STLLibrary::createFloatCmpModule(unsigned width, unsigned predicate, unsigned latency,
+ExternalModule* STLLibrary::createFloatCmpModule(unsigned width, unsigned predicate, unsigned latency,
                                                   Circuit& circuit) {
   llvm::StringMap<int64_t> params;
   params["width"] = width;
@@ -835,7 +835,7 @@ Module* STLLibrary::createFloatCmpModule(unsigned width, unsigned predicate, uns
   return mod;
 }
 
-Module* STLLibrary::createFifoModule(unsigned width, unsigned depth, Circuit& circuit) {
+ExternalModule* STLLibrary::createFifoModule(unsigned width, unsigned depth, Circuit& circuit) {
   llvm::StringMap<int64_t> params;
   params["width"] = width;
   params["depth"] = depth;

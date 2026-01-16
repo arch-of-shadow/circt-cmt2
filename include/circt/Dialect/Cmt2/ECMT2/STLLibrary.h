@@ -42,7 +42,7 @@ public:
   //===--------------------------------------------------------------------===//
 
   /// Create a wire module with specified width
-  static Module* createWireModule(unsigned width, Circuit& circuit);
+  static ExternalModule* createWireModule(unsigned width, Circuit& circuit);
 
   /// Create a wire module with specified width and default init value
   static Module* createWireDefaultModule(unsigned width, unsigned init, Circuit& circuit);
@@ -52,7 +52,7 @@ public:
   //===--------------------------------------------------------------------===//
 
   /// Create a register module with specified width and init value
-  static Module* createRegModule(unsigned width, unsigned init, Circuit& circuit);
+  static ExternalModule* createRegModule(unsigned width, unsigned init, Circuit& circuit);
 
   //===--------------------------------------------------------------------===//
   // FIFO modules
@@ -72,11 +72,11 @@ public:
   //===--------------------------------------------------------------------===//
 
   /// Create a 1-read 1-write memory module, read latency and write latency are both 1
-  static Module* createMem1r1w1cModule(unsigned dataWidth, unsigned addrWidth,
+  static ExternalModule* createMem1r1w1cModule(unsigned dataWidth, unsigned addrWidth,
     unsigned depth, Circuit& circuit);
 
   /// Create a 1-read 1-write memory module, write latency is 1, read latency is 0
-  static Module* createMem1r1w0cModule(unsigned dataWidth, unsigned addrWidth,
+  static ExternalModule* createMem1r1w0cModule(unsigned dataWidth, unsigned addrWidth,
     unsigned depth, Circuit& circuit);
 
   //===--------------------------------------------------------------------===//
@@ -84,39 +84,39 @@ public:
   //===--------------------------------------------------------------------===//
 
   /// Create a floating-point adder module (references external Verilog)
-  static Module* createFloatAddModule(unsigned width, unsigned latency, Circuit& circuit);
+  static ExternalModule* createFloatAddModule(unsigned width, unsigned latency, Circuit& circuit);
 
   /// Create a floating-point subtractor module
-  static Module* createFloatSubModule(unsigned width, unsigned latency, Circuit& circuit);
+  static ExternalModule* createFloatSubModule(unsigned width, unsigned latency, Circuit& circuit);
 
   /// Create a floating-point multiplier module
-  static Module* createFloatMulModule(unsigned width, unsigned latency, Circuit& circuit);
+  static ExternalModule* createFloatMulModule(unsigned width, unsigned latency, Circuit& circuit);
 
   /// Create a floating-point divider module
-  static Module* createFloatDivModule(unsigned width, unsigned latency, Circuit& circuit);
+  static ExternalModule* createFloatDivModule(unsigned width, unsigned latency, Circuit& circuit);
 
   /// Create a floating-point square root module
-  static Module* createFloatSqrtModule(unsigned width, unsigned latency, Circuit& circuit);
+  static ExternalModule* createFloatSqrtModule(unsigned width, unsigned latency, Circuit& circuit);
 
   /// Create a floating-point exponential (e^x) module
-  static Module* createFloatExpModule(unsigned width, unsigned latency, Circuit& circuit);
+  static ExternalModule* createFloatExpModule(unsigned width, unsigned latency, Circuit& circuit);
 
   /// Create a floating-point natural logarithm (ln) module
-  static Module* createFloatLogModule(unsigned width, unsigned latency, Circuit& circuit);
+  static ExternalModule* createFloatLogModule(unsigned width, unsigned latency, Circuit& circuit);
 
   /// Create an integer to floating-point conversion module
-  static Module* createInt2FloatModule(unsigned width, unsigned latency, Circuit& circuit);
+  static ExternalModule* createInt2FloatModule(unsigned width, unsigned latency, Circuit& circuit);
 
   /// Create a floating-point to integer conversion module
-  static Module* createFloat2IntModule(unsigned width, unsigned latency, Circuit& circuit);
+  static ExternalModule* createFloat2IntModule(unsigned width, unsigned latency, Circuit& circuit);
 
   /// Create a floating-point comparator module
   /// @param predicate - 0=eq, 1=lt, 2=le, 3=gt, 4=ge, 5=ne, 6=ord, 7=uno
-  static Module* createFloatCmpModule(unsigned width, unsigned predicate,
+  static ExternalModule* createFloatCmpModule(unsigned width, unsigned predicate,
                                       unsigned latency, Circuit& circuit);
 
   /// Create a synchronous FIFO module (external Verilog)
-  static Module* createFifoModule(unsigned width, unsigned depth, Circuit& circuit);
+  static ExternalModule* createFifoModule(unsigned width, unsigned depth, Circuit& circuit);
 
   //===--------------------------------------------------------------------===//
   // Floating-point comparison + FIFO combined module

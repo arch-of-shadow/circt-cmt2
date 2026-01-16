@@ -59,12 +59,12 @@ circt::cmt2::ecmt2::Interface *Circuit::addInterface(llvm::StringRef name) {
   return lowLevelCircuit_->addInterface(name);
 }
 
-circt::cmt2::ecmt2::Module *
+circt::cmt2::ecmt2::ExternalModule *
 Circuit::addExternalModule(llvm::StringRef firrtlModule, llvm::StringRef name) {
   return lowLevelCircuit_->addExternalModule(firrtlModule, name);
 }
 
-circt::cmt2::ecmt2::Module *
+circt::cmt2::ecmt2::ExternalModule *
 Circuit::addExternalModule(llvm::StringRef firrtlModule,
                            const llvm::StringMap<int64_t> &params,
                            llvm::StringRef name) {

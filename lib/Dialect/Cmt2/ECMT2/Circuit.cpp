@@ -82,7 +82,7 @@ mlir::FailureOr<Module *> Circuit::getModule(llvm::StringRef name) {
   return mlir::failure();
 }
 
-Module *Circuit::hasExternalModule(llvm::StringRef firrtlModule,
+ExternalModule *Circuit::hasExternalModule(llvm::StringRef firrtlModule,
   const llvm::StringMap<int64_t> &params) {
 
   // Check library for the FIRRTL module
@@ -108,13 +108,13 @@ Module *Circuit::hasExternalModule(llvm::StringRef firrtlModule,
   return nullptr;
 }
 
-Module *Circuit::addExternalModule(llvm::StringRef firrtlModule,
-                                   llvm::StringRef name) {
+ExternalModule *Circuit::addExternalModule(llvm::StringRef firrtlModule,
+                                           llvm::StringRef name) {
   llvm::StringMap<int64_t> emptyParams;
   return addExternalModule(firrtlModule, emptyParams, name);
 }
 
-Module *Circuit::addExternalModule(
+ExternalModule *Circuit::addExternalModule(
     llvm::StringRef firrtlModule,
     const llvm::StringMap<int64_t> &params,
     llvm::StringRef name) {
@@ -156,16 +156,16 @@ Module *Circuit::addExternalModule(
     // Use provided name if given, otherwise use the actual FIRRTL module name
     std::string cmt2ModuleName = name.empty() ? actualModuleName : name.str();
 
-    // Create Module (external mode) at circuit level
+    // Create ExternalModule at circuit level
     // Save the current insertion point and ensure we create at circuit level
     auto savedIPForExtMod = builder_.saveInsertionPoint();
     builder_.setInsertionPointToEnd(&circuitOp_.getBody().front());
 
-    // Create Module with external constructor using the actual FIRRTL module name
+    // Create ExternalModule using the actual FIRRTL module name
     auto extModule =
-        std::make_unique<Module>(cmt2ModuleName, insertedModuleName, builder_, loc_);
+        std::make_unique<ExternalModule>(cmt2ModuleName, insertedModuleName, builder_, loc_);
 
-    // Restore insertion point immediately after creating the Module op
+    // Restore insertion point immediately after creating the ExtModuleFirrtlOp
     builder_.restoreInsertionPoint(savedIPForExtMod);
 
     // Apply conflict matrix from library
