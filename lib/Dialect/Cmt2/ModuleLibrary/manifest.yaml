@@ -30,7 +30,7 @@ modules:
       - [read, write, "SequentialBefore"]
     build:
       command: "./build.sh"
-      args: []
+      args: ["width=${width}", "init=${init}"]
       output_pattern: "Reg_width${width}_init${init}.mlir"
       cache: true
 
@@ -72,7 +72,7 @@ modules:
       - [rd0, rd0, "Conflict"]
     build:
       command: "./build.sh"
-      args: []
+      args: ["data_width=${data_width}", "addr_width=${addr_width}", "depth=${depth}"]
       output_pattern: "Mem1r1w1c_w${data_width}_a${addr_width}_d${depth}.mlir"
       cache: true
 
@@ -110,7 +110,7 @@ modules:
       - [read, read, "Conflict"]
     build:
       command: "./build.sh"
-      args: []
+      args: ["data_width=${data_width}", "addr_width=${addr_width}", "depth=${depth}"]
       output_pattern: "Mem1r1w0c_w${data_width}_a${addr_width}_d${depth}.mlir"
       cache: true
 
@@ -135,7 +135,7 @@ modules:
         outputs: ["read_data: !firrtl.uint<${width}>"]
     build:
       command: "./build.sh"
-      args: []
+      args: ["width=${width}"]
       output_pattern: "Wire_w${width}.mlir"
       cache: true
 
