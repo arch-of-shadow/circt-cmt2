@@ -794,13 +794,13 @@ def MethodOp : Cmt2Op<
 
 def CallOp : Cmt2Op<
   "call", [
-    ParentOneOf<["MethodOp", "RuleOp", "ValueOp", "IfOp", "ProcStepOp", "ProcStaticStepOp", "ProcRuleOp", "ProcMethodOp", "ProcWhileOp"]>,
+    ParentOneOf<["MethodOp", "RuleOp", "ValueOp", "IfOp", "ProcStepOp", "ProcStaticStepOp", "ProcRuleOp", "ProcMethodOp", "ProcWhileOp", "ProcCondIfOp", "DataflowTaskOp"]>,
     DeclareOpInterfaceMethods<CallOpInterface>
   ]> {
   let summary = "Call Method/Value.";
   let description = [{
     The `cmt2.call` operation is used to invoke a `MethodOp` or `ValueOp` within a `RuleOp`, `MethodOp`, or `ValueOp`.
-    It can also be used within the condition region of a `ProcWhileOp` to compute loop conditions.
+    It can also be used within the condition region of a `ProcWhileOp` or `ProcCondIfOp` to compute loop/branch conditions.
 
     This operation implements CallOpInterface, providing standard call-like operation features:
     - getCallableForCallee(): Returns the callee symbol reference
@@ -1271,7 +1271,7 @@ def ProcStepDoneOp : Cmt2Op<
 
 def ProcSeqOp : Cmt2Op<
   "proc.seq", [
-    ParentOneOf<["ProcRuleOp", "ProcMethodOp", "ProcSeqOp", "ProcParOp", "ProcIfOp", "ProcWhileOp", "ProcStaticRepeatOp", "ProcStaticIfOp"]>,
+    ParentOneOf<["ProcRuleOp", "ProcMethodOp", "ProcSeqOp", "ProcParOp", "ProcIfOp", "ProcCondIfOp", "ProcWhileOp", "ProcStaticRepeatOp", "ProcStaticIfOp", "DataflowTaskOp"]>,
     SingleBlock,
     NoTerminator,
     NoRegionArguments
@@ -1301,7 +1301,7 @@ def ProcSeqOp : Cmt2Op<
 
 def ProcParOp : Cmt2Op<
   "proc.par", [
-    ParentOneOf<["ProcRuleOp", "ProcMethodOp", "ProcSeqOp", "ProcParOp", "ProcIfOp", "ProcWhileOp", "ProcStaticRepeatOp", "ProcStaticIfOp"]>,
+    ParentOneOf<["ProcRuleOp", "ProcMethodOp", "ProcSeqOp", "ProcParOp", "ProcIfOp", "ProcCondIfOp", "ProcWhileOp", "ProcStaticRepeatOp", "ProcStaticIfOp", "DataflowTaskOp"]>,
     SingleBlock,
     NoTerminator,
     NoRegionArguments
@@ -1330,7 +1330,7 @@ def ProcParOp : Cmt2Op<
 
 def ProcIfOp : Cmt2Op<
   "proc.if", [
-    ParentOneOf<["ProcRuleOp", "ProcMethodOp", "ProcSeqOp", "ProcParOp", "ProcIfOp", "ProcWhileOp", "ProcStaticRepeatOp", "ProcStaticIfOp"]>,
+    ParentOneOf<["ProcRuleOp", "ProcMethodOp", "ProcSeqOp", "ProcParOp", "ProcIfOp", "ProcCondIfOp", "ProcWhileOp", "ProcStaticRepeatOp", "ProcStaticIfOp", "DataflowTaskOp"]>,
     NoRegionArguments,
     NoTerminator
   ]> {
@@ -1362,9 +1362,80 @@ def ProcIfOp : Cmt2Op<
   }];
 }
 
+def ProcCondIfOp : Cmt2Op<
+  "proc.cond_if", [
+    ParentOneOf<["ProcRuleOp", "ProcMethodOp", "ProcSeqOp", "ProcParOp", "ProcIfOp", "ProcCondIfOp", "ProcWhileOp", "ProcStaticRepeatOp", "ProcStaticIfOp", "DataflowTaskOp"]>,
+    NoRegionArguments,
+    NoTerminator
+  ]> {
+  let summary = "Conditional execution with condition region";
+  let description = [{
+    Evaluates condition in a dedicated region (supporting cmt2.call operations)
+    and executes the appropriate branch based on the result.
+
+    This is similar to `proc.if` but allows runtime-dependent conditions that
+    require reading from instances (e.g., checking register values).
+
+    Assembly format:
+    ```mlir
+    cmt2.proc.cond_if {
+      %val = cmt2.call @reg @read() : () -> !firrtl.uint<8>
+      %zero = firrtl.constant 0 : !firrtl.uint<8>
+      %cond = firrtl.neq %val, %zero : (!firrtl.uint<8>, !firrtl.uint<8>) -> !firrtl.uint<1>
+      cmt2.proc.cond_if_yield %cond : !firrtl.uint<1>
+    } then {
+      cmt2.proc.enable @handle_nonzero
+    } else {
+      cmt2.proc.enable @handle_zero
+    }
+    ```
+
+    The condition region is evaluated when control reaches this statement.
+    Unlike `proc.while`, the condition is only evaluated once (not repeatedly).
+
+    TDCC adds condition to transition guards:
+    - (prev, then_state, cond=true)
+    - (prev, else_state, cond=false)
+  }];
+  let regions = (region
+    SizedRegion<1>:$condRegion,
+    SizedRegion<1>:$thenRegion,
+    AnyRegion:$elseRegion
+  );
+  let assemblyFormat = [{
+    $condRegion `then` $thenRegion (`else` $elseRegion^)? attr-dict
+  }];
+
+  let extraClassDeclaration = [{
+    /// Get the condition value from the condition region's terminator.
+    mlir::Value getCond();
+  }];
+}
+
+def ProcCondIfYieldOp : Cmt2Op<
+  "proc.cond_if_yield", [
+    Terminator,
+    HasParent<"ProcCondIfOp">
+  ]> {
+  let summary = "Yield condition value from cond_if condition region";
+  let description = [{
+    Terminates the condition region of a `cmt2.proc.cond_if` operation,
+    yielding the boolean condition value that determines branch selection.
+
+    Assembly format:
+    ```mlir
+    cmt2.proc.cond_if_yield %cond : !firrtl.uint<1>
+    ```
+  }];
+  let arguments = (ins FIRRTLBaseType:$cond);
+  let assemblyFormat = [{
+    $cond `:` qualified(type($cond)) attr-dict
+  }];
+}
+
 def ProcWhileOp : Cmt2Op<
   "proc.while", [
-    ParentOneOf<["ProcRuleOp", "ProcMethodOp", "ProcSeqOp", "ProcParOp", "ProcIfOp", "ProcWhileOp", "ProcStaticRepeatOp", "ProcStaticIfOp"]>,
+    ParentOneOf<["ProcRuleOp", "ProcMethodOp", "ProcSeqOp", "ProcParOp", "ProcIfOp", "ProcCondIfOp", "ProcWhileOp", "ProcStaticRepeatOp", "ProcStaticIfOp", "DataflowTaskOp"]>,
     NoRegionArguments
   ]> {
   let summary = "Loop control with condition region";
@@ -1451,7 +1522,7 @@ def ProcYieldOp : Cmt2Op<
 
 def ProcStaticRepeatOp : Cmt2Op<
   "proc.static_repeat", [
-    ParentOneOf<["ProcRuleOp", "ProcMethodOp", "ProcSeqOp", "ProcParOp", "ProcIfOp", "ProcWhileOp", "ProcStaticRepeatOp", "ProcStaticIfOp"]>,
+    ParentOneOf<["ProcRuleOp", "ProcMethodOp", "ProcSeqOp", "ProcParOp", "ProcIfOp", "ProcCondIfOp", "ProcWhileOp", "ProcStaticRepeatOp", "ProcStaticIfOp", "DataflowTaskOp"]>,
     SingleBlock,
     NoTerminator,
     NoRegionArguments
@@ -1505,7 +1576,7 @@ def ProcStaticRepeatOp : Cmt2Op<
 
 def ProcStaticIfOp : Cmt2Op<
   "proc.static_if", [
-    ParentOneOf<["ProcRuleOp", "ProcMethodOp", "ProcSeqOp", "ProcParOp", "ProcIfOp", "ProcWhileOp", "ProcStaticRepeatOp", "ProcStaticIfOp"]>,
+    ParentOneOf<["ProcRuleOp", "ProcMethodOp", "ProcSeqOp", "ProcParOp", "ProcIfOp", "ProcCondIfOp", "ProcWhileOp", "ProcStaticRepeatOp", "ProcStaticIfOp", "DataflowTaskOp"]>,
     NoRegionArguments,
     NoTerminator
   ]> {
@@ -1574,7 +1645,7 @@ def ProcStaticIfOp : Cmt2Op<
 
 def ProcEnableOp : Cmt2Op<
   "proc.enable", [
-    ParentOneOf<["ProcRuleOp", "ProcMethodOp", "ProcSeqOp", "ProcParOp", "ProcIfOp", "ProcWhileOp", "ProcStaticRepeatOp", "ProcStaticIfOp"]>
+    ParentOneOf<["ProcRuleOp", "ProcMethodOp", "ProcSeqOp", "ProcParOp", "ProcIfOp", "ProcCondIfOp", "ProcWhileOp", "ProcStaticRepeatOp", "ProcStaticIfOp", "DataflowTaskOp"]>
   ]> {
   let summary = "Enable a group";
   let description = [{
@@ -1594,7 +1665,7 @@ def ProcEnableOp : Cmt2Op<
 
 def ProcInvokeOp : Cmt2Op<
   "proc.invoke", [
-    ParentOneOf<["ProcRuleOp", "ProcMethodOp", "ProcSeqOp", "ProcParOp", "ProcIfOp", "ProcWhileOp", "ProcStaticRepeatOp", "ProcStaticIfOp"]>
+    ParentOneOf<["ProcRuleOp", "ProcMethodOp", "ProcSeqOp", "ProcParOp", "ProcIfOp", "ProcCondIfOp", "ProcWhileOp", "ProcStaticRepeatOp", "ProcStaticIfOp", "DataflowTaskOp"]>
   ]> {
   let summary = "Invoke a method on an instance within procedural control";
   let description = [{

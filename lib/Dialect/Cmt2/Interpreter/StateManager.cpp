@@ -13,6 +13,7 @@
 
 #include "circt/Dialect/Cmt2/Interpreter/StateManager.h"
 #include "llvm/Support/Debug.h"
+#include "llvm/Support/raw_ostream.h"
 
 #define DEBUG_TYPE "cmt2-state-manager"
 

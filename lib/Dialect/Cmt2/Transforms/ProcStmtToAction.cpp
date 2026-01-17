@@ -23,6 +23,7 @@
 #include "mlir/Pass/Pass.h"
 #include "llvm/ADT/StringMap.h"
 #include "llvm/Support/Debug.h"
+#include "llvm/Support/MathExtras.h"
 
 #define DEBUG_TYPE "cmt2-proc-stmt-to-action"
 
@@ -58,7 +59,8 @@ private:
                           unsigned fsmWidth, ArrayAttr enablesAttr,
                           ArrayAttr transitionsAttr, uint64_t doneState,
                           ArrayAttr complexParsAttr,
-                          const DenseMap<StringRef, std::string> &branchFsmInstNames);
+                          const DenseMap<StringRef, std::string> &branchFsmInstNames,
+                          const DenseMap<StringRef, unsigned> &branchFsmWidths);
 
   /// Generate idle/running value methods.
   void generateStatusValues(ProcRuleOp procRule, cmt2::ModuleOp module,
@@ -79,7 +81,12 @@ private:
   void generateBranchFsmRules(ProcRuleOp procRule, cmt2::ModuleOp module,
                                OpBuilder &builder, StringRef mainFsmInstName,
                                unsigned fsmWidth, ArrayAttr complexParsAttr,
-                               const DenseMap<StringRef, std::string> &branchFsmInstNames);
+                               const DenseMap<StringRef, std::string> &branchFsmInstNames,
+                               const DenseMap<StringRef, unsigned> &branchFsmWidths);
+
+  /// Process a rule that originated from a dataflow task with proc control.
+  /// These rules have tdcc.* attributes and need FSM generation.
+  LogicalResult processDataflowTaskRule(RuleOp rule, cmt2::ModuleOp module);
 };
 
 } // end anonymous namespace
@@ -235,7 +242,8 @@ void ProcStmtToActionPass::generateStateRules(
     StringRef fsmInstName, unsigned fsmWidth, ArrayAttr enablesAttr,
     ArrayAttr transitionsAttr, uint64_t doneState,
     ArrayAttr complexParsAttr,
-    const DenseMap<StringRef, std::string> &branchFsmInstNames) {
+    const DenseMap<StringRef, std::string> &branchFsmInstNames,
+    const DenseMap<StringRef, unsigned> &branchFsmWidths) {
 
   Location loc = procRule.getLoc();
   auto fsmType = firrtl::UIntType::get(builder.getContext(), fsmWidth);
@@ -457,7 +465,7 @@ void ProcStmtToActionPass::generateStateRules(
     if (!region || region->empty())
       return;
     for (auto &op : region->front()) {
-      if (isa<ProcIfOp, ProcStaticIfOp, ProcWhileOp>(&op)) {
+      if (isa<ProcIfOp, ProcCondIfOp, ProcStaticIfOp, ProcWhileOp>(&op)) {
         condOpIdToOp[nextCondOpId++] = &op;
       }
       // Recurse into nested regions
@@ -561,6 +569,15 @@ void ProcStmtToActionPass::generateStateRules(
     if (isBranchState && !branchFsmName.empty()) {
       // Branch state with per-branch FSM:
       // Guard: main_fsm == fork_state AND branch_fsm == relative_state
+
+      // Look up branch-specific FSM width (may differ from parent FSM)
+      unsigned branchWidth = fsmWidth;  // Default to parent width
+      auto branchWidthIt = branchFsmWidths.find(branchInfo->name);
+      if (branchWidthIt != branchFsmWidths.end()) {
+        branchWidth = branchWidthIt->second;
+      }
+      auto branchFsmType = firrtl::UIntType::get(builder.getContext(), branchWidth);
+
       auto mainInstanceSym = FlatSymbolRefAttr::get(builder.getContext(), fsmInstName);
       auto mainFsmRead = guardBuilder.create<CallOp>(
           loc, SmallVector<Type>{fsmType}, ValueRange{},
@@ -571,16 +588,16 @@ void ProcStmtToActionPass::generateStateRules(
       auto mainAtFork = guardBuilder.create<firrtl::EQPrimOp>(
           loc, mainFsmRead.getResult(0), forkConst.getResult());
 
-      // Read branch FSM and check relative state
+      // Read branch FSM and check relative state (using branch-specific type/width)
       auto branchInstanceSym = FlatSymbolRefAttr::get(builder.getContext(), branchFsmName);
       auto branchFsmRead = guardBuilder.create<CallOp>(
-          loc, SmallVector<Type>{fsmType}, ValueRange{},
+          loc, SmallVector<Type>{branchFsmType}, ValueRange{},
           branchInstanceSym, readSym,
           ArrayAttr(), ArrayAttr());
       // Relative state: state - firstState + 1 (state 1 is first active state in branch FSM)
       uint64_t relativeState = state - branchInfo->firstState + 1;
       auto relStateConst = guardBuilder.create<firrtl::ConstantOp>(
-          loc, fsmType, llvm::APInt(fsmWidth, relativeState));
+          loc, branchFsmType, llvm::APInt(branchWidth, relativeState));
       auto branchAtState = guardBuilder.create<firrtl::EQPrimOp>(
           loc, branchFsmRead.getResult(0), relStateConst.getResult());
 
@@ -670,20 +687,28 @@ void ProcStmtToActionPass::generateStateRules(
 
         // Check if any branch FSM is at 0 (need initialization)
         Value anyBranchNotStarted = nullptr;
-        auto zeroConst = bodyBuilder.create<firrtl::ConstantOp>(
-            loc, fsmType, llvm::APInt(fsmWidth, 0)).getResult();
 
         for (const auto &branch : parBlock->branches) {
           auto branchFsmIt = branchFsmInstNames.find(branch.name);
           if (branchFsmIt != branchFsmInstNames.end()) {
+            // Look up branch-specific FSM width
+            unsigned branchWidth = fsmWidth;  // Default to parent width
+            auto branchWidthIt = branchFsmWidths.find(branch.name);
+            if (branchWidthIt != branchFsmWidths.end()) {
+              branchWidth = branchWidthIt->second;
+            }
+            auto branchFsmType = firrtl::UIntType::get(builder.getContext(), branchWidth);
+            auto branchZeroConst = bodyBuilder.create<firrtl::ConstantOp>(
+                loc, branchFsmType, llvm::APInt(branchWidth, 0)).getResult();
+
             auto branchInstanceSym = FlatSymbolRefAttr::get(
                 builder.getContext(), branchFsmIt->second);
             auto branchFsmRead = bodyBuilder.create<CallOp>(
-                loc, SmallVector<Type>{fsmType}, ValueRange{},
+                loc, SmallVector<Type>{branchFsmType}, ValueRange{},
                 branchInstanceSym, readSym,
                 ArrayAttr(), ArrayAttr());
             auto branchAtZero = bodyBuilder.create<firrtl::EQPrimOp>(
-                loc, branchFsmRead.getResult(0), zeroConst).getResult();
+                loc, branchFsmRead.getResult(0), branchZeroConst).getResult();
             if (!anyBranchNotStarted) {
               anyBranchNotStarted = branchAtZero;
             } else {
@@ -698,18 +723,28 @@ void ProcStmtToActionPass::generateStateRules(
         for (const auto &branch : parBlock->branches) {
           auto branchFsmIt = branchFsmInstNames.find(branch.name);
           if (branchFsmIt != branchFsmInstNames.end()) {
+            // Look up branch-specific FSM width
+            unsigned branchWidth = fsmWidth;  // Default to parent width
+            auto branchWidthIt = branchFsmWidths.find(branch.name);
+            if (branchWidthIt != branchFsmWidths.end()) {
+              branchWidth = branchWidthIt->second;
+            }
+            auto branchFsmType = firrtl::UIntType::get(builder.getContext(), branchWidth);
+            auto branchZeroConst = bodyBuilder.create<firrtl::ConstantOp>(
+                loc, branchFsmType, llvm::APInt(branchWidth, 0)).getResult();
+
             auto branchInstanceSym = FlatSymbolRefAttr::get(
                 builder.getContext(), branchFsmIt->second);
             // Read current value
             auto branchFsmRead = bodyBuilder.create<CallOp>(
-                loc, SmallVector<Type>{fsmType}, ValueRange{},
+                loc, SmallVector<Type>{branchFsmType}, ValueRange{},
                 branchInstanceSym, readSym,
                 ArrayAttr(), ArrayAttr());
             auto initStateConst = bodyBuilder.create<firrtl::ConstantOp>(
-                loc, fsmType, llvm::APInt(fsmWidth, 1)).getResult();
+                loc, branchFsmType, llvm::APInt(branchWidth, 1)).getResult();
             // Conditional: init if at zero, keep current otherwise
             auto branchAtZero = bodyBuilder.create<firrtl::EQPrimOp>(
-                loc, branchFsmRead.getResult(0), zeroConst).getResult();
+                loc, branchFsmRead.getResult(0), branchZeroConst).getResult();
             auto valueToWrite = bodyBuilder.create<firrtl::MuxPrimOp>(
                 loc, branchAtZero, initStateConst, branchFsmRead.getResult(0)).getResult();
             bodyBuilder.create<CallOp>(
@@ -835,10 +870,18 @@ void ProcStmtToActionPass::generateStateRules(
         for (const auto &branch : parBlock->branches) {
           auto branchFsmIt = branchFsmInstNames.find(branch.name);
           if (branchFsmIt != branchFsmInstNames.end()) {
+            // Look up branch-specific FSM width (may differ from parent FSM)
+            unsigned branchWidth = fsmWidth;  // Default to parent width
+            auto branchWidthIt = branchFsmWidths.find(branch.name);
+            if (branchWidthIt != branchFsmWidths.end()) {
+              branchWidth = branchWidthIt->second;
+            }
+            auto branchFsmType = firrtl::UIntType::get(builder.getContext(), branchWidth);
+
             auto branchInstanceSym = FlatSymbolRefAttr::get(
                 builder.getContext(), branchFsmIt->second);
             auto branchFsmRead = bodyBuilder.create<CallOp>(
-                loc, SmallVector<Type>{fsmType}, ValueRange{},
+                loc, SmallVector<Type>{branchFsmType}, ValueRange{},
                 branchInstanceSym, readSym,
                 ArrayAttr(), ArrayAttr());
 
@@ -849,9 +892,9 @@ void ProcStmtToActionPass::generateStateRules(
               doneStateVal = numStatesIt->second - 1;  // Done state = numStates - 1
             }
 
-            // Check if at done state
+            // Check if at done state (using branch-specific width and type)
             auto doneConst = bodyBuilder.create<firrtl::ConstantOp>(
-                loc, fsmType, llvm::APInt(fsmWidth, doneStateVal)).getResult();
+                loc, branchFsmType, llvm::APInt(branchWidth, doneStateVal)).getResult();
             auto branchAtDone = bodyBuilder.create<firrtl::EQPrimOp>(
                 loc, branchFsmRead.getResult(0), doneConst).getResult();
 
@@ -1032,6 +1075,8 @@ void ProcStmtToActionPass::generateStateRules(
               Value origCondValue = nullptr;
               if (auto ifOp = dyn_cast<ProcIfOp>(condOp)) {
                 origCondValue = ifOp.getCond();
+              } else if (auto condIfOp = dyn_cast<ProcCondIfOp>(condOp)) {
+                origCondValue = condIfOp.getCond();
               } else if (auto staticIfOp = dyn_cast<ProcStaticIfOp>(condOp)) {
                 origCondValue = staticIfOp.getCond();
               } else if (auto whileOp = dyn_cast<ProcWhileOp>(condOp)) {
@@ -1141,6 +1186,8 @@ void ProcStmtToActionPass::generateStateRules(
                   origCondValue = whileOp.getCond();
                 } else if (auto ifOp = dyn_cast<ProcIfOp>(condOp)) {
                   origCondValue = ifOp.getCond();
+                } else if (auto condIfOp = dyn_cast<ProcCondIfOp>(condOp)) {
+                  origCondValue = condIfOp.getCond();
                 }
                 if (origCondValue && !condValue) {
                   // Clone condition into body
@@ -1288,14 +1335,15 @@ void ProcStmtToActionPass::generateStateRules(
 void ProcStmtToActionPass::generateBranchFsmRules(
     ProcRuleOp procRule, cmt2::ModuleOp module, OpBuilder &builder,
     StringRef mainFsmInstName, unsigned fsmWidth, ArrayAttr complexParsAttr,
-    const DenseMap<StringRef, std::string> &branchFsmInstNames) {
+    const DenseMap<StringRef, std::string> &branchFsmInstNames,
+    const DenseMap<StringRef, unsigned> &branchFsmWidths) {
 
   if (!complexParsAttr)
     return;
 
   Location loc = procRule.getLoc();
   MLIRContext *ctx = builder.getContext();
-  auto fsmType = firrtl::UIntType::get(ctx, fsmWidth);
+  auto mainFsmType = firrtl::UIntType::get(ctx, fsmWidth);
   auto boolType = firrtl::UIntType::get(ctx, 1);
   StringRef procName = procRule.getSymName();
 
@@ -1340,6 +1388,14 @@ void ProcStmtToActionPass::generateBranchFsmRules(
         continue;
       }
       auto branchInstanceSym = FlatSymbolRefAttr::get(ctx, branchFsmIt->second);
+
+      // Look up branch-specific FSM width (may differ from main FSM width)
+      unsigned branchWidth = fsmWidth;  // Default to main FSM width
+      auto branchWidthIt = branchFsmWidths.find(branchName);
+      if (branchWidthIt != branchFsmWidths.end()) {
+        branchWidth = branchWidthIt->second;
+      }
+      auto branchFsmType = firrtl::UIntType::get(ctx, branchWidth);
 
       // Build transition map: from_state -> to_state
       // For unconditional transitions (enables), prefer back-edges (lower state)
@@ -1394,19 +1450,19 @@ void ProcStmtToActionPass::generateBranchFsmRules(
 
           // Read main FSM
           auto mainFsmRead = guardBuilder.create<CallOp>(
-              loc, SmallVector<Type>{fsmType}, ValueRange{},
+              loc, SmallVector<Type>{mainFsmType}, ValueRange{},
               mainInstanceSym, readSym, ArrayAttr(), ArrayAttr());
           auto forkConst = guardBuilder.create<firrtl::ConstantOp>(
-              loc, fsmType, llvm::APInt(fsmWidth, forkState));
+              loc, mainFsmType, llvm::APInt(fsmWidth, forkState));
           auto mainAtFork = guardBuilder.create<firrtl::EQPrimOp>(
               loc, mainFsmRead.getResult(0), forkConst.getResult());
 
-          // Read branch FSM
+          // Read branch FSM (using branch-specific type/width)
           auto branchFsmRead = guardBuilder.create<CallOp>(
-              loc, SmallVector<Type>{fsmType}, ValueRange{},
+              loc, SmallVector<Type>{branchFsmType}, ValueRange{},
               branchInstanceSym, readSym, ArrayAttr(), ArrayAttr());
           auto stateConst = guardBuilder.create<firrtl::ConstantOp>(
-              loc, fsmType, llvm::APInt(fsmWidth, state));
+              loc, branchFsmType, llvm::APInt(branchWidth, state));
           auto branchAtState = guardBuilder.create<firrtl::EQPrimOp>(
               loc, branchFsmRead.getResult(0), stateConst.getResult());
 
@@ -1464,7 +1520,7 @@ void ProcStmtToActionPass::generateBranchFsmRules(
           }
 
           auto nextStateConst = bodyBuilder.create<firrtl::ConstantOp>(
-              loc, fsmType, llvm::APInt(fsmWidth, nextState));
+              loc, branchFsmType, llvm::APInt(branchWidth, nextState));
           bodyBuilder.create<CallOp>(
               loc, SmallVector<Type>{}, ValueRange{nextStateConst.getResult()},
               branchInstanceSym, writeSym, ArrayAttr(), ArrayAttr());
@@ -1555,19 +1611,19 @@ void ProcStmtToActionPass::generateBranchFsmRules(
 
         // Read main FSM
         auto mainFsmRead = guardBuilder.create<CallOp>(
-            loc, SmallVector<Type>{fsmType}, ValueRange{},
+            loc, SmallVector<Type>{mainFsmType}, ValueRange{},
             mainInstanceSym, readSym, ArrayAttr(), ArrayAttr());
         auto forkConst = guardBuilder.create<firrtl::ConstantOp>(
-            loc, fsmType, llvm::APInt(fsmWidth, forkState));
+            loc, mainFsmType, llvm::APInt(fsmWidth, forkState));
         auto mainAtFork = guardBuilder.create<firrtl::EQPrimOp>(
             loc, mainFsmRead.getResult(0), forkConst.getResult());
 
-        // Read branch FSM
+        // Read branch FSM (using branch-specific type/width)
         auto branchFsmRead = guardBuilder.create<CallOp>(
-            loc, SmallVector<Type>{fsmType}, ValueRange{},
+            loc, SmallVector<Type>{branchFsmType}, ValueRange{},
             branchInstanceSym, readSym, ArrayAttr(), ArrayAttr());
         auto stateConst = guardBuilder.create<firrtl::ConstantOp>(
-            loc, fsmType, llvm::APInt(fsmWidth, headerState));
+            loc, branchFsmType, llvm::APInt(branchWidth, headerState));
         auto branchAtState = guardBuilder.create<firrtl::EQPrimOp>(
             loc, branchFsmRead.getResult(0), stateConst.getResult());
 
@@ -1611,11 +1667,11 @@ void ProcStmtToActionPass::generateBranchFsmRules(
             falseTarget = toState;
         }
 
-        // Write next state: mux(cond, trueTarget, falseTarget)
+        // Write next state: mux(cond, trueTarget, falseTarget) using branch-specific type/width
         auto trueConst = bodyBuilder.create<firrtl::ConstantOp>(
-            loc, fsmType, llvm::APInt(fsmWidth, trueTarget));
+            loc, branchFsmType, llvm::APInt(branchWidth, trueTarget));
         auto falseConst = bodyBuilder.create<firrtl::ConstantOp>(
-            loc, fsmType, llvm::APInt(fsmWidth, falseTarget));
+            loc, branchFsmType, llvm::APInt(branchWidth, falseTarget));
         auto nextState = bodyBuilder.create<firrtl::MuxPrimOp>(
             loc, condValue, trueConst.getResult(), falseConst.getResult());
 
@@ -1649,19 +1705,19 @@ void ProcStmtToActionPass::generateBranchFsmRules(
         OpBuilder guardBuilder(guardBlock, guardBlock->begin());
         guardBuilder.create<ReturnOp>(loc);
 
-        // Body: return branch_fsm == doneState
+        // Body: return branch_fsm == doneState (using branch-specific type/width)
         Block *bodyBlock = new Block();
         doneValue.getBody().push_back(bodyBlock);
         OpBuilder bodyBuilder(bodyBlock, bodyBlock->begin());
 
         auto branchFsmRead = bodyBuilder.create<CallOp>(
-            loc, SmallVector<Type>{fsmType}, ValueRange{},
+            loc, SmallVector<Type>{branchFsmType}, ValueRange{},
             branchInstanceSym, readSym, ArrayAttr(), ArrayAttr());
         auto doneStateConst = bodyBuilder.create<firrtl::ConstantOp>(
-            loc, fsmType, llvm::APInt(fsmWidth, branchDoneState));
+            loc, branchFsmType, llvm::APInt(branchWidth, branchDoneState));
         auto isDone = bodyBuilder.create<firrtl::EQPrimOp>(
             loc, branchFsmRead.getResult(0), doneStateConst.getResult());
-        bodyBuilder.create<ReturnOp>(loc, ValueRange{isDone.getResult()});
+        bodyBuilder.create<ReturnOp>(loc, isDone.getResult());
 
         LLVM_DEBUG(llvm::dbgs() << "  Generated branch done value: "
                                 << doneValueName << " (done state = "
@@ -1836,8 +1892,9 @@ LogicalResult ProcStmtToActionPass::processProcRule(ProcRuleOp rule,
   LLVM_DEBUG(llvm::dbgs() << "  Created FSM instance @" << fsmInstName << "\n");
 
   // Create per-branch FSM instances for parallel blocks that need them
-  // Map from branch name to FSM instance name
+  // Map from branch name to FSM instance name and width
   DenseMap<StringRef, std::string> branchFsmInstNames;
+  DenseMap<StringRef, unsigned> branchFsmWidths;
 
   // Parse tdcc.complex_pars for detailed branch FSM info (new per-branch FSM approach)
   auto complexParsAttr = rule->getAttrOfType<ArrayAttr>("tdcc.complex_pars");
@@ -1848,18 +1905,36 @@ LogicalResult ProcStmtToActionPass::processProcRule(ProcRuleOp rule,
         for (auto bfAttr : branchFsmsAttr) {
           auto bfDict = cast<DictionaryAttr>(bfAttr);
           auto branchName = bfDict.getAs<StringAttr>("name").getValue();
+          uint64_t branchNumStates = bfDict.getAs<IntegerAttr>("num_states").getInt();
 
-          // Create FSM instance for this branch
+          // Calculate branch FSM width from num_states
+          unsigned branchWidth = llvm::Log2_64_Ceil(branchNumStates);
+          if (branchWidth == 0) branchWidth = 1;  // Minimum 1 bit
+          branchFsmWidths[branchName] = branchWidth;
+
+          // Find or create register module with branch-specific width
+          auto branchRegMod = findRegisterModule(circuit, branchWidth);
+          if (!branchRegMod) {
+            branchRegMod = createFSMRegisterModule(circuit, branchWidth, circuitBuilder);
+          }
+          StringRef branchRegModName;
+          if (auto extMod = dyn_cast<ExtModuleFirrtlOp>(branchRegMod)) {
+            branchRegModName = extMod.getSymName();
+          }
+
+          // Create FSM instance for this branch with branch-specific register module
           std::string branchFsmName = (fsmInstName + "_" + branchName).str();
           builder.create<InstanceOp>(
               loc, builder.getStringAttr(branchFsmName),
               ValueRange{clock, reset},
-              FlatSymbolRefAttr::get(builder.getContext(), regModName),
+              FlatSymbolRefAttr::get(builder.getContext(), branchRegModName),
               ArrayAttr());
 
           branchFsmInstNames[branchName] = branchFsmName;
           LLVM_DEBUG(llvm::dbgs() << "  Created branch FSM instance @"
-                                  << branchFsmName << " (from complex_pars)\n");
+                                  << branchFsmName << " (width=" << branchWidth
+                                  << ", numStates=" << branchNumStates
+                                  << ", from complex_pars)\n");
         }
       }
     }
@@ -1883,6 +1958,9 @@ LogicalResult ProcStmtToActionPass::processProcRule(ProcRuleOp rule,
             if (branchFsmInstNames.count(branchName))
               continue;
 
+            // For par_blocks fallback, use main FSM width (less precise but backwards compatible)
+            branchFsmWidths[branchName] = fsmWidth;
+
             // Create FSM instance for this branch
             std::string branchFsmName = (fsmInstName + "_" + branchName).str();
             builder.create<InstanceOp>(
@@ -1903,11 +1981,11 @@ LogicalResult ProcStmtToActionPass::processProcRule(ProcRuleOp rule,
   // Generate state-based rules
   generateStateRules(rule, module, builder, fsmInstName, fsmWidth, enablesAttr,
                      transitionsAttr, doneState, complexParsAttr,
-                     branchFsmInstNames);
+                     branchFsmInstNames, branchFsmWidths);
 
   // Generate branch FSM rules for complex par (new per-branch FSM approach)
   generateBranchFsmRules(rule, module, builder, fsmInstName, fsmWidth,
-                         complexParsAttr, branchFsmInstNames);
+                         complexParsAttr, branchFsmInstNames, branchFsmWidths);
 
   // Generate idle/running value methods
   generateStatusValues(rule, module, builder, fsmInstName, fsmWidth, doneState);
@@ -2000,6 +2078,280 @@ LogicalResult ProcStmtToActionPass::processProcRule(ProcRuleOp rule,
 }
 
 //===----------------------------------------------------------------------===//
+// Dataflow Task Rule Processing (Phase 7 C2)
+//===----------------------------------------------------------------------===//
+
+LogicalResult ProcStmtToActionPass::processDataflowTaskRule(RuleOp rule,
+                                                             cmt2::ModuleOp module) {
+  // Only process rules that originated from dataflow tasks with proc control
+  if (!rule->hasAttr("dataflow.from_task") || !rule->hasAttr("tdcc.has_proc_control"))
+    return success();
+
+  LLVM_DEBUG(llvm::dbgs() << "Processing dataflow task rule @" << rule.getSymName() << "\n");
+
+  // Get TDCC metadata
+  auto numStatesAttr = rule->getAttrOfType<IntegerAttr>("tdcc.num_states");
+  auto fsmWidthAttr = rule->getAttrOfType<IntegerAttr>("tdcc.fsm_width");
+  auto doneStateAttr = rule->getAttrOfType<IntegerAttr>("tdcc.done_state");
+  auto enablesAttr = rule->getAttrOfType<ArrayAttr>("tdcc.enables");
+  auto transitionsAttr = rule->getAttrOfType<ArrayAttr>("tdcc.transitions");
+
+  if (!numStatesAttr || !fsmWidthAttr || !doneStateAttr) {
+    LLVM_DEBUG(llvm::dbgs() << "  Missing TDCC metadata, skipping\n");
+    return success();
+  }
+
+  unsigned fsmWidth = fsmWidthAttr.getInt();
+  uint64_t doneState = doneStateAttr.getInt();
+
+  // Find or create register module for FSM
+  auto circuit = module->getParentOfType<CircuitOp>();
+  OpBuilder circuitBuilder(circuit);
+  auto regMod = findRegisterModule(circuit, fsmWidth);
+  if (!regMod) {
+    regMod = createFSMRegisterModule(circuit, fsmWidth, circuitBuilder);
+    if (!regMod) {
+      rule.emitError("failed to create FSM register module for dataflow task");
+      return failure();
+    }
+  }
+
+  // Get clock and reset from module arguments
+  Value clock, reset;
+  for (auto arg : module.getBody().getArguments()) {
+    if (isa<firrtl::ClockType>(arg.getType())) {
+      clock = arg;
+    } else if (auto uintType = dyn_cast<firrtl::UIntType>(arg.getType())) {
+      if (uintType.getWidth() == 1 && !reset) {
+        reset = arg;
+      }
+    }
+  }
+
+  if (!clock || !reset) {
+    rule.emitError("could not find clock/reset for dataflow task FSM");
+    return failure();
+  }
+
+  // Create FSM instance
+  OpBuilder builder(rule);
+  builder.setInsertionPointAfter(rule);
+
+  Location loc = rule.getLoc();
+  auto taskNameAttr = rule->getAttrOfType<StringAttr>("dataflow.task_name");
+  std::string taskName = taskNameAttr ? taskNameAttr.getValue().str() : rule.getSymName().str();
+  std::string fsmInstName = "__fsm_df_" + taskName;
+
+  // Get the module name from the register module
+  StringRef regModName;
+  if (auto extMod = dyn_cast<ExtModuleFirrtlOp>(regMod)) {
+    regModName = extMod.getSymName();
+  }
+
+  // Create FSM instance
+  builder.create<InstanceOp>(
+      loc, builder.getStringAttr(fsmInstName),
+      ValueRange{clock, reset},
+      FlatSymbolRefAttr::get(builder.getContext(), regModName),
+      ArrayAttr());
+
+  LLVM_DEBUG(llvm::dbgs() << "  Created FSM instance @" << fsmInstName << "\n");
+
+  // Create tick rule for FSM transitions
+  std::string tickRuleName = rule.getSymName().str() + "_tick";
+  auto tickFuncType = builder.getFunctionType({}, {});
+
+  auto tickRule = builder.create<RuleOp>(
+      loc,
+      builder.getStringAttr(tickRuleName),
+      TypeAttr::get(tickFuncType),
+      builder.getStrArrayAttr({}),
+      builder.getArrayAttr({}),
+      nullptr, nullptr, nullptr, nullptr, nullptr);
+
+  // Mark tick rule with FSM metadata
+  tickRule->setAttr("dataflow.fsm_tick", builder.getUnitAttr());
+  tickRule->setAttr("dataflow.fsm_inst", builder.getStringAttr(fsmInstName));
+  tickRule->setAttr("dataflow.task_name", builder.getStringAttr(taskName));
+
+  // C4: Check if module needs stall gating and mark tick rule accordingly
+  if (module->hasAttr("stall.controller")) {
+    tickRule->setAttr("stall.gated", builder.getUnitAttr());
+    LLVM_DEBUG(llvm::dbgs() << "  Tick rule marked for stall gating\n");
+  }
+
+  // Build tick rule guard: always enabled (unconditional)
+  Region &tickGuardRegion = tickRule.getGuard();
+  Block *tickGuardBlock = new Block();
+  tickGuardRegion.push_back(tickGuardBlock);
+  OpBuilder tickGuardBuilder(tickGuardBlock, tickGuardBlock->begin());
+
+  // Create constant true for guard
+  auto boolType = firrtl::UIntType::get(builder.getContext(), 1);
+  auto trueConst = tickGuardBuilder.create<firrtl::ConstantOp>(
+      loc, boolType, APInt(1, 1));
+  tickGuardBuilder.create<ReturnOp>(loc, ValueRange{trueConst});
+
+  // Build tick rule body: FSM state transitions based on TDCC transitions
+  Region &tickBodyRegion = tickRule.getBody();
+  Block *tickBodyBlock = new Block();
+  tickBodyRegion.push_back(tickBodyBlock);
+  OpBuilder tickBodyBuilder(tickBodyBlock, tickBodyBlock->begin());
+
+  // Read current FSM state
+  auto fsmType = firrtl::UIntType::get(builder.getContext(), fsmWidth);
+  auto instanceSym = FlatSymbolRefAttr::get(builder.getContext(), fsmInstName);
+  auto readSym = FlatSymbolRefAttr::get(builder.getContext(), "read");
+  auto writeSym = FlatSymbolRefAttr::get(builder.getContext(), "write");
+
+  auto readOp = tickBodyBuilder.create<CallOp>(
+      loc, SmallVector<Type>{fsmType}, ValueRange{},
+      instanceSym, readSym,
+      ArrayAttr(), ArrayAttr());
+  Value currentState = readOp.getResult(0);
+
+  // Build next state logic based on transitions
+  // For now, simple sequential: state + 1 until done
+  Value nextState = currentState;
+
+  // Check if at done state, if so stay at done
+  auto doneStateConst = tickBodyBuilder.create<firrtl::ConstantOp>(
+      loc, fsmType, APInt(fsmWidth, doneState));
+  auto atDone = tickBodyBuilder.create<firrtl::EQPrimOp>(
+      loc, boolType, currentState, doneStateConst);
+
+  // Simple increment for next state (will be refined based on transitions)
+  auto oneConst = tickBodyBuilder.create<firrtl::ConstantOp>(
+      loc, fsmType, APInt(fsmWidth, 1));
+  auto incrementedState = tickBodyBuilder.create<firrtl::AddPrimOp>(
+      loc, currentState, oneConst);
+
+  // Mux: if at done, stay at done; else increment
+  nextState = tickBodyBuilder.create<firrtl::MuxPrimOp>(
+      loc, atDone, doneStateConst, incrementedState);
+
+  // Write next state
+  tickBodyBuilder.create<CallOp>(
+      loc, SmallVector<Type>{}, ValueRange{nextState},
+      instanceSym, writeSym,
+      ArrayAttr(), ArrayAttr());
+
+  tickBodyBuilder.create<ReturnOp>(loc);
+
+  LLVM_DEBUG(llvm::dbgs() << "  Created tick rule @" << tickRuleName << "\n");
+
+  // Create step enable rules for each step in enables
+  if (enablesAttr) {
+    for (auto enableAttr : enablesAttr) {
+      auto enableDict = cast<DictionaryAttr>(enableAttr);
+      auto stepAttr = enableDict.getAs<FlatSymbolRefAttr>("step");
+      auto stateAttr = enableDict.getAs<IntegerAttr>("state");
+
+      if (!stepAttr || !stateAttr)
+        continue;
+
+      StringRef stepName = stepAttr.getValue();
+      uint64_t enableState = stateAttr.getInt();
+
+      // Create enable rule: guards on FSM state == enableState
+      // Include state in name for uniqueness when same step is enabled at different states
+      std::string enableRuleName = rule.getSymName().str() + "_enable_" +
+                                    stepName.str() + "_s" + std::to_string(enableState);
+
+      auto enableRule = builder.create<RuleOp>(
+          loc,
+          builder.getStringAttr(enableRuleName),
+          TypeAttr::get(tickFuncType),
+          builder.getStrArrayAttr({}),
+          builder.getArrayAttr({}),
+          nullptr, nullptr, nullptr, nullptr, nullptr);
+
+      // Guard: FSM state == enableState
+      Region &enableGuardRegion = enableRule.getGuard();
+      Block *enableGuardBlock = new Block();
+      enableGuardRegion.push_back(enableGuardBlock);
+      OpBuilder enableGuardBuilder(enableGuardBlock, enableGuardBlock->begin());
+
+      auto enableStateConst = enableGuardBuilder.create<firrtl::ConstantOp>(
+          loc, fsmType, APInt(fsmWidth, enableState));
+      auto stateReadOp = enableGuardBuilder.create<CallOp>(
+          loc, SmallVector<Type>{fsmType}, ValueRange{},
+          instanceSym, readSym,
+          ArrayAttr(), ArrayAttr());
+      auto atEnableState = enableGuardBuilder.create<firrtl::EQPrimOp>(
+          loc, boolType, stateReadOp.getResult(0), enableStateConst);
+      enableGuardBuilder.create<ReturnOp>(loc, ValueRange{atEnableState});
+
+      // Body: The step's body logic is activated when this rule fires
+      // For static steps, the step body is already defined separately
+      // This enable rule just gates when the step can execute
+      Region &enableBodyRegion = enableRule.getBody();
+      Block *enableBodyBlock = new Block();
+      enableBodyRegion.push_back(enableBodyBlock);
+      OpBuilder enableBodyBuilder(enableBodyBlock, enableBodyBlock->begin());
+
+      // Mark which step this rule enables via attribute
+      enableRule->setAttr("enables.step", builder.getStringAttr(stepName));
+      enableRule->setAttr("enables.state", builder.getI64IntegerAttr(enableState));
+      enableRule->setAttr("dataflow.fsm_inst", builder.getStringAttr(fsmInstName));
+
+      // C4: Mark enable rules for stall gating if module needs it
+      if (module->hasAttr("stall.controller")) {
+        enableRule->setAttr("stall.gated", builder.getUnitAttr());
+      }
+
+      enableBodyBuilder.create<ReturnOp>(loc);
+
+      LLVM_DEBUG(llvm::dbgs() << "  Created enable rule @" << enableRuleName
+                              << " for step @" << stepName << " at state " << enableState << "\n");
+    }
+  }
+
+  // Modify the original rule's guard to include FSM done state check
+  // The rule should only fire when FSM reaches done state
+  Region &guardRegion = rule.getGuard();
+  if (!guardRegion.empty()) {
+    Block &guardBlock = guardRegion.front();
+
+    // Find the return op
+    Operation *terminator = guardBlock.getTerminator();
+    if (auto returnOp = dyn_cast<ReturnOp>(terminator)) {
+      OpBuilder guardBuilder(returnOp);
+
+      // Read FSM state and check if at done
+      auto fsmReadOp = guardBuilder.create<CallOp>(
+          loc, SmallVector<Type>{fsmType}, ValueRange{},
+          instanceSym, readSym,
+          ArrayAttr(), ArrayAttr());
+      auto doneConst = guardBuilder.create<firrtl::ConstantOp>(
+          loc, fsmType, APInt(fsmWidth, doneState));
+      auto atDoneState = guardBuilder.create<firrtl::EQPrimOp>(
+          loc, boolType, fsmReadOp.getResult(0), doneConst);
+
+      // If there was an existing guard condition, AND it with done check
+      if (returnOp.getNumOperands() > 0) {
+        Value existingGuard = returnOp.getOperand(0);
+        auto combinedGuard = guardBuilder.create<firrtl::AndPrimOp>(
+            loc, existingGuard, atDoneState);
+        returnOp->setOperand(0, combinedGuard);
+      } else {
+        // Replace return with one that has the done check
+        guardBuilder.create<ReturnOp>(loc, ValueRange{atDoneState});
+        returnOp.erase();
+      }
+    }
+  }
+
+  // Mark rule as processed
+  rule->setAttr("dataflow.fsm_generated", builder.getUnitAttr());
+  rule->setAttr("dataflow.fsm_inst", builder.getStringAttr(fsmInstName));
+
+  LLVM_DEBUG(llvm::dbgs() << "  Added FSM done guard to rule\n");
+
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
 // Module Processing
 //===----------------------------------------------------------------------===//
 
@@ -2008,15 +2360,31 @@ void ProcStmtToActionPass::processModule(cmt2::ModuleOp module) {
                           << "\n");
 
   // Collect all proc rules
-  SmallVector<ProcRuleOp> rules;
+  SmallVector<ProcRuleOp> procRules;
   for (auto &op : module.getBodyRegion().front()) {
     if (auto rule = dyn_cast<ProcRuleOp>(op))
-      rules.push_back(rule);
+      procRules.push_back(rule);
   }
 
-  // Process each rule
-  for (auto rule : rules) {
+  // Process each proc rule
+  for (auto rule : procRules) {
     if (failed(processProcRule(rule, module))) {
+      signalPassFailure();
+      return;
+    }
+  }
+
+  // Collect and process dataflow task rules (Phase 7 C2)
+  SmallVector<RuleOp> dataflowRules;
+  for (auto &op : module.getBodyRegion().front()) {
+    if (auto rule = dyn_cast<RuleOp>(op)) {
+      if (rule->hasAttr("dataflow.from_task"))
+        dataflowRules.push_back(rule);
+    }
+  }
+
+  for (auto rule : dataflowRules) {
+    if (failed(processDataflowTaskRule(rule, module))) {
       signalPassFailure();
       return;
     }

@@ -1388,6 +1388,23 @@ LogicalResult CallOp::verify() {
 }
 
 //===----------------------------------------------------------------------===//
+// ProcCondIfOp
+//===----------------------------------------------------------------------===//
+
+mlir::Value ProcCondIfOp::getCond() {
+  // Get the condition from the terminator of the condition region
+  if (getCondRegion().empty())
+    return nullptr;
+  Block &condBlock = getCondRegion().front();
+  if (condBlock.empty())
+    return nullptr;
+  // The terminator should be ProcCondIfYieldOp
+  if (auto yieldOp = dyn_cast<ProcCondIfYieldOp>(condBlock.getTerminator()))
+    return yieldOp.getCond();
+  return nullptr;
+}
+
+//===----------------------------------------------------------------------===//
 // ProcWhileOp
 //===----------------------------------------------------------------------===//
 

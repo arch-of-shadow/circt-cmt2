@@ -72,6 +72,48 @@ RuleOp DataflowLoweringPass::lowerTask(DataflowTaskOp task,
   LLVM_DEBUG(llvm::dbgs() << "  Lowering task @" << task.getSymName()
                           << " to rule @" << ruleName << "\n");
 
+  // Collect external values used in the task body (dataflow arguments)
+  // These need to be captured and passed to the rule
+  SmallVector<Value> capturedValues;
+  SmallVector<Type> capturedTypes;
+  SmallVector<std::string> capturedNames;
+  llvm::DenseSet<Value> seenValues;
+
+  Block &dataflowBlock = dataflow.getBody().front();
+  Block &taskBlock = task.getBody().front();
+
+  // Check each operation in the task body for uses of external values
+  taskBlock.walk([&](Operation *op) {
+    for (Value operand : op->getOperands()) {
+      // Skip if already captured
+      if (seenValues.contains(operand))
+        continue;
+
+      // Check if this is a dataflow block argument (external to task)
+      if (auto blockArg = dyn_cast<BlockArgument>(operand)) {
+        if (blockArg.getOwner() == &dataflowBlock) {
+          // This is a dataflow argument - need to capture it
+          LLVM_DEBUG(llvm::dbgs() << "    Capturing dataflow arg: " << operand << "\n");
+          capturedValues.push_back(operand);
+          capturedTypes.push_back(operand.getType());
+
+          // Get name from dataflow arg names if available
+          unsigned argIdx = blockArg.getArgNumber();
+          auto argNames = dataflow.getArgNames();
+          if (argIdx < argNames.size()) {
+            capturedNames.push_back(cast<StringAttr>(argNames[argIdx]).strref().str());
+          } else {
+            capturedNames.push_back("captured_" + std::to_string(argIdx));
+          }
+          seenValues.insert(operand);
+        }
+      }
+    }
+  });
+
+  LLVM_DEBUG(llvm::dbgs() << "    Captured " << capturedValues.size()
+                          << " external values\n");
+
   // Collect token input types and names
   SmallVector<Type> tokenInTypes;
   SmallVector<StringRef> tokenInNames;
@@ -89,9 +131,32 @@ RuleOp DataflowLoweringPass::lowerTask(DataflowTaskOp task,
   for (auto result : task.getTokenOutputs())
     tokenOutTypes.push_back(result.getType());
 
-  // Create the rule with empty regions first
-  // Rule signature: no regular args, only token args
-  auto funcType = builder.getFunctionType({}, {});
+  // Check if this is the final task (terminates with DataflowReturnOp)
+  // If so, the rule should return the dataflow's result types
+  bool isFinalTask = isa<DataflowReturnOp>(taskBlock.getTerminator());
+  SmallVector<Type> resultTypes;
+  SmallVector<std::string> resultNames;
+  if (isFinalTask) {
+    // Get return types from the dataflow
+    auto dataflowType = cast<FunctionType>(dataflow.getFunctionType());
+    for (auto [idx, resType] : llvm::enumerate(dataflowType.getResults())) {
+      resultTypes.push_back(resType);
+      resultNames.push_back("result_" + std::to_string(idx));
+    }
+    LLVM_DEBUG(llvm::dbgs() << "    Final task with " << resultTypes.size()
+                            << " return types\n");
+  }
+
+  // Create the rule with captured values as regular arguments
+  SmallVector<StringRef> argNameRefs;
+  for (const auto &name : capturedNames)
+    argNameRefs.push_back(name);
+  auto funcType = builder.getFunctionType(capturedTypes, resultTypes);
+
+  // Build result name attributes
+  SmallVector<Attribute> resultNameAttrs;
+  for (const auto &name : resultNames)
+    resultNameAttrs.push_back(builder.getStringAttr(name));
 
   // Build token type arrays for attributes
   SmallVector<Attribute> tokenInTypeAttrs;
@@ -106,8 +171,8 @@ RuleOp DataflowLoweringPass::lowerTask(DataflowTaskOp task,
       loc,
       /*sym_name=*/builder.getStringAttr(ruleName),
       /*function_type=*/TypeAttr::get(funcType),
-      /*argNames=*/builder.getStrArrayAttr({}),
-      /*bodyResNames=*/builder.getArrayAttr({}),
+      /*argNames=*/builder.getStrArrayAttr(argNameRefs),
+      /*bodyResNames=*/builder.getArrayAttr(resultNameAttrs),
       /*arg_attrs=*/nullptr,
       /*res_attrs=*/nullptr,
       /*token_in_types=*/
@@ -124,15 +189,40 @@ RuleOp DataflowLoweringPass::lowerTask(DataflowTaskOp task,
   if (auto timing = task.getTiming())
     rule->setAttr("timing", *timing);
 
+  // C2: Propagate TDCC attributes for tasks with proc control
+  // This allows downstream passes to generate FSM logic and connect
+  // the FSM done state to token production
+  if (task->hasAttr("tdcc.has_proc_control")) {
+    LLVM_DEBUG(llvm::dbgs() << "    Task has proc control, propagating TDCC attributes\n");
+
+    // Copy all tdcc.* attributes from task to rule
+    for (auto attr : task->getAttrs()) {
+      if (attr.getName().getValue().starts_with("tdcc.")) {
+        rule->setAttr(attr.getName(), attr.getValue());
+      }
+    }
+
+    // Mark rule as originating from a dataflow task for special handling
+    rule->setAttr("dataflow.from_task", builder.getUnitAttr());
+    rule->setAttr("dataflow.task_name", builder.getStringAttr(task.getSymName()));
+  }
+
   // Get the rule's regions
   Region &guardRegion = rule.getGuard();
   Region &bodyRegion = rule.getBody();
 
-  // Create blocks for guard and body with token arguments
+  // Create blocks for guard and body
   Block *guardBlock = new Block();
   Block *bodyBlock = new Block();
 
-  // Add token arguments to both blocks
+  // Add captured value arguments first (regular rule arguments)
+  // These match the function signature
+  for (auto capturedType : capturedTypes) {
+    guardBlock->addArgument(capturedType, loc);
+    bodyBlock->addArgument(capturedType, loc);
+  }
+
+  // Then add token arguments
   for (auto tokenType : tokenInTypes) {
     guardBlock->addArgument(tokenType, loc);
     bodyBlock->addArgument(tokenType, loc);
@@ -147,8 +237,10 @@ RuleOp DataflowLoweringPass::lowerTask(DataflowTaskOp task,
     auto boolType = firrtl::UIntType::get(builder.getContext(), 1);
     Value guardCond = nullptr;
 
+    // Token arguments start after captured values
+    unsigned tokenArgOffset = capturedTypes.size();
     for (auto [idx, tokenType] : llvm::enumerate(tokenInTypes)) {
-      Value tokenArg = guardBlock->getArgument(idx);
+      Value tokenArg = guardBlock->getArgument(tokenArgOffset + idx);
       auto validOp =
           guardBuilder.create<TokenValidOp>(loc, boolType, tokenArg);
 
@@ -167,18 +259,34 @@ RuleOp DataflowLoweringPass::lowerTask(DataflowTaskOp task,
   }
   guardBuilder.create<ReturnOp>(loc);
 
-  // Build the body: clone task body with token argument mapping
+  // Build the body: clone task body with proper argument mapping
   OpBuilder bodyBuilder(bodyBlock, bodyBlock->begin());
 
-  // Create mapping from task's token inputs to body block arguments
-  // Task body accesses tokens via the operands (not block args since not isolated)
+  // Map captured dataflow arguments to body block arguments
+  for (auto [idx, capturedVal] : llvm::enumerate(capturedValues)) {
+    valueMapping.map(capturedVal, bodyBlock->getArgument(idx));
+  }
+
+  // Map task's token inputs to body block arguments (after captured values)
+  unsigned tokenArgOffset = capturedTypes.size();
   for (auto [idx, taskToken] : llvm::enumerate(task.getTokenInputs())) {
-    valueMapping.map(taskToken, bodyBlock->getArgument(idx));
+    valueMapping.map(taskToken, bodyBlock->getArgument(tokenArgOffset + idx));
   }
 
   // Clone operations from task body to rule body
-  Block &taskBlock = task.getBody().front();
+  // For tasks with proc control, skip cloning proc control ops (they will be
+  // expanded into FSM logic by downstream passes based on TDCC attributes)
+  bool hasProcControl = task->hasAttr("tdcc.has_proc_control");
+
   for (auto &op : taskBlock.without_terminator()) {
+    // Skip proc control operations for tasks with proc control
+    if (hasProcControl &&
+        isa<ProcSeqOp, ProcParOp, ProcIfOp, ProcWhileOp,
+            ProcStaticRepeatOp, ProcStaticIfOp, ProcEnableOp>(&op)) {
+      LLVM_DEBUG(llvm::dbgs() << "    Skipping proc control op: "
+                              << op.getName() << "\n");
+      continue;
+    }
     bodyBuilder.clone(op, valueMapping);
   }
 
@@ -197,11 +305,16 @@ RuleOp DataflowLoweringPass::lowerTask(DataflowTaskOp task,
     }
   } else if (auto returnOp = dyn_cast<DataflowReturnOp>(terminator)) {
     // Final task - results go to dataflow output
-    // For now, just create a return
-    bodyBuilder.create<ReturnOp>(loc);
+    // Clone the return values and create a return with them
+    SmallVector<Value> returnValues;
+    for (Value operand : returnOp->getOperands()) {
+      Value mappedValue = valueMapping.lookupOrDefault(operand);
+      returnValues.push_back(mappedValue);
+    }
+    bodyBuilder.create<ReturnOp>(loc, returnValues);
 
-    // Store the return values for dataflow output wiring
-    // This would need module-level handling
+    LLVM_DEBUG(llvm::dbgs() << "    Final task returns " << returnValues.size()
+                            << " values\n");
   }
 
   LLVM_DEBUG(llvm::dbgs() << "    Created rule with " << tokenInTypes.size()
@@ -231,24 +344,65 @@ LogicalResult DataflowLoweringPass::lowerDataflow(ProcDataflowOp dataflow,
     LLVM_DEBUG(llvm::dbgs() << "  Dataflow arg: " << arg << "\n");
   }
 
-  // Lower each task to a rule
+  // Collect all tasks and build token-to-storage-index mapping
+  // Each task that produces tokens gets storage indices assigned in order
   SmallVector<DataflowTaskOp> tasks;
+  llvm::DenseMap<Value, unsigned> tokenToStorageIdx;
+  unsigned storageIdx = 0;
+
   for (auto &op : dataflowBlock) {
-    if (auto task = dyn_cast<DataflowTaskOp>(op))
+    if (auto task = dyn_cast<DataflowTaskOp>(op)) {
       tasks.push_back(task);
+      // Assign storage indices to this task's output tokens
+      for (Value result : task.getTokenOutputs()) {
+        tokenToStorageIdx[result] = storageIdx++;
+        LLVM_DEBUG(llvm::dbgs() << "  Task @" << task.getSymName()
+                                << " output mapped to storage __tok_"
+                                << (storageIdx - 1) << "\n");
+      }
+    }
   }
 
   SmallVector<RuleOp> generatedRules;
   for (auto task : tasks) {
+    // Build the list of storage indices for this task's inputs
+    SmallVector<unsigned> inputStorageIndices;
+    for (Value inputToken : task.getTokenInputs()) {
+      auto it = tokenToStorageIdx.find(inputToken);
+      if (it != tokenToStorageIdx.end()) {
+        inputStorageIndices.push_back(it->second);
+        LLVM_DEBUG(llvm::dbgs() << "  Task @" << task.getSymName()
+                                << " input from storage __tok_" << it->second
+                                << "\n");
+      } else {
+        LLVM_DEBUG(llvm::dbgs() << "  Task @" << task.getSymName()
+                                << " input not found in mapping!\n");
+        inputStorageIndices.push_back(0); // Fallback
+      }
+    }
+
     RuleOp rule = lowerTask(task, dataflow, builder, valueMapping);
+
+    // Add attribute with input storage indices for TokenRTLGen to use
+    if (!inputStorageIndices.empty()) {
+      SmallVector<Attribute> indexAttrs;
+      for (unsigned idx : inputStorageIndices) {
+        indexAttrs.push_back(builder.getI64IntegerAttr(idx));
+      }
+      rule->setAttr("dataflow.input_storage_indices",
+                    builder.getArrayAttr(indexAttrs));
+    }
+
     generatedRules.push_back(rule);
   }
 
-  // Mark the dataflow as lowered
-  dataflow->setAttr("dataflow.lowered", builder.getUnitAttr());
-
+  // Erase the dataflow op after successful lowering
+  // The rules now handle all the logic - keeping the dataflow op would cause
+  // TokenRTLGen to process it again and create duplicate storage instances
   LLVM_DEBUG(llvm::dbgs() << "  Generated " << generatedRules.size()
-                          << " rules\n");
+                          << " rules, erasing dataflow op\n");
+
+  dataflow->erase();
 
   return success();
 }

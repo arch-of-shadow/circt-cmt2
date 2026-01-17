@@ -871,6 +871,24 @@ LowerCmt2ToFIRRTLPass::connectOutputPorts(cmt2::ModuleOp module,
                                     bodyResults[idx]);
         }
       }
+    } else {
+      // Rules: wire arg input ports and result output ports
+      // Rules with results need their computed values wired to output ports
+      auto funcType = cast<FunctionType>(func.getFunctionType());
+      portIndex += funcType.getInputs().size();   // Skip arg ports
+
+      // Connect result outputs (for rules that return values, e.g., from
+      // dataflow pipelines)
+      ArrayRef<Value> bodyResults =
+          ctx.getSignalTracker().getBodyResults(func.functionNameAttr());
+      for (auto [idx, _] : llvm::enumerate(funcType.getResults())) {
+        Value resultPort =
+            firrtlModule.getBodyBlock()->getArgument(portIndex++);
+        if (idx < bodyResults.size() && bodyResults[idx]) {
+          builder.create<ConnectOp>(func.getLoc(), resultPort,
+                                    bodyResults[idx]);
+        }
+      }
     }
   }
 
@@ -934,12 +952,12 @@ LowerCmt2ToFIRRTLPass::processFunction(Cmt2FunctionLike func,
     Region &bodyRegion = func->getRegion(1);
 
     // Create wires for result values (to escape the when block's region)
-    // Only create wires for Methods and Values (which have output ports), not
-    // for Rules
+    // Methods, Values, and Rules with results need output port wiring
     auto funcType = cast<FunctionType>(func.getFunctionType());
     SmallVector<Value> resultWires;
     bool needsResultWires = (func.getFunctionKind() == FunctionKind::Method ||
-                             func.getFunctionKind() == FunctionKind::Value) &&
+                             func.getFunctionKind() == FunctionKind::Value ||
+                             func.getFunctionKind() == FunctionKind::Rule) &&
                             !funcType.getResults().empty();
 
     if (needsResultWires) {
@@ -1300,6 +1318,16 @@ LogicalResult LowerCmt2ToFIRRTLPass::cloneRegionOps(
         results.push_back(ctx.getIRMapping().lookupOrDefault(result));
       }
       continue;
+    }
+
+    // NOTE: Token operations (token.create, token.valid, token.data, token.join)
+    // should be eliminated by the cmt2-token-materialize pass BEFORE this pass runs.
+    // If token ops reach here, it means the pass pipeline is misconfigured.
+    // See docs/Dialects/Cmt2/tmp/PipelinedDesign-Implementation.md Section 8.
+    if (isa<TokenCreateOp, TokenValidOp, TokenDataOp, TokenJoinOp>(op)) {
+      return op.emitError("Token operation reached cmt2-to-firrtl. "
+                          "Run cmt2-token-materialize pass first to convert "
+                          "token ops to storage instances and calls.");
     }
 
     // Clone other operations normally

@@ -65,6 +65,14 @@ private:
   LogicalResult validateProcMethodLatency(ProcMethodOp procMethod,
                                           cmt2::ModuleOp module);
 
+  /// Validate dataflow task timing against TDCC-computed control flow (C3).
+  LogicalResult validateDataflowTaskTiming(DataflowTaskOp task,
+                                           cmt2::ModuleOp module);
+
+  /// Validate all dataflow tasks in a ProcDataflowOp.
+  LogicalResult validateProcDataflow(ProcDataflowOp dataflow,
+                                     cmt2::ModuleOp module);
+
   /// Compute the static latency of a control region.
   /// Returns std::nullopt if the region contains dynamic constructs.
   std::optional<int64_t> computeControlLatency(Region &region,
@@ -338,6 +346,68 @@ TimingValidationPass::validateProcMethodLatency(ProcMethodOp procMethod,
 }
 
 //===----------------------------------------------------------------------===//
+// Dataflow Task Timing Validation (C3)
+//===----------------------------------------------------------------------===//
+
+LogicalResult
+TimingValidationPass::validateDataflowTaskTiming(DataflowTaskOp task,
+                                                 cmt2::ModuleOp module) {
+  // Check if task has TDCC attributes (has proc control)
+  auto hasProcControl = task->hasAttr("tdcc.has_proc_control");
+  if (!hasProcControl)
+    return success(); // No proc control, nothing to cross-validate
+
+  // Get TDCC-computed latency from done_state
+  auto doneStateAttr = task->getAttrOfType<IntegerAttr>("tdcc.done_state");
+  if (!doneStateAttr) {
+    return task.emitOpError("has proc control but missing tdcc.done_state; "
+                            "run TDCC pass first");
+  }
+
+  int64_t tdccLatency = doneStateAttr.getInt();
+
+  // Get declared timing if present
+  auto declaredTiming = task.getTiming();
+  if (!declaredTiming)
+    return success(); // No declared timing, nothing to cross-validate
+
+  // The timing interval gives (start, end) cycles
+  int64_t declaredLatency = declaredTiming->getEnd() - declaredTiming->getStart();
+
+  // Validate that declared latency matches TDCC-computed latency
+  if (declaredLatency != tdccLatency) {
+    return task.emitOpError("declared timing interval [")
+           << declaredTiming->getStart() << ", " << declaredTiming->getEnd()
+           << "] implies " << declaredLatency << " cycles, but TDCC computed "
+           << tdccLatency << " cycles from control flow";
+  }
+
+  LLVM_DEBUG(llvm::dbgs() << "  Task @" << task.getSymName()
+                          << " timing validated: " << tdccLatency << " cycles\n");
+
+  return success();
+}
+
+LogicalResult
+TimingValidationPass::validateProcDataflow(ProcDataflowOp dataflow,
+                                           cmt2::ModuleOp module) {
+  LLVM_DEBUG(llvm::dbgs() << "  Validating dataflow @" << dataflow.getSymName()
+                          << "\n");
+
+  LogicalResult result = success();
+
+  // Validate each task in the dataflow
+  for (auto &op : dataflow.getBody().front()) {
+    if (auto task = dyn_cast<DataflowTaskOp>(op)) {
+      if (failed(validateDataflowTaskTiming(task, module)))
+        result = failure();
+    }
+  }
+
+  return result;
+}
+
+//===----------------------------------------------------------------------===//
 // Module Validation
 //===----------------------------------------------------------------------===//
 
@@ -402,6 +472,12 @@ LogicalResult TimingValidationPass::validateModule(
 
     // Validate static_latency matches control flow (TV5)
     if (failed(validateProcMethodLatency(procMethod, module)))
+      result = failure();
+  });
+
+  // Validate dataflow task timing (C3: Unified timing validation)
+  module.walk([&](ProcDataflowOp dataflow) {
+    if (failed(validateProcDataflow(dataflow, module)))
       result = failure();
   });
 

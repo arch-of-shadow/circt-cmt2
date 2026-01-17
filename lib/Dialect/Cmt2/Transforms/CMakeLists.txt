@@ -7,6 +7,8 @@ add_circt_dialect_library(CIRCTCmt2Transforms
   ControlCollapsing.cpp
   DataflowLowering.cpp
   TokenLowering.cpp
+  TokenRTLGen.cpp
+  ModuleGenerator.cpp
   StallControllerGen.cpp
   Diagnostics.cpp
   SimplifyStaticGuards.cpp
@@ -42,6 +44,7 @@ add_circt_dialect_library(CIRCTCmt2Transforms
   CIRCTFIRRTL
   CIRCTSupport
   CIRCTCmt2
+  CIRCTCmt2ModuleLib
   CIRCTCmt2Analysis
   CIRCTCmt2ToFIRRTL
   MLIRIR

@@ -468,6 +468,32 @@ def TokenLowering : Pass<"cmt2-token-lowering", "cmt2::CircuitOp"> {
   ];
 }
 
+def TokenRTLGen : Pass<"cmt2-token-rtl-gen", "cmt2::CircuitOp"> {
+  let summary = "Generate RTL for token operations.";
+  let description = [{
+    This pass converts token annotations to actual RTL hardware by:
+
+    1. Instantiating storage for tokens:
+       - LS tokens: Shift registers (chain of Reg instances)
+       - LI tokens: FIFOs with inferred depth
+
+    2. Rewriting token operations to storage operations:
+       - `token.create` → write to shift register / FIFO enqueue
+       - `token.valid` → shift register valid / FIFO notEmpty
+       - `token.data` → shift register peek / FIFO dequeue
+       - `token.join` → AND of all input valids
+
+    3. Handling multi-consumer (fork) patterns:
+       - LS tokens: fan-out valid/data signals
+       - LI tokens: broadcast FIFO with per-consumer handshake
+
+    This pass MUST run AFTER TokenLowering (which adds annotations) and
+    BEFORE Cmt2ToFIRRTL conversion.
+  }];
+
+  let dependentDialects = ["circt::firrtl::FIRRTLDialect"];
+}
+
 def StallControllerGen : Pass<"cmt2-stall-controller-gen", "cmt2::CircuitOp"> {
   let summary = "Generate stall controllers for LS/LI boundaries.";
   let description = [{
