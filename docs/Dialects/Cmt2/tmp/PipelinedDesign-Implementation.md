@@ -635,50 +635,159 @@ public:
 
 ### 8.1 Overall Pipeline
 
+**CRITICAL DESIGN PRINCIPLE:** All token operations must be eliminated BEFORE cmt2-to-firrtl.
+The cmt2-to-firrtl pass should see only standard CMT2 ops (instances, calls, rules) - NO token ops.
+
 ```
 Input: proc.dataflow / rules with tokens
          │
          ▼
 ┌─────────────────────────────────────────┐
-│ 1. Token Analysis (using def-use)       │
+│ Pass 1: cmt2-dataflow-lowering          │
+│    - Lower proc.dataflow to rules       │
+│    - Each task becomes a rule           │
+│    - Token inputs/outputs preserved     │
+│    Output: Rules with token signatures  │
+└─────────────────────────────────────────┘
+         │
+         ▼
+┌─────────────────────────────────────────┐
+│ Pass 2: cmt2-token-analysis             │  (Analysis, no transformation)
 │    - Build token dependency graph       │
 │    - Identify LS regions and LI tokens  │
 │    - Infer timing for untimed tokens    │
+│    - Compute FIFO depths for LI tokens  │
+│    - Check for deadlocks                │
+│    Output: TokenAnalysisInfo cached     │
 └─────────────────────────────────────────┘
          │
          ▼
 ┌─────────────────────────────────────────┐
-│ 2. FIFO Depth Inference                 │
-│    - Analyze producer/consumer rates    │
-│    - Compute latency variation          │
-│    - Assign FIFO depths to LI tokens    │
+│ Pass 3: cmt2-token-materialize          │  ** KEY PASS **
+│    For each token producer:             │
+│    1. Instantiate storage module:       │
+│       - LS: @ShiftReg<depth, dataType>  │
+│       - LI: @FIFO<depth, dataType>      │
+│    2. Rewrite token operations:         │
+│       - token.create → storage.write()  │
+│       - token.valid  → storage.valid()  │
+│       - token.data   → storage.read()   │
+│       - token.join   → AND of valids    │
+│    3. Handle multi-consumer (fork):     │
+│       - LS: fan-out valid/data signals  │
+│       - LI: broadcast FIFO              │
+│    Output: NO token ops remain          │
 └─────────────────────────────────────────┘
          │
          ▼
 ┌─────────────────────────────────────────┐
-│ 3. Deadlock Detection                   │
-│    - Find LI cycles                     │
-│    - Verify FIFO depths prevent deadlock│
-│    - Emit warnings/errors               │
+│ Pass 4: cmt2-stall-controller-gen       │
+│    - Identify LS/LI boundaries          │
+│    - Generate stall controller instance │
+│    - Wire stall signals to LS registers │
+│    Output: Stall logic added            │
 └─────────────────────────────────────────┘
          │
          ▼
 ┌─────────────────────────────────────────┐
-│ 4. Dataflow Lowering                    │
-│    - Lower proc.dataflow to rules       │
-│    - Insert token connections           │
+│ Pass 5: cmt2-to-firrtl                  │
+│    - Standard conversion                │
+│    - NO token handling needed           │
+│    - Handles instances, calls, rules    │
+│    Output: FIRRTL circuit               │
 └─────────────────────────────────────────┘
          │
          ▼
-┌─────────────────────────────────────────┐
-│ 5. Token Lowering                       │
-│    - LS tokens → shift registers        │
-│    - LI tokens → FIFOs (with depth)     │
-│    - Insert stall controllers           │
-└─────────────────────────────────────────┘
-         │
-         ▼
-    Standard CMT2 lowering (cmt2-to-firrtl)
+    firtool → SystemVerilog
+```
+
+### 8.2 Pass Responsibilities (Detailed)
+
+**Pass 3 (cmt2-token-materialize) is the critical pass that eliminates token ops.**
+
+#### 8.2.1 Token Storage Instantiation
+
+For each `token.create` operation, the pass must:
+
+1. **Determine storage type** from analysis:
+   - Check `token.impl` annotation (set by token-analysis)
+   - LS token → ShiftReg module
+   - LI token → FIFO module
+
+2. **Create storage instance** at module level:
+   ```mlir
+   // Before: token.create in rule body
+   cmt2.rule @producer {
+       %tok = cmt2.token.create %data : !firrtl.uint<32> -> !cmt2.sync_token<...>
+   }
+
+   // After: instance at module level, call in rule body
+   cmt2.instance @__tok_0 = @ShiftReg_32_2  // depth=2, width=32
+   cmt2.rule @producer {
+       cmt2.call @__tok_0, "write", %data : !firrtl.uint<32>
+   }
+   ```
+
+3. **Generate storage module** (if not exists):
+   - ShiftReg: chain of registers with valid tracking
+   - FIFO: standard FIFO with not_empty/not_full signals
+
+#### 8.2.2 Token Operation Rewriting
+
+| Original Op | Storage | Rewritten To |
+|-------------|---------|--------------|
+| `token.create %data` | ShiftReg | `call @storage, "write", %data` |
+| `token.create %data` | FIFO | `call @storage, "enq", %data` |
+| `token.valid %tok` | ShiftReg | `call @storage, "valid"` (at specific depth) |
+| `token.valid %tok` | FIFO | `call @storage, "notEmpty"` |
+| `token.data %tok` | ShiftReg | `call @storage, "peek"` |
+| `token.data %tok` | FIFO | `call @storage, "first"` + `call @storage, "deq"` |
+| `token.join %a, %b` | N/A | `firrtl.and %valid_a, %valid_b` |
+
+#### 8.2.3 Multi-Consumer (Fork) Handling
+
+When a token has multiple consumers:
+
+**LS Mode (Shift Register):**
+- Single storage instance
+- Fan-out valid signal to all consumer guards
+- Fan-out data signal to all consumer bodies
+- All consumers fire in same cycle
+
+**LI Mode (FIFO):**
+- Use BroadcastFIFO with per-consumer handshake
+- Each consumer has independent valid/deq signals
+- Data removed only when ALL consumers have dequeued
+
+```mlir
+// Before: fork pattern
+%tok = cmt2.rule @producer tokens_out(...) {...}
+%a = cmt2.rule @consumer_a tokens_in(%tok) {...}
+%b = cmt2.rule @consumer_b tokens_in(%tok) {...}
+
+// After (LS): single storage, fanned-out signals
+cmt2.instance @__tok_0 = @ShiftReg_32_2
+cmt2.rule @producer { call @__tok_0, "write", %data }
+cmt2.rule @consumer_a {
+    guard { %valid = call @__tok_0, "valid"; ... }
+    body { %data = call @__tok_0, "peek"; ... }
+}
+cmt2.rule @consumer_b {
+    guard { %valid = call @__tok_0, "valid"; ... }  // Same signal
+    body { %data = call @__tok_0, "peek"; ... }     // Same signal
+}
+
+// After (LI): broadcast FIFO with per-consumer ports
+cmt2.instance @__tok_0 = @BroadcastFIFO_32_4_2  // width=32, depth=4, consumers=2
+cmt2.rule @producer { call @__tok_0, "enq", %data }
+cmt2.rule @consumer_a {
+    guard { %valid = call @__tok_0, "valid", %c0; ... }  // Consumer 0
+    body { %data = call @__tok_0, "deq", %c0; ... }
+}
+cmt2.rule @consumer_b {
+    guard { %valid = call @__tok_0, "valid", %c1; ... }  // Consumer 1
+    body { %data = call @__tok_0, "deq", %c1; ... }
+}
 ```
 
 ### 8.2 Token Lowering Details
@@ -1347,7 +1456,222 @@ with m.dataflow("divider_compact", args=[...], returns=[...]) as df:
 
 ---
 
-## 12. Glossary
+## 12. Pass-Friendly STL Module Generation API
+
+### 12.1 Problem Statement
+
+The current STLLibrary API (`lib/Dialect/Cmt2/ECMT2/STLLibrary.cpp`) is designed for circuit construction time using the ECMT2 C++ DSL:
+
+```cpp
+// Current API - designed for circuit construction
+auto *regMod = STLLibrary::createRegModule(32, 0, circuit);
+auto *fifoMod = STLLibrary::createFIFO1PushModule(32, circuit);
+```
+
+**Limitations for transformation passes:**
+1. Requires `Circuit` object (DSL wrapper), not available in MLIR pass context
+2. Creates modules imperatively, doesn't integrate with MLIR's pass infrastructure
+3. No support for checking if modules already exist in the IR
+4. No support for generating instances with proper type handling
+
+### 12.2 Proposed Solution: ModuleGenerator Utility
+
+Create a new utility class that can be used by transformation passes to generate storage modules:
+
+```cpp
+// include/circt/Dialect/Cmt2/Transforms/ModuleGenerator.h
+
+namespace circt {
+namespace cmt2 {
+
+/// Utility for generating storage modules in transformation passes
+class ModuleGenerator {
+public:
+  ModuleGenerator(CircuitOp circuit);
+
+  /// Get or create a Reg module with given width
+  /// Returns nullptr if module needs to be created, or existing module
+  cmt2::ModuleOp getOrCreateRegModule(unsigned dataWidth);
+
+  /// Get or create a ShiftReg module with given width and depth
+  cmt2::ModuleOp getOrCreateShiftRegModule(unsigned dataWidth, unsigned depth);
+
+  /// Get or create a FIFO module with given width and depth
+  cmt2::ModuleOp getOrCreateFIFOModule(unsigned dataWidth, unsigned depth);
+
+  /// Create an instance of a storage module at the given insertion point
+  InstanceOp createStorageInstance(Location loc, StringRef instanceName,
+                                   cmt2::ModuleOp storageModule,
+                                   Value clk, Value rst,
+                                   OpBuilder &builder);
+
+  /// Create a call to a storage method
+  /// @param instance The storage instance
+  /// @param methodName The method to call ("read", "write", "valid", etc.)
+  /// @param args Arguments to the method
+  /// @return The call result(s)
+  SmallVector<Value> createStorageCall(Location loc, InstanceOp instance,
+                                       StringRef methodName,
+                                       ValueRange args,
+                                       OpBuilder &builder);
+
+private:
+  CircuitOp circuit_;
+  llvm::DenseMap<std::string, cmt2::ModuleOp> moduleCache_;
+};
+
+} // namespace cmt2
+} // namespace circt
+```
+
+### 12.3 Storage Module Specifications
+
+**ShiftReg Module Interface:**
+
+```mlir
+cmt2.module @ShiftReg_w32_d2 (%clk: !firrtl.clock, %rst: !firrtl.uint<1>) {
+  // Internal: chain of registers
+  cmt2.instance @stage0 = @Reg_w32 (%clk, %rst)
+  cmt2.instance @stage1 = @Reg_w32 (%clk, %rst)
+  cmt2.instance @valid0 = @Reg_w1 (%clk, %rst)
+  cmt2.instance @valid1 = @Reg_w1 (%clk, %rst)
+
+  // Methods
+  cmt2.method @write(%data: !firrtl.uint<32>) {
+    // Write to stage0, set valid0 = 1
+    cmt2.call @stage0 @write(%data)
+    cmt2.call @valid0 @write(%c1)
+  }
+
+  cmt2.value @valid() -> !firrtl.uint<1> {
+    // Return valid at output stage (valid1)
+    %v = cmt2.call @valid1 @read()
+    cmt2.return %v
+  }
+
+  cmt2.value @peek() -> !firrtl.uint<32> {
+    // Return data at output stage (stage1)
+    %d = cmt2.call @stage1 @read()
+    cmt2.return %d
+  }
+
+  cmt2.method @advance() {
+    // Shift the pipeline forward
+    %d0 = cmt2.call @stage0 @read()
+    cmt2.call @stage1 @write(%d0)
+    %v0 = cmt2.call @valid0 @read()
+    cmt2.call @valid1 @write(%v0)
+    cmt2.call @valid0 @write(%c0)  // Clear input stage
+  }
+
+  // Rule: advance every cycle
+  cmt2.rule @shift {
+    // Always advance (combinational path from input to output)
+  }
+}
+```
+
+**FIFO Module Interface:**
+
+```mlir
+cmt2.module @FIFO_w32_d2 (%clk: !firrtl.clock, %rst: !firrtl.uint<1>) {
+  // Reuse existing FIFO1_PUSH or FIFO2_I from STLLibrary
+  // Interface: enq, deq, first, notEmpty, notFull
+}
+```
+
+### 12.4 Usage in TokenRTLGen Pass
+
+```cpp
+void TokenRTLGenPass::createStorageInstances(cmt2::ModuleOp module) {
+  auto circuit = module->getParentOfType<CircuitOp>();
+  ModuleGenerator gen(circuit);
+
+  // Get clock and reset
+  auto [clk, rst] = getClockAndReset(module);
+
+  module.walk([&](TokenCreateOp createOp) {
+    auto tokenType = cast<SyncTokenType>(createOp.getToken().getType());
+    unsigned dataWidth = getDataWidth(tokenType);
+    unsigned depth = getStorageDepth(createOp);
+    bool isLI = isTokenLI(tokenType);
+
+    // Get or create the storage module
+    cmt2::ModuleOp storageModule;
+    if (isLI) {
+      storageModule = gen.getOrCreateFIFOModule(dataWidth, depth);
+    } else {
+      storageModule = gen.getOrCreateShiftRegModule(dataWidth, depth);
+    }
+
+    // Create instance at module level
+    OpBuilder builder(module.getBody().front().begin());
+    std::string instName = "__tok_" + std::to_string(instanceCounter_++);
+    auto instance = gen.createStorageInstance(
+        createOp.getLoc(), instName, storageModule, clk, rst, builder);
+
+    // Store for later rewriting
+    tokenStorage_[createOp.getToken()] = instance;
+  });
+}
+
+void TokenRTLGenPass::rewriteTokenOps(cmt2::ModuleOp module) {
+  auto circuit = module->getParentOfType<CircuitOp>();
+  ModuleGenerator gen(circuit);
+
+  // Rewrite token.create to storage.write
+  module.walk([&](TokenCreateOp createOp) {
+    auto instance = tokenStorage_[createOp.getToken()];
+    OpBuilder builder(createOp);
+    gen.createStorageCall(createOp.getLoc(), instance, "write",
+                          createOp.getData(), builder);
+    createOp.erase();
+  });
+
+  // Rewrite token.valid to storage.valid
+  module.walk([&](TokenValidOp validOp) {
+    auto instance = findStorageForToken(validOp.getToken());
+    OpBuilder builder(validOp);
+    auto results = gen.createStorageCall(validOp.getLoc(), instance, "valid",
+                                          {}, builder);
+    validOp.replaceAllUsesWith(results[0]);
+    validOp.erase();
+  });
+
+  // Rewrite token.data to storage.peek
+  module.walk([&](TokenDataOp dataOp) {
+    auto instance = findStorageForToken(dataOp.getToken());
+    OpBuilder builder(dataOp);
+    auto results = gen.createStorageCall(dataOp.getLoc(), instance, "peek",
+                                          {}, builder);
+    dataOp.replaceAllUsesWith(results[0]);
+    dataOp.erase();
+  });
+}
+```
+
+### 12.5 Implementation Plan
+
+1. **Phase 1: ModuleGenerator header** (`include/circt/Dialect/Cmt2/Transforms/ModuleGenerator.h`)
+   - Define the API interface
+   - Add to CMakeLists.txt
+
+2. **Phase 2: ModuleGenerator implementation** (`lib/Dialect/Cmt2/Transforms/ModuleGenerator.cpp`)
+   - Implement module creation using OpBuilder directly
+   - Implement instance creation
+   - Implement call creation
+
+3. **Phase 3: Update TokenRTLGen** to use ModuleGenerator
+   - Replace current annotation-based approach with actual module/instance creation
+   - Add full token operation rewriting
+
+4. **Phase 4: Add ShiftReg to STLLibrary** (optional)
+   - For consistency with FIFO, add ShiftReg creation to STLLibrary
+   - ModuleGenerator can delegate to STLLibrary patterns
+
+---
+
+## 13. Glossary
 
 | Term | Definition |
 |------|------------|

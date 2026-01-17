@@ -9,6 +9,66 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 2. **Follow the skill workflow** - See `.claude/skills/mlir-ops-passes.md` for the standard workflow when adding/modifying MLIR ops, attributes, or passes
 3. **Update tracking after completion** - Mark tasks as completed and document changes in the tracker
 
+
+
+## Codex CLI for Code Analysis
+
+Use [OpenAI Codex CLI](https://developers.openai.com/codex/cli/) (`codex exec`) for non-interactive code analysis, code review, architecture review, design evaluation, and implementation planning tasks.
+
+### When to Use Codex
+
+- **Code Review**: Quality assessment, bug detection, best practices
+- **Architecture Analysis**: Design patterns, coupling, modularity
+- **Issue Identification**: Security vulnerabilities, performance issues
+- **Document Analysis**: Reviewing specs, requirements, design documents
+- **Design Feedback**: API design evaluation, interface decisions
+- **Implementation Planning**: Breaking down features, planning changes
+
+### codex exec Command
+
+Use `codex exec` (alias: `codex e`) for scripted, non-interactive runs:
+
+```bash
+# Basic non-interactive execution
+codex exec "Analyze the dispatch mechanism in pto_instr.hpp"
+
+# With image input (architecture diagrams, screenshots)
+codex exec -i diagram.png "Explain this architecture"
+
+# Enable web search for external context
+codex exec --search "Compare this CSP design with industry patterns"
+
+# Full-auto mode (workspace-write sandbox + on-request approvals)
+codex exec --full-auto "Fix all type errors in the codebase"
+
+# Read prompt from stdin
+echo "Review this code" | codex exec -
+
+# JSON output for parsing
+codex exec --json "List all TODO comments"
+
+# Save final message to file
+codex exec -o result.md "Summarize the codebase architecture"
+
+# Resume previous session with follow-up
+codex exec resume --last "Continue the analysis"
+```
+
+### Key CLI Options
+
+| Flag | Description |
+| ---- | ----------- |
+| `-i, --image` | Attach image files to the prompt |
+| `-m, --model` | Override model (e.g., `gpt-5-codex`) |
+| `-s, --sandbox` | `read-only`, `workspace-write`, `danger-full-access` |
+| `-a, --ask-for-approval` | `untrusted`, `on-failure`, `on-request`, `never` |
+| `--full-auto` | Low-friction mode (workspace-write + on-request) |
+| `--search` | Enable web search tool |
+| `-C, --cd` | Set working directory |
+| `--json` | Output newline-delimited JSON events |
+| `-o, --output-last-message` | Write final message to file |
+| `-c, --config` | Override config values (repeatable) |
+
 ## Project Overview
 
 CIRCT (Circuit IR Compilers and Tools) is an experimental project applying MLIR and LLVM development methodology to hardware design tools. The project provides various dialects for representing and transforming hardware designs, from high-level abstractions down to Verilog generation.
