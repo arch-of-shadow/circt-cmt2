@@ -145,15 +145,20 @@ class TaskBuilder(RegionBuilder):
                 loc=mlir_loc,
             )
 
-            # Create body block with token_in arguments
-            arg_locs = [mlir_loc] * len(token_in_types)
+            # Create empty body block - DataflowTaskOp is NOT IsolatedFromAbove
+            # so token inputs are accessed directly from the outer scope via operands
             self._block = Block.create_at_start(
-                self._op.regions[0], token_in_types, arg_locs
+                self._op.regions[0], [], []
             )
 
-        # Update token references to point to block arguments
+        # Create a mapping from input tokens to the task's operands
+        # (Don't mutate the original tokens - they may be used by other tasks in fork patterns)
+        # Use id() as key since Token may not be hashable
+        # The task can access token operands directly (not IsolatedFromAbove)
+        self._token_to_block_arg = {}
         for i, tok in enumerate(self._tokens_in):
-            tok.value = self._block.arguments[i]
+            # Map to the task's operand (token_inputs[i])
+            self._token_to_block_arg[id(tok)] = self._op.operands[i]
 
         # Initialize RegionBuilder
         super().__init__(self._block, mlir_loc, ctx)
@@ -186,12 +191,15 @@ class TaskBuilder(RegionBuilder):
         if token not in self._tokens_in:
             raise ValueError(f"Token {token.name} is not an input to this task")
 
+        # Use block argument from mapping (not token.value which may be the original SSA value)
+        block_arg = self._token_to_block_arg[id(token)]
+
         with InsertionPoint(self._block):
             result_ty = firrtl.UIntType.get(self._ctx.mlir_context, 1)
             valid_op = Operation.create(
                 "cmt2.token.valid",
                 results=[result_ty],
-                operands=[token.value],
+                operands=[block_arg],
                 loc=self._loc,
             )
             return Signal(valid_op.result, UInt(1), self)
@@ -216,6 +224,8 @@ class TaskBuilder(RegionBuilder):
         if not token.token_type.has_data():
             raise ValueError(f"Token {token.name} does not carry data")
 
+        # Use block argument from mapping (not token.value which may be the original SSA value)
+        block_arg = self._token_to_block_arg[id(token)]
         data_type = token.token_type.data_type
 
         with InsertionPoint(self._block):
@@ -223,7 +233,7 @@ class TaskBuilder(RegionBuilder):
             data_op = Operation.create(
                 "cmt2.token.data",
                 results=[result_ty],
-                operands=[token.value],
+                operands=[block_arg],
                 loc=self._loc,
             )
             return Signal(data_op.result, data_type, self)
@@ -301,7 +311,8 @@ class TaskBuilder(RegionBuilder):
 
         with InsertionPoint(self._block):
             token_mlir_type = token_type.to_firrtl_type(self._ctx.mlir_context)
-            token_values = [tok.value for tok in tokens]
+            # Use block arguments from mapping (not token.value for fork pattern support)
+            token_values = [self._token_to_block_arg[id(tok)] for tok in tokens]
 
             join_op = Operation.create(
                 "cmt2.token.join",
@@ -311,6 +322,195 @@ class TaskBuilder(RegionBuilder):
             )
 
             return Token(join_op.result, token_type, self.name)
+
+    # ===================================================================
+    # Proc Control Methods (Phase 7 C7: Proc control in dataflow tasks)
+    # These enable multi-cycle control flow within dataflow tasks
+    # ===================================================================
+
+    @contextmanager
+    def seq(self) -> Iterator[TaskBuilder]:
+        """Create a sequential control block.
+
+        Operations in a seq block execute one after another.
+
+        Example:
+            with task.seq() as s:
+                task.enable("step1")
+                task.enable("step2")
+
+        Yields:
+            This TaskBuilder for chaining.
+        """
+        from circt.ir import InsertionPoint, Block, Operation
+
+        with InsertionPoint(self._block):
+            seq_op = Operation.create(
+                "cmt2.proc.seq",
+                results=[],
+                operands=[],
+                regions=1,
+                loc=self._loc,
+            )
+            seq_block = Block.create_at_start(seq_op.regions[0])
+
+        # Save current block and switch to seq block
+        saved_block = self._block
+        self._block = seq_block
+        try:
+            yield self
+        finally:
+            self._block = saved_block
+
+    @contextmanager
+    def par(self) -> Iterator[TaskBuilder]:
+        """Create a parallel control block.
+
+        Operations in a par block execute concurrently.
+
+        Example:
+            with task.par() as p:
+                task.enable("op_a")
+                task.enable("op_b")
+
+        Yields:
+            This TaskBuilder for chaining.
+        """
+        from circt.ir import InsertionPoint, Block, Operation
+
+        with InsertionPoint(self._block):
+            par_op = Operation.create(
+                "cmt2.proc.par",
+                results=[],
+                operands=[],
+                regions=1,
+                loc=self._loc,
+            )
+            par_block = Block.create_at_start(par_op.regions[0])
+
+        saved_block = self._block
+        self._block = par_block
+        try:
+            yield self
+        finally:
+            self._block = saved_block
+
+    @contextmanager
+    def if_(self, condition: Signal) -> Iterator[tuple[TaskBuilder, TaskBuilder]]:
+        """Create a conditional control block.
+
+        Example:
+            with task.if_(cond) as (then_b, else_b):
+                with then_b:
+                    task.enable("step_true")
+                with else_b:
+                    task.enable("step_false")
+
+        Args:
+            condition: Boolean condition signal.
+
+        Yields:
+            Tuple of (then_builder, else_builder).
+        """
+        from circt.ir import InsertionPoint, Block, Operation, TypeAttr
+
+        cond_type = condition.type.to_firrtl_type(self._ctx.mlir_context)
+
+        with InsertionPoint(self._block):
+            if_op = Operation.create(
+                "cmt2.proc.if",
+                results=[],
+                operands=[condition.value],
+                attributes={"cond_type": TypeAttr.get(cond_type)},
+                regions=2,
+                loc=self._loc,
+            )
+            then_block = Block.create_at_start(if_op.regions[0])
+            else_block = Block.create_at_start(if_op.regions[1])
+
+        # Create sub-builders for then/else blocks
+        class SubBuilder:
+            def __init__(sub_self, block):
+                sub_self._block = block
+                sub_self._parent = self
+
+            def __enter__(sub_self):
+                sub_self._saved_block = self._block
+                self._block = sub_self._block
+                return sub_self
+
+            def __exit__(sub_self, *args):
+                self._block = sub_self._saved_block
+                return False
+
+        yield SubBuilder(then_block), SubBuilder(else_block)
+
+    @contextmanager
+    def static_repeat(self, count: int, latency: int | None = None) -> Iterator[TaskBuilder]:
+        """Create a compile-time unrolled loop.
+
+        Example:
+            with task.static_repeat(4) as r:
+                task.enable("multiply")
+
+        Args:
+            count: Number of iterations (must be constant).
+            latency: Optional latency per iteration for static timing.
+
+        Yields:
+            This TaskBuilder for chaining.
+        """
+        from circt.ir import InsertionPoint, Block, Operation, IntegerAttr, IntegerType
+
+        attrs = {
+            "count": IntegerAttr.get(IntegerType.get_signless(64), count),
+        }
+        if latency is not None:
+            attrs["latency"] = IntegerAttr.get(IntegerType.get_signless(64), latency)
+
+        with InsertionPoint(self._block):
+            repeat_op = Operation.create(
+                "cmt2.proc.static_repeat",
+                results=[],
+                operands=[],
+                attributes=attrs,
+                regions=1,
+                loc=self._loc,
+            )
+            repeat_block = Block.create_at_start(repeat_op.regions[0])
+
+        saved_block = self._block
+        self._block = repeat_block
+        try:
+            yield self
+        finally:
+            self._block = saved_block
+
+    def enable(self, step_name: str) -> None:
+        """Enable a step by name.
+
+        This is used within proc control blocks to activate steps.
+
+        Example:
+            with task.seq():
+                task.enable("step_a")
+                task.enable("step_b")
+
+        Args:
+            step_name: Name of the step to enable.
+        """
+        from circt.ir import InsertionPoint, Operation, FlatSymbolRefAttr
+
+        with InsertionPoint(self._block):
+            Operation.create(
+                "cmt2.proc.enable",
+                results=[],
+                operands=[],
+                attributes={
+                    "step": FlatSymbolRefAttr.get(step_name),
+                },
+                loc=self._loc,
+            )
 
     def yield_tokens(self, *tokens: Token) -> None:
         """Yield tokens from this task for downstream consumption.
@@ -513,6 +713,7 @@ class DataflowBuilder:
         self,
         name: str | None = None,
         tokens_in: list[Token] | None = None,
+        tokens_out: list[SyncToken] | None = None,
         timing: tuple[int, int] | None = None,
     ) -> Iterator[TaskBuilder]:
         """Create a dataflow task.
@@ -520,39 +721,38 @@ class DataflowBuilder:
         Args:
             name: Optional task name (auto-generated if not provided).
             tokens_in: List of input tokens from upstream tasks.
+            tokens_out: List of output token types (SyncToken). Required if task
+                       will yield tokens. For final tasks using return_values(),
+                       leave this as None or empty.
             timing: Optional (start, end) cycle timing for this task.
 
         Yields:
             A TaskBuilder for defining the task body.
 
         Example:
-            with df.task("process", tokens_in=[upstream_tok]) as task:
+            # Task with token output
+            with df.task("process", tokens_in=[upstream_tok],
+                        tokens_out=[SyncToken(UInt(32))]) as task:
                 data = task.token_data(upstream_tok)
                 result = task.add(data, task.const(1, 32))
                 out_tok = task.create_token(result)
                 task.yield_tokens(out_tok)
+
+            # Final task with return (no tokens_out)
+            with df.task("final", tokens_in=[tok]) as task:
+                result = task.token_data(tok)
+                task.return_values(result)
         """
         if tokens_in is None:
             tokens_in = []
+        if tokens_out is None:
+            tokens_out = []
 
-        # Create task builder (deferred creation until we know output types)
+        # Create task builder
         task = TaskBuilder(self, name, tokens_in, timing)
 
-        # Defer actual MLIR op creation - we need to know output token types first
-        # For now, we'll create with empty outputs and update later
-
-        # Actually, we need a different approach - create the op immediately
-        # but with placeholder outputs, then the user calls yield_tokens
-        # which updates the op results
-
-        # Simpler approach: require user to declare outputs upfront OR
-        # use a two-phase approach where we scan for yield_tokens first
-
-        # For now, let's use a simpler pattern: create op with no outputs,
-        # then yield_tokens creates TokenCreateOp inside and we wire them
-
-        # Create the op immediately (yield_tokens will add the terminator)
-        task._create_task_op([])  # No output types initially
+        # Create the op with specified output token types
+        task._create_task_op(tokens_out)
 
         yield task
 

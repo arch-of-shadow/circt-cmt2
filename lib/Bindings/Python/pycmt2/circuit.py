@@ -302,10 +302,14 @@ class Circuit:
         try:
             # First run CMT2 to FIRRTL
             # CMT2 passes operate on cmt2.circuit, conversion operates on builtin.module
+            # Pipeline includes dataflow passes for token-based pipelines
             cmt2_pm = PassManager.parse(
                 "builtin.module("
                 "cmt2.circuit("
                 "cmt2-compile-invoke,"
+                "cmt2-dataflow-lowering,"
+                "cmt2-token-lowering,"
+                "cmt2-token-rtl-gen,"
                 "cmt2-tdcc,"
                 "cmt2-proc-stmt-to-action,"
                 "cmt2-proc-to-gaa"
@@ -409,6 +413,11 @@ class Circuit:
             passes = [
                 # CMT2 passes
                 "cmt2-compile-invoke",
+                # Dataflow passes (for token-based pipelines)
+                "cmt2-dataflow-lowering",
+                "cmt2-token-lowering",
+                "cmt2-token-rtl-gen",
+                # Procedural control passes
                 "cmt2-tdcc",
                 "cmt2-proc-stmt-to-action",
                 "cmt2-proc-to-gaa",

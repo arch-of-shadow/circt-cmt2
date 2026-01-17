@@ -393,12 +393,15 @@ class ExternalModuleBuilder:
 
         mlir_ctx = self._circuit._ctx.mlir_context
 
+        # Use FlatSymbolRefAttr for scheduling attributes (expected by ConflictMatrixAnalysis)
+        from circt.ir import FlatSymbolRefAttr
+
         if self._sequence_before:
             pairs = []
             for before, after in self._sequence_before:
                 pairs.append(ArrayAttr.get([
-                    StringAttr.get(before, context=mlir_ctx),
-                    StringAttr.get(after, context=mlir_ctx),
+                    FlatSymbolRefAttr.get(before, context=mlir_ctx),
+                    FlatSymbolRefAttr.get(after, context=mlir_ctx),
                 ], context=mlir_ctx))
             self._op.attributes["sequenceBefore"] = ArrayAttr.get(pairs, context=mlir_ctx)
 
@@ -406,8 +409,8 @@ class ExternalModuleBuilder:
             pairs = []
             for m1, m2 in self._conflict:
                 pairs.append(ArrayAttr.get([
-                    StringAttr.get(m1, context=mlir_ctx),
-                    StringAttr.get(m2, context=mlir_ctx),
+                    FlatSymbolRefAttr.get(m1, context=mlir_ctx),
+                    FlatSymbolRefAttr.get(m2, context=mlir_ctx),
                 ], context=mlir_ctx))
             self._op.attributes["conflict"] = ArrayAttr.get(pairs, context=mlir_ctx)
 
@@ -415,8 +418,8 @@ class ExternalModuleBuilder:
             pairs = []
             for m1, m2 in self._conflict_free:
                 pairs.append(ArrayAttr.get([
-                    StringAttr.get(m1, context=mlir_ctx),
-                    StringAttr.get(m2, context=mlir_ctx),
+                    FlatSymbolRefAttr.get(m1, context=mlir_ctx),
+                    FlatSymbolRefAttr.get(m2, context=mlir_ctx),
                 ], context=mlir_ctx))
             self._op.attributes["conflictFree"] = ArrayAttr.get(pairs, context=mlir_ctx)
 

@@ -263,14 +263,44 @@ class ControlBuilder(RegionBuilder):
         yield nested
 
     @contextmanager
-    def if_(self, condition: Signal) -> Iterator[IfControlBuilder]:
+    def if_(self, condition) -> Iterator[IfControlBuilder]:
         """Conditional control flow.
 
+        Supports two forms:
+        1. Pre-computed condition (Signal): Uses ProcIfOp
+        2. Condition function (callable): Uses ProcCondIfOp with condition region
+
+        The condition function form supports cmt2.call operations for reading
+        from instances at runtime, which is necessary when the condition
+        depends on dynamic state.
+
         Args:
-            condition: Boolean condition.
+            condition: Either a Signal (pre-computed boolean condition) or
+                       a callable that takes a RegionBuilder and returns
+                       a Signal representing the condition.
 
         Yields:
             An IfControlBuilder for then/else branches.
+
+        Example with Signal:
+            cond = ctrl.lt(ctrl.call(reg, "read"), ctrl.const(10, 32))
+            with ctrl.if_(cond) as if_:
+                with if_.then_():
+                    ctrl.enable(step_a.ref())
+
+        Example with condition function:
+            def check_done(b):
+                cnt = b.call(counter, "read")
+                return b.lt(cnt, b.const(10, 32))
+
+            with ctrl.if_(check_done) as if_:
+                with if_.then_():
+                    ctrl.enable(step_a.ref())
+
+            # Or with lambda
+            with ctrl.if_(lambda b: b.lt(b.call(cnt, "read"), b.const(10, 32))) as if_:
+                with if_.then_():
+                    ctrl.enable(step_a.ref())
         """
         builder = IfControlBuilder(self, condition)
         yield builder
@@ -500,11 +530,17 @@ class ControlBuilder(RegionBuilder):
 
 
 class IfControlBuilder:
-    """Builder for conditional control flow with then/else branches."""
+    """Builder for conditional control flow with then/else branches.
 
-    def __init__(self, parent: ControlBuilder, condition: Signal):
+    Supports two modes:
+    1. Signal condition: Creates ProcIfOp with pre-computed condition
+    2. Callable condition: Creates ProcCondIfOp with condition region
+    """
+
+    def __init__(self, parent: ControlBuilder, condition):
         self._parent = parent
         self._condition = condition
+        self._condition_is_callable = callable(condition)
         self._then_builder: ControlBuilder | None = None
         self._else_builder: ControlBuilder | None = None
         self._op = None
@@ -516,8 +552,26 @@ class IfControlBuilder:
         from circt.dialects import cmt2
 
         with InsertionPoint(self._parent._block):
-            self._op = cmt2.ProcIfOp(self._condition.value, loc=self._parent._loc)
-            then_block = Block.create_at_start(self._op.thenRegion)
+            if self._condition_is_callable:
+                # Create ProcCondIfOp with condition region
+                self._op = cmt2.ProcCondIfOp(loc=self._parent._loc)
+
+                # Create condition region block
+                cond_block = Block.create_at_start(self._op.condRegion)
+
+                # Build condition in the condition region
+                cond_builder = RegionBuilder(cond_block, self._parent._loc, self._parent._ctx)
+                with InsertionPoint(cond_block):
+                    condition_signal = self._condition(cond_builder)
+                    # Add terminator to yield the condition
+                    cmt2.ProcCondIfYieldOp(condition_signal.value, loc=self._parent._loc)
+
+                # Create then region block
+                then_block = Block.create_at_start(self._op.thenRegion)
+            else:
+                # Create ProcIfOp with pre-computed condition Signal
+                self._op = cmt2.ProcIfOp(self._condition.value, loc=self._parent._loc)
+                then_block = Block.create_at_start(self._op.thenRegion)
 
         self._then_builder = ControlBuilder(then_block, self._parent._loc, self._parent._ctx)
         yield self._then_builder
@@ -1004,7 +1058,7 @@ class ProcMethodBuilder:
             return max(then_lat, else_lat)
 
         # Dynamic constructs - can't compute
-        if op_name in ("cmt2.proc.if", "cmt2.proc.while"):
+        if op_name in ("cmt2.proc.if", "cmt2.proc.cond_if", "cmt2.proc.while"):
             return None
 
         # Other ops (control_end, etc.) - zero latency
