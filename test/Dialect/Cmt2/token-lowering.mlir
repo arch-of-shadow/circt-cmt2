@@ -11,9 +11,15 @@ cmt2.circuit {
     // Test 1: LS token -> shift register annotation
     //===------------------------------------------------------------------===//
 
-    // After lowering, the dataflow should have tokens.lowered attribute
-    // CHECK: cmt2.proc.dataflow @ls_pipeline
-    // CHECK-SAME: {dataflow.lowered
+    // After lowering, dataflow ops are erased and replaced with rules
+    // CHECK: cmt2.rule @ls_pipeline_stage0()
+    // CHECK-SAME: tokens_out(!cmt2.sync_token<data = !firrtl.uint<32>>)
+    // CHECK: cmt2.rule @ls_pipeline_stage1()
+    // CHECK-SAME: tokens_in(%{{.*}}: !cmt2.sync_token<data = !firrtl.uint<32>>)
+    // CHECK-SAME: tokens_out(!cmt2.sync_token<data = !firrtl.uint<32>>)
+    // CHECK: cmt2.rule @ls_pipeline_final()
+    // CHECK-SAME: tokens_in(%{{.*}}: !cmt2.sync_token<data = !firrtl.uint<32>>)
+    // CHECK-NOT: cmt2.proc.dataflow @ls_pipeline
     cmt2.proc.dataflow @ls_pipeline(%input: !firrtl.uint<32>) -> (!firrtl.uint<32>) {
       // LS mode (default) tokens should get shiftreg implementation
       %tok0 = cmt2.dataflow.task @stage0() -> (!cmt2.sync_token<data = !firrtl.uint<32>>) {
@@ -38,8 +44,9 @@ cmt2.circuit {
     // Test 2: LI token -> FIFO annotation
     //===------------------------------------------------------------------===//
 
-    // CHECK: cmt2.proc.dataflow @li_pipeline
-    // CHECK-SAME: {dataflow.lowered
+    // CHECK: cmt2.rule @li_pipeline_stage0()
+    // CHECK: cmt2.rule @li_pipeline_final()
+    // CHECK-NOT: cmt2.proc.dataflow @li_pipeline
     cmt2.proc.dataflow @li_pipeline(%input: !firrtl.uint<16>) -> (!firrtl.uint<16>) {
       // LI mode tokens should get fifo implementation
       %tok0 = cmt2.dataflow.task @stage0() -> (!cmt2.sync_token<data = !firrtl.uint<16>, mode = li>) {
@@ -58,8 +65,11 @@ cmt2.circuit {
     // Test 3: Fork pattern - multi-consumer token
     //===------------------------------------------------------------------===//
 
-    // CHECK: cmt2.proc.dataflow @fork_pattern
-    // CHECK-SAME: {dataflow.lowered
+    // CHECK: cmt2.rule @fork_pattern_source()
+    // CHECK: cmt2.rule @fork_pattern_branch_a()
+    // CHECK: cmt2.rule @fork_pattern_branch_b()
+    // CHECK: cmt2.rule @fork_pattern_join()
+    // CHECK-NOT: cmt2.proc.dataflow @fork_pattern
     cmt2.proc.dataflow @fork_pattern(%x: !firrtl.uint<8>) -> (!firrtl.uint<8>) {
       // Token consumed by multiple tasks should get fanout/broadcast annotation
       %tok_src = cmt2.dataflow.task @source() -> (!cmt2.sync_token<data = !firrtl.uint<8>>) {
@@ -94,8 +104,9 @@ cmt2.circuit {
     // Test 4: Void tokens (synchronization only)
     //===------------------------------------------------------------------===//
 
-    // CHECK: cmt2.proc.dataflow @void_tokens
-    // CHECK-SAME: {dataflow.lowered
+    // CHECK: cmt2.rule @void_tokens_sync_point()
+    // CHECK: cmt2.rule @void_tokens_after_sync()
+    // CHECK-NOT: cmt2.proc.dataflow @void_tokens
     cmt2.proc.dataflow @void_tokens(%x: !firrtl.uint<8>) -> (!firrtl.uint<8>) {
       // Void tokens (no data) for pure synchronization
       %tok = cmt2.dataflow.task @sync_point() -> (!cmt2.sync_token) {

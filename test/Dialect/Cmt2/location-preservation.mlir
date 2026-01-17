@@ -12,7 +12,7 @@ module {
       cmt2.bind.bare %rst, @rst : !firrtl.uint<1>
       cmt2.bind.value @read : () -> !firrtl.uint<32>[ arguments = [], results = ["res0"]]
       cmt2.bind.method @write : (!firrtl.uint<32>) -> ()[ arguments = ["data"], results = []]
-    } {conflict = [["write", "write"]], conflictFree = [["read", "read"]], sequenceBefore = [["read", "write"]]}
+    } {conflict = [[@write, @write]], conflictFree = [[@read, @read]], sequenceBefore = [[@read, @write]]}
 
     // Test location on module - should propagate to FIRRTL module
     cmt2.module @LocationTest(%clk: !firrtl.clock, %rst: !firrtl.uint<1>) {

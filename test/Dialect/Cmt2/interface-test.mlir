@@ -149,9 +149,9 @@ builtin.module {
 }
 
 // CALLINFO: CallInfoView:
-// CALLINFO: Module: consumer
+// CALLINFO-DAG: Module: consumer
+// CALLINFO-DAG: Module: provider
 // CALLINFO-DAG: Entity: @processData
 // CALLINFO-DAG: Entity: @updateData
-// CALLINFO: Module: provider
 // CALLINFO-DAG: Entity: @produceData
 // CALLINFO-DAG: Entity: @get

@@ -19,8 +19,8 @@ cmt2.circuit {
     // CHECK: cmt2.rule @simple_pipeline_final()
     // CHECK-SAME: tokens_in(%{{.*}}: !cmt2.sync_token<data = !firrtl.uint<32>>)
 
-    // CHECK: cmt2.proc.dataflow @simple_pipeline
-    // CHECK-SAME: {dataflow.lowered}
+    // Dataflow ops are erased after lowering (rules created above)
+    // CHECK-NOT: cmt2.proc.dataflow @simple_pipeline
     cmt2.proc.dataflow @simple_pipeline(%input: !firrtl.uint<32>) -> (!firrtl.uint<32>) {
       %tok0 = cmt2.dataflow.task @stage0() -> (!cmt2.sync_token<data = !firrtl.uint<32>>) {
         %data = firrtl.constant 42 : !firrtl.uint<32>
@@ -62,8 +62,8 @@ cmt2.circuit {
     // CHECK: cmt2.rule @fork_join_join()
     // CHECK-SAME: tokens_in(%{{.*}}: !cmt2.sync_token<data = !firrtl.uint<16>>, %{{.*}}: !cmt2.sync_token<data = !firrtl.uint<16>>)
 
-    // CHECK: cmt2.proc.dataflow @fork_join
-    // CHECK-SAME: {dataflow.lowered}
+    // Dataflow ops are erased after lowering
+    // CHECK-NOT: cmt2.proc.dataflow @fork_join
     cmt2.proc.dataflow @fork_join(%x: !firrtl.uint<16>) -> (!firrtl.uint<16>) {
       %tok_src = cmt2.dataflow.task @source() -> (!cmt2.sync_token<data = !firrtl.uint<16>>) {
         %data = firrtl.constant 10 : !firrtl.uint<16>
@@ -106,14 +106,14 @@ cmt2.circuit {
 
     // CHECK: cmt2.rule @timed_s0()
     // CHECK-SAME: tokens_out(!cmt2.sync_token<data = !firrtl.uint<8>>)
-    // CHECK-SAME: {timing = #cmt2.timing<[0, 1]>}
+    // CHECK-SAME: timing = #cmt2.timing<[0, 1]>
 
     // CHECK: cmt2.rule @timed_s1()
     // CHECK-SAME: tokens_in(%{{.*}}: !cmt2.sync_token<data = !firrtl.uint<8>>)
-    // CHECK-SAME: {timing = #cmt2.timing<[1, 2]>}
+    // CHECK-SAME: timing = #cmt2.timing<[1, 2]>
 
-    // CHECK: cmt2.proc.dataflow @timed
-    // CHECK-SAME: {dataflow.lowered}
+    // Dataflow ops are erased after lowering
+    // CHECK-NOT: cmt2.proc.dataflow @timed
     cmt2.proc.dataflow @timed(%in: !firrtl.uint<8>) -> (!firrtl.uint<8>) {
       %tok = cmt2.dataflow.task @s0() -> (!cmt2.sync_token<data = !firrtl.uint<8>>) attributes {timing = #cmt2.timing<[0, 1]>} {
         %data = firrtl.constant 0 : !firrtl.uint<8>
