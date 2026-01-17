@@ -19,8 +19,8 @@ This example demonstrates ALL of CMT2's static procedural control features:
    - par: Parallel composition (auto-promotes to static if all children are static)
 
 3. TIMING ATTRIBUTES (cycle-precise scheduling)
-   - method(..., static_latency=N): Method with N-cycle fixed latency
-   - method(..., interval=M): Pipelined method accepting new call every M cycles
+   - External modules can specify static_latency and interval
+   - proc_method with control() enables multi-cycle method definitions
 
 Design: Pipelined Matrix Dot Product
 ------------------------------------
@@ -133,15 +133,12 @@ def create_static_proc_circuit():
             step.done(step.const(1, 1))
 
         # =================================================================
-        # METHOD: start (with static latency)
-        # Demonstrates: method with static_latency and interval attributes
-        # - static_latency=2: Method takes 2 cycles to complete
-        # - interval=2: Can accept new call every 2 cycles (non-pipelined)
+        # METHOD: start
+        # Atomic method that initiates computation
+        # Note: For multi-cycle methods with timing attributes, use proc_method()
+        # with control() for sequencing steps
         # =================================================================
-        with m.method("start",
-                      args=[("a", UInt(32)), ("b", UInt(32))],
-                      static_latency=2,
-                      interval=2) as meth:
+        with m.method("start", args=[("a", UInt(32)), ("b", UInt(32))]) as meth:
             with meth.guard() as g:
                 is_busy = g.call(busy, "read")
                 not_busy = g.not_(is_busy)
@@ -155,15 +152,12 @@ def create_static_proc_circuit():
                 body.call(reg_idx, "write", body.const(0, 32))
 
         # =================================================================
-        # METHOD: load_element (pipelined method)
-        # Demonstrates: pipelined method with interval < latency
-        # - static_latency=4: Takes 4 cycles
-        # - interval=2: New call every 2 cycles (overlapped execution)
+        # METHOD: load_element
+        # Atomic method to load the next element pair
+        # Note: For pipelined methods (interval < latency), use proc_method()
+        # with control() and multi-cycle step definitions
         # =================================================================
-        with m.method("load_element",
-                      args=[("a", UInt(32)), ("b", UInt(32))],
-                      static_latency=4,
-                      interval=2) as meth:
+        with m.method("load_element", args=[("a", UInt(32)), ("b", UInt(32))]) as meth:
             with meth.guard() as g:
                 is_busy = g.call(busy, "read")
                 g.returns(is_busy)  # Only accept when busy (processing)

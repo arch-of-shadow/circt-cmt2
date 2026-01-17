@@ -57,13 +57,13 @@ def example_sequential_task():
         rst = mod.reset()
 
         # Define steps that the task will use
-        with mod.static_step("load", latency=1):
+        with mod.static_step(1, "load"):
             pass
 
-        with mod.static_step("compute", latency=2):
+        with mod.static_step(2, "compute"):
             pass
 
-        with mod.static_step("store", latency=1):
+        with mod.static_step(1, "store"):
             pass
 
         # Dataflow with sequential control in tasks
@@ -111,13 +111,13 @@ def example_parallel_task():
         rst = mod.reset()
 
         # Define parallel steps
-        with mod.static_step("op_a", latency=2):
+        with mod.static_step(2, "op_a"):
             pass
 
-        with mod.static_step("op_b", latency=3):
+        with mod.static_step(3, "op_b"):
             pass
 
-        with mod.static_step("op_c", latency=1):
+        with mod.static_step(1, "op_c"):
             pass
 
         with mod.dataflow(
@@ -162,13 +162,13 @@ def example_conditional_task():
         clk = mod.clock()
         rst = mod.reset()
 
-        with mod.static_step("fast_path", latency=1):
+        with mod.static_step(1, "fast_path"):
             pass
 
-        with mod.static_step("slow_path_a", latency=2):
+        with mod.static_step(2, "slow_path_a"):
             pass
 
-        with mod.static_step("slow_path_b", latency=2):
+        with mod.static_step(2, "slow_path_b"):
             pass
 
         with mod.dataflow(
@@ -219,7 +219,7 @@ def example_iterative_task():
         clk = mod.clock()
         rst = mod.reset()
 
-        with mod.static_step("multiply", latency=1):
+        with mod.static_step(1, "multiply"):
             pass
 
         with mod.dataflow(
@@ -262,19 +262,19 @@ def example_complex_pipeline():
         rst = mod.reset()
 
         # Define various steps
-        with mod.static_step("fetch", latency=1):
+        with mod.static_step(1, "fetch"):
             pass
 
-        with mod.static_step("decode", latency=1):
+        with mod.static_step(1, "decode"):
             pass
 
-        with mod.static_step("execute", latency=2):
+        with mod.static_step(2, "execute"):
             pass
 
-        with mod.static_step("memory", latency=3):
+        with mod.static_step(3, "memory"):
             pass
 
-        with mod.static_step("writeback", latency=1):
+        with mod.static_step(1, "writeback"):
             pass
 
         with mod.dataflow(
@@ -329,16 +329,16 @@ def example_nested_control():
         clk = mod.clock()
         rst = mod.reset()
 
-        with mod.static_step("init", latency=1):
+        with mod.static_step(1, "init"):
             pass
 
-        with mod.static_step("proc_a", latency=2):
+        with mod.static_step(2, "proc_a"):
             pass
 
-        with mod.static_step("proc_b", latency=2):
+        with mod.static_step(2, "proc_b"):
             pass
 
-        with mod.static_step("finalize", latency=1):
+        with mod.static_step(1, "finalize"):
             pass
 
         with mod.dataflow(

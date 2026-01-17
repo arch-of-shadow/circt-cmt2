@@ -1,6 +1,6 @@
 # CMT2 Development Tracker
 
-**Last Updated:** 2026-01-18 (Tests: 54 passing, 16+ PyCMT2 E2E simulations verified)
+**Last Updated:** 2026-01-18 (Tests: 54 passing, 16+ PyCMT2 E2E simulations verified, API fixes applied)
 
 ---
 
@@ -15,7 +15,7 @@
 | Interpreter | **~90%** | Plugin architecture complete |
 | Dataflow/Pipeline | **100%** | Phase 1-4b complete; E2E simulation working |
 | Dataflow-Proc Compat | **~90%** | Phase 7: C1-C5, C7 complete; C6 (nested dataflow) pending |
-| Documentation | **~90%** | MultiCycle.md updated with dataflow content |
+| Documentation | **~95%** | All guides complete; examples could be expanded |
 
 ---
 
@@ -205,7 +205,7 @@ Per-branch FSM infrastructure complete with branch-specific FSM widths.
 
 | Task | Status | Notes |
 |------|--------|-------|
-| Remove TDCC-based code | [ ] | Clean up abandoned implementation |
+| Remove TDCC-based code | [x] | No TDCC code in interpreter - uses plugin architecture |
 
 ---
 
@@ -239,9 +239,9 @@ When proc rules are lowered to GAA rules, precedence should be determined by con
 
 | Task | Status | Notes |
 |------|--------|-------|
-| ECMT2-Guide.md (C++ API) | [ ] | Port from ecmt2-EDSL.md |
-| Update Debugging.md | [~] | Add interpreter details |
-| Add more code examples | [ ] | In each guide |
+| ECMT2-Guide.md (C++ API) | [x] | 378 lines, comprehensive C++ API guide |
+| Debugging.md | [x] | 395 lines, covers interpreter, cmt2-dbg, RTL simulation |
+| Add more code examples | [~] | Examples exist but could be expanded |
 | API reference generation | [ ] | From docstrings |
 
 ---
@@ -483,13 +483,18 @@ When proc rules are lowered to GAA rules, precedence should be determined by con
 | `dataflow_forkjoin.py` | MLIR OK | Fork-join MLIR generation |
 | `proc.py` | Verilog OK | Procedural control |
 
-**Examples with API Mismatches (need updating, not critical):**
+**Recently Fixed Examples (2026-01-18):**
+
+| Example | Fix Applied |
+|---------|-------------|
+| `static_proc.py` | Changed to regular `method()` (timing attrs only for proc_method) |
+| `dataflow_proc_control.py` | Fixed `static_step(latency, name)` argument order |
+
+**Examples with Potential API Issues:**
 
 | Example | Issue |
 |---------|-------|
-| `static_proc.py` | Uses `static_latency` kwarg not in API |
-| `pipeline_fifo_testbench.py` | `and_()` returns None |
-| `dataflow_proc_control.py` | `static_step()` argument conflict |
+| `pipeline_fifo_testbench.py` | May need testing - `and_()` usage |
 
 ---
 
