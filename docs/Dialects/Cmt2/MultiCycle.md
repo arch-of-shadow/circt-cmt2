@@ -2,18 +2,36 @@
 
 CMT2 supports **multi-cycle operations** through procedural control constructs. This enables complex algorithms spanning multiple clock cycles with both dynamic and static timing.
 
-**Related Examples:** `examples/PyCMT2/proc.py`, `examples/PyCMT2/static_proc.py`, `examples/PyCMT2/timing.py`
+**Related Examples:**
+- Proc control: `examples/PyCMT2/proc.py`, `examples/PyCMT2/proc_testbench.py`, `examples/PyCMT2/timing.py`
+- Dataflow/Pipeline: `examples/PyCMT2/comprehensive_dataflow_example.py`, `examples/PyCMT2/dataflow_forkjoin.py`
+- Comprehensive: `examples/PyCMT2/comprehensive_example.py`
 
 ---
 
 ## Overview
 
-CMT2 provides two control modes:
+CMT2 provides two complementary paradigms for multi-cycle operations:
+
+### Procedural Control (proc rules)
+
+FSM-based control flow for sequential, parallel, and looping operations:
 
 | Mode | Latency | Done Signal | Use Case |
 |------|---------|-------------|----------|
 | **Dynamic** | Runtime | Explicit | Variable-length operations |
 | **Static** | Compile-time | Implicit | Fixed-latency pipelines |
+
+### Dataflow/Pipeline (proc.dataflow)
+
+Token-based synchronization for producer-consumer pipelines:
+
+| Mode | Hardware | Use Case |
+|------|----------|----------|
+| **Latency-Sensitive (LS)** | Shift registers | Fixed-timing pipelines |
+| **Latency-Insensitive (LI)** | FIFOs | Variable-timing, decoupled stages |
+
+Both paradigms can be combined: dataflow tasks can contain proc control internally.
 
 ---
 
@@ -643,7 +661,9 @@ with circuit.module("DotProduct") as m:
 
 ## Compilation Pipeline
 
-Multi-cycle control is lowered through these passes:
+### Procedural Control Pipeline
+
+Multi-cycle proc control is lowered through these passes:
 
 1. **cmt2-compile-invoke**: Converts `proc.invoke` to steps
 2. **cmt2-tdcc**: Top-Down Compile Control - generates FSM
@@ -655,6 +675,25 @@ Multi-cycle control is lowered through these passes:
 8. **cmt2-compile-static**: Generate optimized FSM hardware
 9. **cmt2-proc-stmt-to-action**: Converts to FSM-based rules
 10. **cmt2-proc-to-gaa**: Final conversion to GAA rules
+
+### Dataflow Pipeline
+
+Dataflow/pipeline constructs are lowered through:
+
+1. **cmt2-dataflow-lowering**: Convert `proc.dataflow` to rules with tokens
+2. **cmt2-token-lowering**: Analyze tokens, classify LS/LI, infer FIFO depths
+3. **cmt2-token-rtl-gen**: Generate storage modules, rewrite token ops to calls
+4. **cmt2-to-firrtl**: Standard conversion (no token ops remain)
+
+### Combined Pipeline
+
+For designs using both proc control and dataflow:
+
+```
+cmt2-compile-invoke → cmt2-tdcc → cmt2-proc-stmt-to-action →
+cmt2-dataflow-lowering → cmt2-token-lowering → cmt2-token-rtl-gen →
+cmt2-proc-to-gaa → cmt2-to-firrtl
+```
 
 ---
 
@@ -755,16 +794,229 @@ with m.step("dynamic_op") as step:
 
 ---
 
-## Integration with Dataflow/Pipeline
+## Dataflow/Pipeline Operations
 
-Multi-cycle proc control can be used within dataflow tasks for complex pipeline stages. See [tmp/PipelinedDesign-Implementation.md](tmp/PipelinedDesign-Implementation.md) Section 11 for:
+CMT2 supports **dataflow/pipeline operations** through token-based synchronization. This enables pipelined hardware generation with explicit producer-consumer relationships.
 
-- Task bodies containing `static_repeat`, `while` loops
-- FSM composition (task-level + dataflow-level)
-- Stall controller interaction with task FSMs
-- Timing attribute unification
+**Related Examples:** `examples/PyCMT2/comprehensive_dataflow_example.py`, `examples/PyCMT2/dataflow_forkjoin.py`, `examples/PyCMT2/division_pipeline.py`
 
-**Status:** Design complete, implementation pending (Phase 7 in Development-Tracker.md)
+**Status:** Fully implemented and tested (16+ E2E simulations verified)
+
+---
+
+### Token-Based Synchronization
+
+Dataflow uses **SyncTokens** as first-class SSA values for synchronization:
+
+| Concept | Description |
+|---------|-------------|
+| **SyncToken** | SSA value representing synchronization point + optional data |
+| **Multi-consumer** | Token used by multiple tasks; implies fork/broadcast pattern |
+| **Latency-Sensitive (LS)** | Fixed timing, shift register impl, consumers must be ready |
+| **Latency-Insensitive (LI)** | Variable timing, FIFO impl, waits until consumed |
+
+```mlir
+// SyncToken type with data payload
+!cmt2.sync_token<data = !firrtl.uint<32>>
+```
+
+### proc.dataflow Construct
+
+The unified `proc.dataflow` construct supports linear pipelines and fork-join patterns:
+
+```python
+with m.dataflow("pipeline", args=[("input", UInt(32))], returns=[UInt(32)]) as df:
+    # Task 0: source (creates token from input)
+    with df.task("source") as t:
+        tok = t.create_token(df.input)
+        t.yield_tokens(tok)
+
+    # Task 1: process (consumes and produces token)
+    with df.task("process", tokens_in=[tok]) as t:
+        data = t.token_data(tok)
+        result = t.add(data, t.const(10, 32))
+        out_tok = t.create_token(result)
+        t.yield_tokens(out_tok)
+
+    # Task 2: sink (returns final result)
+    with df.task("sink", tokens_in=[out_tok]) as t:
+        result = t.token_data(out_tok)
+        t.return_values(result)
+```
+
+### Fork-Join Pattern
+
+Multiple tasks can consume the same token (fork) and a task can wait for multiple tokens (join):
+
+```python
+with m.dataflow("fork_join", args=[("x", UInt(16))], returns=[UInt(16)]) as df:
+    # Source produces one token
+    with df.task("source") as t:
+        tok = t.create_token(df.x)
+        t.yield_tokens(tok)
+
+    # Fork: both tasks receive the same token
+    with df.task("branch_a", tokens_in=[tok]) as t:
+        data = t.token_data(tok)
+        result = t.mul(data, t.const(2, 16))
+        tok_a = t.create_token(result)
+        t.yield_tokens(tok_a)
+
+    with df.task("branch_b", tokens_in=[tok]) as t:
+        data = t.token_data(tok)
+        result = t.add(data, t.const(100, 16))
+        tok_b = t.create_token(result)
+        t.yield_tokens(tok_b)
+
+    # Join: wait for both branches
+    with df.task("combine", tokens_in=[tok_a, tok_b]) as t:
+        a = t.token_data(tok_a)
+        b = t.token_data(tok_b)
+        result = t.add(a, b)
+        t.return_values(result)
+```
+
+### Token Operations
+
+| Operation | MLIR | Description |
+|-----------|------|-------------|
+| Create | `cmt2.token.create %data` | Create token with data payload |
+| Valid | `cmt2.token.valid %tok` | Check if token is valid (for guards) |
+| Data | `cmt2.token.data %tok` | Extract data from token |
+| Join | `cmt2.token.join %a, %b` | Join multiple tokens (AND of valids) |
+
+### Hardware Generation
+
+Tokens are lowered to storage modules by the `cmt2-token-rtl-gen` pass:
+
+| Token Mode | Hardware | Usage |
+|------------|----------|-------|
+| LS (latency-sensitive) | Shift register | Fixed timing, cycle-synchronized |
+| LI (latency-insensitive) | FIFO | Variable timing, handshake-based |
+
+```mlir
+// Before TokenRTLGen:
+cmt2.rule @producer() tokens_out(!cmt2.sync_token<data = !firrtl.uint<32>>) {
+  %tok = cmt2.token.create %data : ...
+}
+
+// After TokenRTLGen:
+cmt2.instance @__tok_0 = @ShiftReg_w32_d1(%clk, %rst)
+cmt2.rule @producer() {
+  cmt2.call @__tok_0 @write(%data) : ...
+}
+```
+
+### Pass Pipeline
+
+```
+cmt2-dataflow-lowering → cmt2-token-lowering → cmt2-token-rtl-gen → cmt2-to-firrtl
+```
+
+| Pass | Purpose |
+|------|---------|
+| `cmt2-dataflow-lowering` | Convert proc.dataflow to rules with tokens |
+| `cmt2-token-lowering` | Analyze tokens, infer FIFO depths |
+| `cmt2-token-rtl-gen` | Generate storage modules, rewrite token ops |
+| `cmt2-to-firrtl` | Standard CMT2 to FIRRTL conversion |
+
+---
+
+## Integration: Dataflow Tasks with Proc Control
+
+Multi-cycle proc control can be used **inside dataflow tasks** for complex pipeline stages. This enables patterns like:
+
+- Tasks with internal `static_repeat` loops
+- Tasks with data-dependent `while` loops
+- Tasks calling external modules with timing constraints
+
+### Task with Internal Control Flow
+
+```python
+with m.dataflow("iterative_pipeline", args=[("input", UInt(32))], returns=[UInt(32)]) as df:
+    # Task with internal loop (4 iterations, 1 cycle each)
+    with df.task("iterative_stage", timing=(0, 4)) as t:
+        state = df.input
+        with t.static_repeat(4):
+            state = t.call(iter_step, "process", state)
+        tok = t.create_token(state)
+        t.yield_tokens(tok)
+
+    # Simple single-cycle task
+    with df.task("final", tokens_in=[tok], timing=(4, 5)) as t:
+        result = t.token_data(tok)
+        t.return_values(result)
+```
+
+### Timing Modes
+
+| Task Body | Token Mode | Timing |
+|-----------|------------|--------|
+| Combinational logic | LS | Immediate |
+| `static_step(N)` | LS | N cycles, known at compile time |
+| `static_repeat` | LS | Iterations × body latency |
+| `while` loop | LI | Data-dependent, requires FIFO |
+
+### FSM Composition
+
+When tasks have internal FSMs, multiple FSM levels exist:
+
+```
+Dataflow Level: Token-based scheduling
+    task0 ──token──> task1 ──token──> task2
+      │                │                │
+      ▼                ▼                ▼
+  ┌───────┐        ┌───────┐        ┌───────┐
+  │FSM_t0 │        │FSM_t1 │        │FSM_t2 │   Task-level FSMs
+  │(loop) │        │(seq)  │        │(comb) │
+  └───────┘        └───────┘        └───────┘
+```
+
+### Stall Controller
+
+For hybrid LS/LI designs, stall controllers manage timing boundaries:
+
+- All registers in LS region gated by global stall
+- Task FSM registers included in stall gating
+- LI FIFOs provide ready/valid signals to stall controller
+
+**Compatibility Status (Phase 7):**
+
+| Scenario | Status |
+|----------|--------|
+| Static tasks (single-cycle) | ✓ Complete |
+| Static tasks (multi-cycle, fixed timing) | ✓ Complete |
+| Dynamic tasks (while loops) | ✓ Complete (auto-infers LI mode) |
+| Mixed LS/LI regions | ✓ Complete |
+| Tasks calling external modules with timing | ✓ Complete |
+| Nested dataflow | Deferred (flatten manually) |
+
+---
+
+## Timing Attribute Unification
+
+### Timing Systems
+
+| System | Attribute | Meaning |
+|--------|-----------|---------|
+| Dataflow | `#cmt2.timing<[start, end]>` | Task active interval |
+| Proc | `static_latency` | Total cycles to complete |
+| Proc | `interval` | Initiation interval |
+| Call | `arg_timing`, `result_timing` | Per-call port timing |
+
+### Unified Rules
+
+Task timing attributes integrate with proc timing:
+
+```mlir
+// Task with timing = equivalent to static_latency
+cmt2.dataflow.task @t {timing = #cmt2.timing<[2, 5]>}
+// Equivalent to: static_latency = 3 (cycles 2, 3, 4)
+
+// Task without timing = dynamic (LI mode)
+cmt2.dataflow.task @t {mode = "li"}
+// Completion determined by internal FSM
+```
 
 ---
 
@@ -773,4 +1025,5 @@ Multi-cycle proc control can be used within dataflow tasks for complex pipeline 
 - [Operations.md](Operations.md) - All CMT2 operations
 - [Attributes.md](Attributes.md) - Attribute reference
 - [Passes.md](Passes.md) - Transformation passes
-- [tmp/PipelinedDesign-Implementation.md](tmp/PipelinedDesign-Implementation.md) - Dataflow/pipeline design
+- [Development-Tracker.md](Development-Tracker.md) - Implementation status and task tracking
+- [tmp/PipelinedDesign-Implementation.md](tmp/PipelinedDesign-Implementation.md) - Detailed dataflow/pipeline design rationale
