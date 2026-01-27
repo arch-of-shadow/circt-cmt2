@@ -2012,7 +2012,7 @@ def TokenJoinOp : Cmt2Op<"token.join", [Pure]> {
 
 def ProcDataflowOp : Cmt2Op<
   "proc.dataflow", [
-    HasParent<"ModuleOp">,
+    ParentOneOf<["ModuleOp", "DataflowTaskOp"]>,
     IsolatedFromAbove,
     Symbol,
     SymbolTable,
@@ -2031,6 +2031,11 @@ def ProcDataflowOp : Cmt2Op<
     - Linear pipelines (stage0 -> stage1 -> ... -> stageN)
     - Fork-join patterns (one producer, multiple consumers)
     - Variable latency flows (LS/LI token mixing)
+    - Nested dataflows (dataflow inside task for hierarchical design)
+
+    Nested dataflows: A `cmt2.proc.dataflow` can appear inside a
+    `cmt2.dataflow.task` to model hierarchical pipeline structures.
+    These are automatically flattened during lowering.
 
     Attributes:
     - `sym_name`: The symbol name of the dataflow.
@@ -2095,6 +2100,7 @@ def DataflowTaskOp : Cmt2Op<
   "dataflow.task", [
     HasParent<"ProcDataflowOp">,
     Symbol,
+    SymbolTable,
     SingleBlock,
     OpAsmOpInterface
   ]> {

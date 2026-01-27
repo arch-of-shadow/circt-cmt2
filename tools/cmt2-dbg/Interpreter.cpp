@@ -18,6 +18,8 @@
 #include "mlir/IR/BuiltinOps.h"
 #include "llvm/ADT/TypeSwitch.h"
 #include "llvm/Support/Debug.h"
+#include "llvm/Support/JSON.h"
+#include "llvm/ADT/STLExtras.h"
 
 #define DEBUG_TYPE "cmt2-interpreter"
 
@@ -93,7 +95,7 @@ LogicalResult Cmt2Interpreter::initialize(StringRef circuitName) {
 
   os_ << "Initialized interpreter\n";
   os_ << "  Top module: " << topModule_.getModuleName() << "\n";
-  os_ << "  Registers: " << registers_.size() << "\n";
+  os_ << "  Registers: " << getRegisterNames().size() << "\n";
   os_ << "  Rules: " << getRuleNames().size() << "\n";
   if (!procFSMStates_.empty())
     os_ << "  Proc rules: " << procFSMStates_.size() << "\n";
@@ -1151,6 +1153,16 @@ std::optional<InterpValue> Cmt2Interpreter::readRegister(StringRef name) {
 
 LogicalResult Cmt2Interpreter::writeRegister(StringRef name,
                                               const InterpValue &value) {
+  if (moduleRegistry_.hasInstance(name)) {
+    // Best-effort: treat this as a register-like instance with a write method.
+    // For built-in Reg interpreter, this queues a pending write that will
+    // commit at end of cycle.
+    auto result = moduleRegistry_.callMethod(name, "write", {value});
+    if (!result)
+      return failure();
+    return success();
+  }
+
   auto it = registers_.find(name);
   if (it == registers_.end()) {
     os_ << "error: register '" << name << "' not found\n";
@@ -1174,6 +1186,22 @@ std::vector<std::string> Cmt2Interpreter::getRegisterNames() const {
     if (std::find(names.begin(), names.end(), entry.first().str()) == names.end())
       names.push_back(entry.first().str());
   }
+  return names;
+}
+
+std::vector<std::string> Cmt2Interpreter::getModuleNames() {
+  std::vector<std::string> names;
+
+  // Add the top module if present
+  if (topModule_) {
+    names.push_back(topModule_.getSymName().str());
+  }
+
+  // Add nested CMT2 module instances
+  for (const auto &entry : cmt2ModuleInstances_) {
+    names.push_back(entry.first().str());
+  }
+
   return names;
 }
 
@@ -1526,7 +1554,32 @@ void Cmt2Interpreter::addTraceEntry(const std::vector<RuleResult> &results) {
 
 void Cmt2Interpreter::printState() {
   os_ << "=== State at cycle " << cycle_ << " ===\n";
+
+  // Prefer the module registry (external modules like Reg/FIFO/Mem).
+  auto instanceNames = moduleRegistry_.getAllInstanceNames();
+  llvm::sort(instanceNames);
+  for (const auto &name : instanceNames) {
+    llvm::json::Value stateVal = moduleRegistry_.getInstanceState(name);
+    if (auto *obj = stateVal.getAsObject()) {
+      if (auto valueStr = obj->getString("value")) {
+        os_ << "  " << name << " = " << *valueStr;
+        if (auto typeStr = obj->getString("type"))
+          os_ << " (" << *typeStr << ")";
+        os_ << "\n";
+        continue;
+      }
+    }
+    os_ << "  " << name << " = ";
+    stateVal.print(os_);
+    os_ << "\n";
+  }
+
+  // Legacy registers (kept for backward compatibility).
   for (const auto &entry : registers_) {
+    // Avoid duplicates with registry instance names.
+    if (std::find(instanceNames.begin(), instanceNames.end(),
+                  entry.first().str()) != instanceNames.end())
+      continue;
     os_ << "  " << entry.first() << " = ";
     entry.second.value.print(os_, false); // Print as unsigned
     os_ << "\n";

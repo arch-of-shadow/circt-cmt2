@@ -345,6 +345,9 @@ public:
   /// Get all value names
   std::vector<std::string> getValueNames() const;
 
+  /// Get all module names in the circuit
+  std::vector<std::string> getModuleNames();
+
   /// Read a value method's current output
   std::optional<InterpValue> readValue(llvm::StringRef name);
 

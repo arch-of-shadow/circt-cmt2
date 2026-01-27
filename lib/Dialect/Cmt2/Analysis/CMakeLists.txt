@@ -1,4 +1,5 @@
 add_circt_library(CIRCTCmt2Analysis
+  SchedulerAnalysis.cpp
   TimingAnalysis.cpp
   TimingCompatibility.cpp
   TokenAnalysis.cpp

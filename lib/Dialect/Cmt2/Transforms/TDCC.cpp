@@ -294,6 +294,21 @@ private:
   /// Counter for generating unique par block IDs.
   uint64_t nextParId = 0;
 
+  /// State sequence order tracking for precedence generation.
+  /// Maps state ID to its sequence index (order in which states are encountered).
+  /// Later states (higher seq_idx) have higher precedence in pipeline semantics.
+  DenseMap<uint64_t, uint64_t> stateSequenceIndex;
+  uint64_t nextSequenceIndex = 0;
+
+  /// Record a state in the sequence order (called when state is first allocated).
+  void recordStateOrder(uint64_t state) {
+    if (stateSequenceIndex.find(state) == stateSequenceIndex.end()) {
+      stateSequenceIndex[state] = nextSequenceIndex++;
+      LLVM_DEBUG(llvm::dbgs() << "    State " << state << " -> seq_idx "
+                              << stateSequenceIndex[state] << "\n");
+    }
+  }
+
   /// Analyze the control flow in a branch and compute the states needed.
   /// Returns the number of states required (1+ for active states, 0 is reserved for idle/done).
   uint64_t analyzeBranchControl(Operation *branchOp, BranchFsmInfo &branchFsm);
@@ -361,6 +376,12 @@ uint64_t TDCCPass::computeUniqueIdsForOp(Operation *op, uint64_t curState) {
         enable->setAttr("tdcc.is_static",
                         attrBuilder.getBoolAttr(isStatic));
 
+        // Record state order for precedence generation
+        // For multi-cycle steps, record all intermediate states
+        for (int64_t i = 0; i < latency; ++i) {
+          recordStateOrder(curState + i);
+        }
+
         // Allocate 'latency' states for this step
         return curState + latency;
       })
@@ -388,6 +409,7 @@ uint64_t TDCCPass::computeUniqueIdsForOp(Operation *op, uint64_t curState) {
 
         uint64_t forkState = (curState == 0) ? 1 : curState;
         stateIds[par] = forkState;
+        recordStateOrder(forkState);  // Record fork state in sequence
         LLVM_DEBUG(llvm::dbgs() << "  Par fork -> state " << forkState << "\n");
 
         // Check if this is a simple par (all children are enables)
@@ -447,8 +469,14 @@ uint64_t TDCCPass::computeUniqueIdsForOp(Operation *op, uint64_t curState) {
                             attrBuilder.getBoolAttr(true));
           }
 
+          // Record exec state and all intermediate states for multi-cycle enables
+          for (int64_t i = 0; i < maxLatency; ++i) {
+            recordStateOrder(execState + i);
+          }
+
           // Join state is after max latency
           uint64_t joinState = execState + maxLatency;
+          recordStateOrder(joinState);  // Record join state in sequence
           LLVM_DEBUG(llvm::dbgs() << "  Simple par: exec state " << execState
                                   << ", max latency " << maxLatency
                                   << ", join -> state " << joinState << "\n");
@@ -468,6 +496,7 @@ uint64_t TDCCPass::computeUniqueIdsForOp(Operation *op, uint64_t curState) {
         // Join state is immediately after fork state in main FSM
         uint64_t joinState = forkState + 1;
         complexPar.joinState = joinState;
+        recordStateOrder(joinState);  // Record join state in sequence
 
         LLVM_DEBUG(llvm::dbgs() << "  Complex par " << complexPar.parId
                                 << ": fork=" << forkState << ", join=" << joinState << "\n");
@@ -512,6 +541,7 @@ uint64_t TDCCPass::computeUniqueIdsForOp(Operation *op, uint64_t curState) {
         // Branches can't get initial state (start at 1 if curState == 0)
         uint64_t cur = (curState == 0) ? 1 : curState;
         stateIds[ifOp] = cur;
+        recordStateOrder(cur);  // Record if header state
 
         // Process then branch
         uint64_t thenNext = cur;
@@ -535,6 +565,7 @@ uint64_t TDCCPass::computeUniqueIdsForOp(Operation *op, uint64_t curState) {
         // Similar to ProcIfOp but condition comes from condition region
         uint64_t cur = (curState == 0) ? 1 : curState;
         stateIds[condIfOp] = cur;
+        recordStateOrder(cur);  // Record cond_if header state
 
         // Process then branch
         uint64_t thenNext = cur;
@@ -560,6 +591,7 @@ uint64_t TDCCPass::computeUniqueIdsForOp(Operation *op, uint64_t curState) {
         // - Body states starting at N+1
         uint64_t headerState = (curState == 0) ? 1 : curState;
         stateIds[whileOp] = headerState;
+        recordStateOrder(headerState);  // Record while header state
         LLVM_DEBUG(llvm::dbgs() << "  While header -> state " << headerState << "\n");
 
         // Process body starting at headerState + 1
@@ -576,6 +608,7 @@ uint64_t TDCCPass::computeUniqueIdsForOp(Operation *op, uint64_t curState) {
         // Total states = count * body_states
         uint64_t cur = (curState == 0) ? 1 : curState;
         stateIds[repeatOp] = cur;
+        recordStateOrder(cur);  // Record static_repeat header state
         LLVM_DEBUG(llvm::dbgs() << "  StaticRepeat (count=" << repeatOp.getCount()
                                 << ") -> state " << cur << "\n");
 
@@ -597,6 +630,7 @@ uint64_t TDCCPass::computeUniqueIdsForOp(Operation *op, uint64_t curState) {
         // Static if: similar to regular if but with known latencies
         uint64_t cur = (curState == 0) ? 1 : curState;
         stateIds[staticIf] = cur;
+        recordStateOrder(cur);  // Record static_if header state
         LLVM_DEBUG(llvm::dbgs() << "  StaticIf -> state " << cur << "\n");
 
         // Process then branch
@@ -889,6 +923,8 @@ void TDCCPass::processDataflowTask(DataflowTaskOp task, cmt2::ModuleOp module) {
   // Clear state from previous processing
   stateIds.clear();
   iterStateIds.clear();
+  stateSequenceIndex.clear();
+  nextSequenceIndex = 0;
   currentIteration = -1;
   complexParBlocks.clear();
   nextParId = 0;
@@ -1669,6 +1705,22 @@ void TDCCPass::realizeSchedule(Schedule &schedule, Operation *procOp,
   procOp->setAttr("tdcc.fsm_width", builder.getI64IntegerAttr(fsmWidth));
   procOp->setAttr("tdcc.done_state", builder.getI64IntegerAttr(schedule.maxState + 1));
 
+  // Store state sequence order for precedence generation
+  // Maps state ID to sequence index (higher seq_idx = later in control flow = higher precedence)
+  SmallVector<Attribute> stateOrderAttrs;
+  for (auto &[state, seqIdx] : stateSequenceIndex) {
+    auto entry = builder.getDictionaryAttr({
+      builder.getNamedAttr("state", builder.getI64IntegerAttr(state)),
+      builder.getNamedAttr("seq_idx", builder.getI64IntegerAttr(seqIdx))
+    });
+    stateOrderAttrs.push_back(entry);
+  }
+  if (!stateOrderAttrs.empty()) {
+    procOp->setAttr("tdcc.state_order", builder.getArrayAttr(stateOrderAttrs));
+    LLVM_DEBUG(llvm::dbgs() << "  State sequence order: " << stateOrderAttrs.size()
+                            << " entries\n");
+  }
+
   // Store state assignments for each enable with timing information
   SmallVector<Attribute> stateAssigns;
   // First add non-iteration state assignments
@@ -2057,6 +2109,8 @@ void TDCCPass::processProcOp(Operation *procOp, cmt2::ModuleOp module) {
   // Clear state from previous proc op
   stateIds.clear();
   iterStateIds.clear();
+  stateSequenceIndex.clear();
+  nextSequenceIndex = 0;
   currentIteration = -1;
   complexParBlocks.clear();
   nextParId = 0;

@@ -189,6 +189,15 @@ ExtModuleFirrtlOp ModuleGenerator::createRegExtModule(unsigned dataWidth) {
       emptyArrayAttr,                              // arg_attrs
       emptyArrayAttr);                             // res_attrs
 
+  // Add scheduling constraint: read must sequence before write
+  // Format: sequenceBefore = [[@read, @write]]
+  extMod->setAttr("sequenceBefore", builder.getArrayAttr({
+      builder.getArrayAttr({
+          FlatSymbolRefAttr::get(builder.getContext(), "read"),
+          FlatSymbolRefAttr::get(builder.getContext(), "write")
+      })
+  }));
+
   extModuleCache_[cmt2ModuleName] = extMod;
   return extMod;
 }
@@ -419,8 +428,20 @@ Cmt2ModuleLike ModuleGenerator::createFIFOModule(StringRef name,
                           << " (width=" << dataWidth << ", depth=" << depth
                           << ")\n");
 
-  // For now, create a simple 1-element FIFO regardless of depth
-  // A proper implementation would use circular buffer for larger depths
+  // Create a simple shift-register FIFO of the requested depth.
+  //
+  // Semantics:
+  // - notEmpty/valid: true when there is at least 1 element
+  // - notFull/ready: true when there is at least 1 free slot
+  // - write/enq: enqueue (guarded by notFull)
+  // - deq: dequeue and return front (guarded by notEmpty)
+  // - peek/first: read front (not guarded here; caller should check valid)
+  //
+  // Implementation uses depth Reg<data> and Reg<i1> instances, and keeps
+  // entries packed at the front by shifting on deq and placing new entries
+  // in the first empty slot on enq.
+  if (depth == 0)
+    depth = 1;
 
   OpBuilder builder(circuit_.getContext());
   builder.setInsertionPointToEnd(&circuit_.getBody().front());
@@ -453,49 +474,105 @@ Cmt2ModuleLike ModuleGenerator::createFIFOModule(StringRef name,
   Value clk = body->getArgument(0);
   Value rst = body->getArgument(1);
 
-  // Create data and full registers
-  auto dataReg = modBuilder.create<InstanceOp>(
-      loc, modBuilder.getStringAttr("data_reg"), ValueRange{clk, rst},
-      FlatSymbolRefAttr::get(modBuilder.getContext(), regMod.getSymName()),
-      /*interface_binds=*/nullptr);
+  // Create data/valid registers for each FIFO slot.
+  SmallVector<InstanceOp> dataRegs;
+  SmallVector<InstanceOp> validRegs;
+  dataRegs.reserve(depth);
+  validRegs.reserve(depth);
 
-  auto fullReg = modBuilder.create<InstanceOp>(
-      loc, modBuilder.getStringAttr("full_reg"), ValueRange{clk, rst},
-      FlatSymbolRefAttr::get(modBuilder.getContext(), validRegMod.getSymName()),
-      /*interface_binds=*/nullptr);
+  for (unsigned i = 0; i < depth; ++i) {
+    std::string dataInstName = "data_" + std::to_string(i);
+    std::string validInstName = "valid_" + std::to_string(i);
 
-  // Add value: notEmpty() -> bool (same as full for 1-element FIFO)
+    auto dataInst = modBuilder.create<InstanceOp>(
+        loc, modBuilder.getStringAttr(dataInstName), ValueRange{clk, rst},
+        FlatSymbolRefAttr::get(modBuilder.getContext(), regMod.getSymName()),
+        /*interface_binds=*/nullptr);
+
+    auto validInst = modBuilder.create<InstanceOp>(
+        loc, modBuilder.getStringAttr(validInstName), ValueRange{clk, rst},
+        FlatSymbolRefAttr::get(modBuilder.getContext(), validRegMod.getSymName()),
+        /*interface_binds=*/nullptr);
+
+    dataRegs.push_back(dataInst);
+    validRegs.push_back(validInst);
+  }
+
+  auto constTrue = [&](OpBuilder &b) -> Value {
+    return b.create<firrtl::ConstantOp>(loc, boolType, APInt(1, 1));
+  };
+  auto constFalse = [&](OpBuilder &b) -> Value {
+    return b.create<firrtl::ConstantOp>(loc, boolType, APInt(1, 0));
+  };
+
+  auto readReg = [&](OpBuilder &b, InstanceOp inst, Type resultTy) -> Value {
+    auto callOp = b.create<CallOp>(
+        loc, TypeRange{resultTy}, ValueRange{},
+        FlatSymbolRefAttr::get(b.getContext(), inst.getSymName()),
+        FlatSymbolRefAttr::get(b.getContext(), "read"),
+        /*arg_attrs=*/nullptr, /*res_attrs=*/nullptr, /*arg_timing=*/nullptr,
+        /*result_timing=*/nullptr);
+    return callOp.getOutputs()[0];
+  };
+
+  auto writeReg = [&](OpBuilder &b, InstanceOp inst, Value v) {
+    b.create<CallOp>(
+        loc, TypeRange{}, ValueRange{v},
+        FlatSymbolRefAttr::get(b.getContext(), inst.getSymName()),
+        FlatSymbolRefAttr::get(b.getContext(), "write"),
+        /*arg_attrs=*/nullptr, /*res_attrs=*/nullptr, /*arg_timing=*/nullptr,
+        /*result_timing=*/nullptr);
+  };
+
+  // Helper: build a boolean (UInt<1>) for notEmpty and notFull.
+  auto buildNotEmpty = [&](OpBuilder &b) -> Value {
+    return readReg(b, validRegs[0], boolType);
+  };
+  auto buildNotFull = [&](OpBuilder &b) -> Value {
+    Value lastValid = readReg(b, validRegs[depth - 1], boolType);
+    return b.create<firrtl::NotPrimOp>(loc, lastValid);
+  };
+
+  // Value: notEmpty() -> bool
   auto notEmptyType = modBuilder.getFunctionType({}, {boolType});
   auto notEmptyVal = modBuilder.create<ValueOp>(
       loc, modBuilder.getStringAttr("notEmpty"), TypeAttr::get(notEmptyType),
       modBuilder.getStrArrayAttr({}), modBuilder.getArrayAttr({}),
       /*arg_attrs=*/nullptr, /*res_attrs=*/nullptr);
-
-  // Guard: always true
   {
     Region &guardRegion = notEmptyVal.getGuard();
     Block *guardBlock = new Block();
     guardRegion.push_back(guardBlock);
     OpBuilder guardBuilder(guardBlock, guardBlock->begin());
-    auto trueVal =
-        guardBuilder.create<firrtl::ConstantOp>(loc, boolType, APInt(1, 1));
-    guardBuilder.create<ReturnOp>(loc, ValueRange{trueVal});
+    guardBuilder.create<ReturnOp>(loc, ValueRange{constTrue(guardBuilder)});
   }
-
-  // Body: read full_reg
   {
     Region &bodyRegion = notEmptyVal.getBody();
     Block *bodyBlock = new Block();
     bodyRegion.push_back(bodyBlock);
     OpBuilder bodyBuilder(bodyBlock, bodyBlock->begin());
+    bodyBuilder.create<ReturnOp>(loc, ValueRange{buildNotEmpty(bodyBuilder)});
+  }
 
-    auto callOp = bodyBuilder.create<CallOp>(
-        loc, TypeRange{boolType}, ValueRange{},
-        FlatSymbolRefAttr::get(bodyBuilder.getContext(), fullReg.getSymName()),
-        FlatSymbolRefAttr::get(bodyBuilder.getContext(), "read"),
-        /*arg_attrs=*/nullptr, /*res_attrs=*/nullptr, /*arg_timing=*/nullptr,
-        /*result_timing=*/nullptr);
-    bodyBuilder.create<ReturnOp>(loc, callOp.getOutputs());
+  // Value: notFull() -> bool
+  auto notFullType = modBuilder.getFunctionType({}, {boolType});
+  auto notFullVal = modBuilder.create<ValueOp>(
+      loc, modBuilder.getStringAttr("notFull"), TypeAttr::get(notFullType),
+      modBuilder.getStrArrayAttr({}), modBuilder.getArrayAttr({}),
+      /*arg_attrs=*/nullptr, /*res_attrs=*/nullptr);
+  {
+    Region &guardRegion = notFullVal.getGuard();
+    Block *guardBlock = new Block();
+    guardRegion.push_back(guardBlock);
+    OpBuilder guardBuilder(guardBlock, guardBlock->begin());
+    guardBuilder.create<ReturnOp>(loc, ValueRange{constTrue(guardBuilder)});
+  }
+  {
+    Region &bodyRegion = notFullVal.getBody();
+    Block *bodyBlock = new Block();
+    bodyRegion.push_back(bodyBlock);
+    OpBuilder bodyBuilder(bodyBlock, bodyBlock->begin());
+    bodyBuilder.create<ReturnOp>(loc, ValueRange{buildNotFull(bodyBuilder)});
   }
 
   // Add value: first() -> data
@@ -522,14 +599,8 @@ Cmt2ModuleLike ModuleGenerator::createFIFOModule(StringRef name,
     Block *bodyBlock = new Block();
     bodyRegion.push_back(bodyBlock);
     OpBuilder bodyBuilder(bodyBlock, bodyBlock->begin());
-
-    auto callOp = bodyBuilder.create<CallOp>(
-        loc, TypeRange{dataType}, ValueRange{},
-        FlatSymbolRefAttr::get(bodyBuilder.getContext(), dataReg.getSymName()),
-        FlatSymbolRefAttr::get(bodyBuilder.getContext(), "read"),
-        /*arg_attrs=*/nullptr, /*res_attrs=*/nullptr, /*arg_timing=*/nullptr,
-        /*result_timing=*/nullptr);
-    bodyBuilder.create<ReturnOp>(loc, callOp.getOutputs());
+    bodyBuilder.create<ReturnOp>(loc,
+                                 ValueRange{readReg(bodyBuilder, dataRegs[0], dataType)});
   }
 
   // Add method: enq(data)
@@ -539,19 +610,17 @@ Cmt2ModuleLike ModuleGenerator::createFIFOModule(StringRef name,
       modBuilder.getStrArrayAttr({"data"}), modBuilder.getArrayAttr({}),
       /*arg_attrs=*/nullptr, /*res_attrs=*/nullptr);
 
-  // Guard: always true (proper impl would check !full)
+  // Guard: notFull
   {
     Region &guardRegion = enqMethod.getGuard();
     Block *guardBlock = new Block();
     guardBlock->addArgument(dataType, loc);
     guardRegion.push_back(guardBlock);
     OpBuilder guardBuilder(guardBlock, guardBlock->begin());
-    auto trueVal =
-        guardBuilder.create<firrtl::ConstantOp>(loc, boolType, APInt(1, 1));
-    guardBuilder.create<ReturnOp>(loc, ValueRange{trueVal});
+    guardBuilder.create<ReturnOp>(loc, ValueRange{buildNotFull(guardBuilder)});
   }
 
-  // Body: write data_reg, set full_reg
+  // Body: enqueue into first empty slot
   {
     Region &bodyRegion = enqMethod.getBody();
     Block *bodyBlock = new Block();
@@ -561,23 +630,32 @@ Cmt2ModuleLike ModuleGenerator::createFIFOModule(StringRef name,
 
     Value data = bodyBlock->getArgument(0);
 
-    // Write data
-    bodyBuilder.create<CallOp>(
-        loc, TypeRange{}, ValueRange{data},
-        FlatSymbolRefAttr::get(bodyBuilder.getContext(), dataReg.getSymName()),
-        FlatSymbolRefAttr::get(bodyBuilder.getContext(), "write"),
-        /*arg_attrs=*/nullptr, /*res_attrs=*/nullptr, /*arg_timing=*/nullptr,
-        /*result_timing=*/nullptr);
+    SmallVector<Value> validVals;
+    SmallVector<Value> dataVals;
+    validVals.reserve(depth);
+    dataVals.reserve(depth);
+    for (unsigned i = 0; i < depth; ++i) {
+      validVals.push_back(readReg(bodyBuilder, validRegs[i], boolType));
+      dataVals.push_back(readReg(bodyBuilder, dataRegs[i], dataType));
+    }
 
-    // Set full
-    auto trueVal =
-        bodyBuilder.create<firrtl::ConstantOp>(loc, boolType, APInt(1, 1));
-    bodyBuilder.create<CallOp>(
-        loc, TypeRange{}, ValueRange{trueVal},
-        FlatSymbolRefAttr::get(bodyBuilder.getContext(), fullReg.getSymName()),
-        FlatSymbolRefAttr::get(bodyBuilder.getContext(), "write"),
-        /*arg_attrs=*/nullptr, /*res_attrs=*/nullptr, /*arg_timing=*/nullptr,
-        /*result_timing=*/nullptr);
+    Value prefixFull = constTrue(bodyBuilder);
+    Value one = constTrue(bodyBuilder);
+
+    for (unsigned i = 0; i < depth; ++i) {
+      Value isEmpty = bodyBuilder.create<firrtl::NotPrimOp>(loc, validVals[i]);
+      Value select = bodyBuilder.create<firrtl::AndPrimOp>(loc, prefixFull, isEmpty);
+
+      Value nextData =
+          bodyBuilder.create<firrtl::MuxPrimOp>(loc, select, data, dataVals[i]);
+      Value nextValid =
+          bodyBuilder.create<firrtl::MuxPrimOp>(loc, select, one, validVals[i]);
+
+      writeReg(bodyBuilder, dataRegs[i], nextData);
+      writeReg(bodyBuilder, validRegs[i], nextValid);
+
+      prefixFull = bodyBuilder.create<firrtl::AndPrimOp>(loc, prefixFull, validVals[i]);
+    }
 
     bodyBuilder.create<ReturnOp>(loc, ValueRange{});
   }
@@ -589,43 +667,167 @@ Cmt2ModuleLike ModuleGenerator::createFIFOModule(StringRef name,
       modBuilder.getStrArrayAttr({}), modBuilder.getArrayAttr({}),
       /*arg_attrs=*/nullptr, /*res_attrs=*/nullptr);
 
-  // Guard: always true (proper impl would check notEmpty)
+  // Guard: notEmpty
   {
     Region &guardRegion = deqMethod.getGuard();
     Block *guardBlock = new Block();
     guardRegion.push_back(guardBlock);
     OpBuilder guardBuilder(guardBlock, guardBlock->begin());
-    auto trueVal =
-        guardBuilder.create<firrtl::ConstantOp>(loc, boolType, APInt(1, 1));
-    guardBuilder.create<ReturnOp>(loc, ValueRange{trueVal});
+    guardBuilder.create<ReturnOp>(loc, ValueRange{buildNotEmpty(guardBuilder)});
   }
 
-  // Body: read data, clear full
+  // Body: read front, shift, clear last valid
   {
     Region &bodyRegion = deqMethod.getBody();
     Block *bodyBlock = new Block();
     bodyRegion.push_back(bodyBlock);
     OpBuilder bodyBuilder(bodyBlock, bodyBlock->begin());
 
-    // Read data
-    auto dataCall = bodyBuilder.create<CallOp>(
-        loc, TypeRange{dataType}, ValueRange{},
-        FlatSymbolRefAttr::get(bodyBuilder.getContext(), dataReg.getSymName()),
-        FlatSymbolRefAttr::get(bodyBuilder.getContext(), "read"),
-        /*arg_attrs=*/nullptr, /*res_attrs=*/nullptr, /*arg_timing=*/nullptr,
-        /*result_timing=*/nullptr);
+    SmallVector<Value> validVals;
+    SmallVector<Value> dataVals;
+    validVals.reserve(depth);
+    dataVals.reserve(depth);
+    for (unsigned i = 0; i < depth; ++i) {
+      validVals.push_back(readReg(bodyBuilder, validRegs[i], boolType));
+      dataVals.push_back(readReg(bodyBuilder, dataRegs[i], dataType));
+    }
 
-    // Clear full
-    auto falseVal =
-        bodyBuilder.create<firrtl::ConstantOp>(loc, boolType, APInt(1, 0));
-    bodyBuilder.create<CallOp>(
-        loc, TypeRange{}, ValueRange{falseVal},
-        FlatSymbolRefAttr::get(bodyBuilder.getContext(), fullReg.getSymName()),
-        FlatSymbolRefAttr::get(bodyBuilder.getContext(), "write"),
-        /*arg_attrs=*/nullptr, /*res_attrs=*/nullptr, /*arg_timing=*/nullptr,
-        /*result_timing=*/nullptr);
+    Value out = dataVals[0];
 
-    bodyBuilder.create<ReturnOp>(loc, dataCall.getOutputs());
+    for (unsigned i = 0; i + 1 < depth; ++i) {
+      writeReg(bodyBuilder, dataRegs[i], dataVals[i + 1]);
+      writeReg(bodyBuilder, validRegs[i], validVals[i + 1]);
+    }
+    writeReg(bodyBuilder, validRegs[depth - 1], constFalse(bodyBuilder));
+
+    bodyBuilder.create<ReturnOp>(loc, ValueRange{out});
+  }
+
+  // -----------------------------------------------------------------------
+  // Compatibility aliases for TokenRTLGen storage interface:
+  //  - valid()  == notEmpty()
+  //  - ready()  == notFull()
+  //  - peek()   == first()
+  //  - write()  == enq()
+  // -----------------------------------------------------------------------
+
+  // Value: valid() -> bool
+  auto validType = modBuilder.getFunctionType({}, {boolType});
+  auto validVal = modBuilder.create<ValueOp>(
+      loc, modBuilder.getStringAttr("valid"), TypeAttr::get(validType),
+      modBuilder.getStrArrayAttr({}), modBuilder.getArrayAttr({}),
+      /*arg_attrs=*/nullptr, /*res_attrs=*/nullptr);
+  {
+    Region &guardRegion = validVal.getGuard();
+    Block *guardBlock = new Block();
+    guardRegion.push_back(guardBlock);
+    OpBuilder guardBuilder(guardBlock, guardBlock->begin());
+    guardBuilder.create<ReturnOp>(loc, ValueRange{constTrue(guardBuilder)});
+  }
+  {
+    Region &bodyRegion = validVal.getBody();
+    Block *bodyBlock = new Block();
+    bodyRegion.push_back(bodyBlock);
+    OpBuilder bodyBuilder(bodyBlock, bodyBlock->begin());
+    bodyBuilder.create<ReturnOp>(loc, ValueRange{buildNotEmpty(bodyBuilder)});
+  }
+
+  // Value: ready() -> bool
+  auto readyType = modBuilder.getFunctionType({}, {boolType});
+  auto readyVal = modBuilder.create<ValueOp>(
+      loc, modBuilder.getStringAttr("ready"), TypeAttr::get(readyType),
+      modBuilder.getStrArrayAttr({}), modBuilder.getArrayAttr({}),
+      /*arg_attrs=*/nullptr, /*res_attrs=*/nullptr);
+  {
+    Region &guardRegion = readyVal.getGuard();
+    Block *guardBlock = new Block();
+    guardRegion.push_back(guardBlock);
+    OpBuilder guardBuilder(guardBlock, guardBlock->begin());
+    guardBuilder.create<ReturnOp>(loc, ValueRange{constTrue(guardBuilder)});
+  }
+  {
+    Region &bodyRegion = readyVal.getBody();
+    Block *bodyBlock = new Block();
+    bodyRegion.push_back(bodyBlock);
+    OpBuilder bodyBuilder(bodyBlock, bodyBlock->begin());
+    bodyBuilder.create<ReturnOp>(loc, ValueRange{buildNotFull(bodyBuilder)});
+  }
+
+  // Value: peek() -> data
+  auto peekType = modBuilder.getFunctionType({}, {dataType});
+  auto peekVal = modBuilder.create<ValueOp>(
+      loc, modBuilder.getStringAttr("peek"), TypeAttr::get(peekType),
+      modBuilder.getStrArrayAttr({}), modBuilder.getArrayAttr({}),
+      /*arg_attrs=*/nullptr, /*res_attrs=*/nullptr);
+  {
+    Region &guardRegion = peekVal.getGuard();
+    Block *guardBlock = new Block();
+    guardRegion.push_back(guardBlock);
+    OpBuilder guardBuilder(guardBlock, guardBlock->begin());
+    guardBuilder.create<ReturnOp>(loc, ValueRange{constTrue(guardBuilder)});
+  }
+  {
+    Region &bodyRegion = peekVal.getBody();
+    Block *bodyBlock = new Block();
+    bodyRegion.push_back(bodyBlock);
+    OpBuilder bodyBuilder(bodyBlock, bodyBlock->begin());
+    bodyBuilder.create<ReturnOp>(loc,
+                                 ValueRange{readReg(bodyBuilder, dataRegs[0], dataType)});
+  }
+
+  // Method: write(data)
+  auto writeType = modBuilder.getFunctionType({dataType}, {});
+  auto writeMethod = modBuilder.create<MethodOp>(
+      loc, modBuilder.getStringAttr("write"), TypeAttr::get(writeType),
+      modBuilder.getStrArrayAttr({"data"}), modBuilder.getArrayAttr({}),
+      /*arg_attrs=*/nullptr, /*res_attrs=*/nullptr);
+  {
+    Region &guardRegion = writeMethod.getGuard();
+    Block *guardBlock = new Block();
+    guardBlock->addArgument(dataType, loc);
+    guardRegion.push_back(guardBlock);
+    OpBuilder guardBuilder(guardBlock, guardBlock->begin());
+    guardBuilder.create<ReturnOp>(loc, ValueRange{buildNotFull(guardBuilder)});
+  }
+  {
+    Region &bodyRegion = writeMethod.getBody();
+    Block *bodyBlock = new Block();
+    bodyBlock->addArgument(dataType, loc);
+    bodyRegion.push_back(bodyBlock);
+    OpBuilder bodyBuilder(bodyBlock, bodyBlock->begin());
+
+    Value data = bodyBlock->getArgument(0);
+
+    SmallVector<Value> validVals;
+    SmallVector<Value> dataVals;
+    validVals.reserve(depth);
+    dataVals.reserve(depth);
+    for (unsigned i = 0; i < depth; ++i) {
+      validVals.push_back(readReg(bodyBuilder, validRegs[i], boolType));
+      dataVals.push_back(readReg(bodyBuilder, dataRegs[i], dataType));
+    }
+
+    Value prefixFull = constTrue(bodyBuilder);
+    Value one = constTrue(bodyBuilder);
+
+    for (unsigned i = 0; i < depth; ++i) {
+      Value isEmpty = bodyBuilder.create<firrtl::NotPrimOp>(loc, validVals[i]);
+      Value select =
+          bodyBuilder.create<firrtl::AndPrimOp>(loc, prefixFull, isEmpty);
+
+      Value nextData =
+          bodyBuilder.create<firrtl::MuxPrimOp>(loc, select, data, dataVals[i]);
+      Value nextValid =
+          bodyBuilder.create<firrtl::MuxPrimOp>(loc, select, one, validVals[i]);
+
+      writeReg(bodyBuilder, dataRegs[i], nextData);
+      writeReg(bodyBuilder, validRegs[i], nextValid);
+
+      prefixFull =
+          bodyBuilder.create<firrtl::AndPrimOp>(loc, prefixFull, validVals[i]);
+    }
+
+    bodyBuilder.create<ReturnOp>(loc, ValueRange{});
   }
 
   moduleCache_[name] = mod;

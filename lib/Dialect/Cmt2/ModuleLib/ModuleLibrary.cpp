@@ -36,7 +36,14 @@ bool ModuleLibrary::CacheKey::operator<(const CacheKey &other) const {
 }
 
 mlir::LogicalResult ModuleLibrary::loadManifest(llvm::StringRef path) {
-  libraryBasePath_ = llvm::sys::path::parent_path(path).str();
+  // Idempotent check - skip if already loaded from same path
+  std::string parentPath = llvm::sys::path::parent_path(path).str();
+  if (!modules_.empty() && !libraryBasePath_.empty()) {
+    // Already loaded - skip re-loading
+    return mlir::success();
+  }
+
+  libraryBasePath_ = parentPath;
 
   // Convert to absolute path if needed
   if (!llvm::sys::path::is_absolute(libraryBasePath_)) {
@@ -55,121 +62,233 @@ mlir::LogicalResult ModuleLibrary::loadManifest(llvm::StringRef path) {
     return mlir::failure();
   }
 
-  // Simple YAML parsing - for production, use llvm::yaml::Input
-  std::string content = fileOrErr.get()->getBuffer().str();
+  // Use LLVM YAML streaming parser for proper parsing
+  llvm::SourceMgr srcMgr;
+  srcMgr.AddNewSourceBuffer(std::move(fileOrErr.get()), llvm::SMLoc());
 
-  // This is a simplified parser for the manifest format
-  // For production code, use llvm::yaml::Input with proper traits
+  llvm::yaml::Stream yamlStream(srcMgr.getMemoryBuffer(1)->getBuffer(), srcMgr);
 
-  // Parse "modules:" section
-  size_t pos = content.find("modules:");
-  if (pos == std::string::npos) {
-    llvm::errs() << "No 'modules:' section found in manifest\n";
+  llvm::yaml::document_iterator docIt = yamlStream.begin();
+  if (docIt == yamlStream.end()) {
+    llvm::errs() << "Empty YAML document\n";
     return mlir::failure();
   }
 
-  // Very basic parsing - just enough to get the reg module working
-  // Look for "- name:" entries
-  pos = content.find("- name:", pos);
-  while (pos != std::string::npos) {
-    ModuleInfo info;
+  llvm::yaml::Node *root = docIt->getRoot();
+  if (!root) {
+    llvm::errs() << "Invalid YAML root\n";
+    return mlir::failure();
+  }
 
-    // Extract name
-    size_t nameStart = content.find("\"", pos) + 1;
-    size_t nameEnd = content.find("\"", nameStart);
-    info.name = content.substr(nameStart, nameEnd - nameStart);
+  auto *rootMap = llvm::dyn_cast<llvm::yaml::MappingNode>(root);
+  if (!rootMap) {
+    llvm::errs() << "YAML root is not a mapping\n";
+    return mlir::failure();
+  }
 
-    // Extract type
-    size_t typePos = content.find("type:", pos);
-    size_t typeStart = content.find("\"", typePos) + 1;
-    size_t typeEnd = content.find("\"", typeStart);
-    std::string typeStr = content.substr(typeStart, typeEnd - typeStart);
-    info.type = (typeStr == "static") ? ModuleInfo::Static : ModuleInfo::Chisel;
-
-    // Extract path
-    size_t pathPos = content.find("path:", typePos);
-    size_t pathStart = content.find("\"", pathPos) + 1;
-    size_t pathEnd = content.find("\"", pathStart);
-    info.path = content.substr(pathStart, pathEnd - pathStart);
-
-    // Extract description (optional)
-    size_t descPos = content.find("description:", pathPos);
-    if (descPos != std::string::npos && descPos < content.find("- name:", pos + 1)) {
-      size_t descStart = content.find("\"", descPos) + 1;
-      size_t descEnd = content.find("\"", descStart);
-      info.description = content.substr(descStart, descEnd - descStart);
+  // Helper to get scalar value
+  auto getScalar = [](llvm::yaml::Node *node) -> std::string {
+    if (auto *scalar = llvm::dyn_cast_or_null<llvm::yaml::ScalarNode>(node)) {
+      llvm::SmallString<64> storage;
+      return scalar->getValue(storage).str();
     }
+    return "";
+  };
 
-    // Parse parameters section (for Chisel modules)
-    size_t paramsPos = content.find("parameters:", pathPos);
-    if (paramsPos != std::string::npos && paramsPos < content.find("- name:", pos + 1)) {
-      // Find all parameter entries
-      size_t paramPos = content.find("- name:", paramsPos);
-      size_t nextModulePos = content.find("- name:", pos + 1);
-      size_t buildSectionPos = content.find("build:", paramsPos);
+  // Helper to get boolean
+  auto getBool = [&getScalar](llvm::yaml::Node *node) -> bool {
+    std::string val = getScalar(node);
+    return val == "true" || val == "yes" || val == "1";
+  };
 
-      while (paramPos != std::string::npos && paramPos < buildSectionPos) {
-        ModuleInfo::ParamInfo paramInfo;
+  // Helper to get integer (no exceptions allowed in LLVM)
+  auto getInt = [&getScalar](llvm::yaml::Node *node) -> std::optional<int64_t> {
+    std::string val = getScalar(node);
+    if (val.empty()) return std::nullopt;
+    char *endPtr = nullptr;
+    long long result = std::strtoll(val.c_str(), &endPtr, 10);
+    if (endPtr == val.c_str() || *endPtr != '\0')
+      return std::nullopt;
+    return result;
+  };
 
-        // Extract parameter name
-        size_t pnameStart = content.find("\"", paramPos) + 1;
-        size_t pnameEnd = content.find("\"", pnameStart);
-        paramInfo.name = content.substr(pnameStart, pnameEnd - pnameStart);
+  // Find modules section
+  for (auto &kvp : *rootMap) {
+    std::string key = getScalar(kvp.getKey());
+    if (key != "modules") continue;
 
-        // Extract default value (optional)
-        size_t defaultPos = content.find("default:", paramPos);
-        if (defaultPos != std::string::npos && defaultPos < content.find("- name:", paramPos + 1)) {
-          size_t defaultStart = defaultPos + 8; // Skip "default:"
-          while (defaultStart < content.size() && std::isspace(content[defaultStart])) defaultStart++;
-          size_t defaultEnd = defaultStart;
-          while (defaultEnd < content.size() && std::isdigit(content[defaultEnd])) defaultEnd++;
-          if (defaultEnd > defaultStart) {
-            paramInfo.defaultValue = std::stoll(content.substr(defaultStart, defaultEnd - defaultStart));
+    auto *modulesSeq = llvm::dyn_cast<llvm::yaml::SequenceNode>(kvp.getValue());
+    if (!modulesSeq) continue;
+
+    // Parse each module
+    for (auto &moduleNode : *modulesSeq) {
+      auto *moduleMap = llvm::dyn_cast<llvm::yaml::MappingNode>(&moduleNode);
+      if (!moduleMap) continue;
+
+      ModuleInfo info;
+
+      for (auto &modKvp : *moduleMap) {
+        std::string modKey = getScalar(modKvp.getKey());
+
+        if (modKey == "name") {
+          info.name = getScalar(modKvp.getValue());
+        } else if (modKey == "type") {
+          std::string typeStr = getScalar(modKvp.getValue());
+          info.type = (typeStr == "static") ? ModuleInfo::Static : ModuleInfo::Chisel;
+        } else if (modKey == "path") {
+          info.path = getScalar(modKvp.getValue());
+        } else if (modKey == "description") {
+          info.description = getScalar(modKvp.getValue());
+        } else if (modKey == "ports") {
+          // Parse ports map
+          if (auto *portsMap = llvm::dyn_cast<llvm::yaml::MappingNode>(modKvp.getValue())) {
+            for (auto &portKvp : *portsMap) {
+              std::string portName = getScalar(portKvp.getKey());
+              std::string portType = getScalar(portKvp.getValue());
+              info.ports[portName] = portType;
+            }
+          }
+        } else if (modKey == "parameters") {
+          // Parse parameters
+          if (auto *paramsSeq = llvm::dyn_cast<llvm::yaml::SequenceNode>(modKvp.getValue())) {
+            for (auto &paramNode : *paramsSeq) {
+              if (auto *paramMap = llvm::dyn_cast<llvm::yaml::MappingNode>(&paramNode)) {
+                ModuleInfo::ParamInfo paramInfo;
+                for (auto &paramKvp : *paramMap) {
+                  std::string paramKey = getScalar(paramKvp.getKey());
+                  if (paramKey == "name") {
+                    paramInfo.name = getScalar(paramKvp.getValue());
+                  } else if (paramKey == "type") {
+                    paramInfo.type = getScalar(paramKvp.getValue());
+                  } else if (paramKey == "default") {
+                    paramInfo.defaultValue = getInt(paramKvp.getValue());
+                  } else if (paramKey == "required") {
+                    paramInfo.required = getBool(paramKvp.getValue());
+                  }
+                }
+                info.parameters.push_back(paramInfo);
+              }
+            }
+          }
+        } else if (modKey == "methods") {
+          // Parse methods
+          if (auto *methodsSeq = llvm::dyn_cast<llvm::yaml::SequenceNode>(modKvp.getValue())) {
+            for (auto &methodNode : *methodsSeq) {
+              if (auto *methodMap = llvm::dyn_cast<llvm::yaml::MappingNode>(&methodNode)) {
+                ModuleInfo::MethodInfo methodInfo;
+                methodInfo.hasReady = false;
+                methodInfo.hasEnable = false;
+                for (auto &methodKvp : *methodMap) {
+                  std::string methodKey = getScalar(methodKvp.getKey());
+                  if (methodKey == "name") {
+                    methodInfo.name = getScalar(methodKvp.getValue());
+                  } else if (methodKey == "ready") {
+                    methodInfo.hasReady = getBool(methodKvp.getValue());
+                  } else if (methodKey == "enable") {
+                    methodInfo.hasEnable = getBool(methodKvp.getValue());
+                  } else if (methodKey == "inputs") {
+                    if (auto *inputsSeq = llvm::dyn_cast<llvm::yaml::SequenceNode>(methodKvp.getValue())) {
+                      for (auto &inputNode : *inputsSeq) {
+                        methodInfo.inputs.push_back(getScalar(&inputNode));
+                      }
+                    }
+                  } else if (methodKey == "outputs") {
+                    if (auto *outputsSeq = llvm::dyn_cast<llvm::yaml::SequenceNode>(methodKvp.getValue())) {
+                      for (auto &outputNode : *outputsSeq) {
+                        methodInfo.outputs.push_back(getScalar(&outputNode));
+                      }
+                    }
+                  }
+                }
+                info.methods.push_back(methodInfo);
+              }
+            }
+          }
+        } else if (modKey == "values") {
+          // Parse values (similar to methods)
+          if (auto *valuesSeq = llvm::dyn_cast<llvm::yaml::SequenceNode>(modKvp.getValue())) {
+            for (auto &valueNode : *valuesSeq) {
+              if (auto *valueMap = llvm::dyn_cast<llvm::yaml::MappingNode>(&valueNode)) {
+                ModuleInfo::MethodInfo valueInfo;
+                valueInfo.hasReady = false;
+                valueInfo.hasEnable = false;
+                for (auto &valueKvp : *valueMap) {
+                  std::string valueKey = getScalar(valueKvp.getKey());
+                  if (valueKey == "name") {
+                    valueInfo.name = getScalar(valueKvp.getValue());
+                  } else if (valueKey == "ready") {
+                    valueInfo.hasReady = getBool(valueKvp.getValue());
+                  } else if (valueKey == "enable") {
+                    valueInfo.hasEnable = getBool(valueKvp.getValue());
+                  } else if (valueKey == "outputs") {
+                    if (auto *outputsSeq = llvm::dyn_cast<llvm::yaml::SequenceNode>(valueKvp.getValue())) {
+                      for (auto &outputNode : *outputsSeq) {
+                        valueInfo.outputs.push_back(getScalar(&outputNode));
+                      }
+                    }
+                  }
+                }
+                info.methods.push_back(valueInfo); // values stored in methods list
+              }
+            }
+          }
+        } else if (modKey == "conflict_matrix") {
+          // Parse conflict matrix
+          if (auto *conflictSeq = llvm::dyn_cast<llvm::yaml::SequenceNode>(modKvp.getValue())) {
+            for (auto &conflictNode : *conflictSeq) {
+              if (auto *conflictRow = llvm::dyn_cast<llvm::yaml::SequenceNode>(&conflictNode)) {
+                ModuleInfo::ConflictEntry entry;
+                int idx = 0;
+                for (auto &elem : *conflictRow) {
+                  std::string val = getScalar(&elem);
+                  if (idx == 0) entry.func1 = val;
+                  else if (idx == 1) entry.func2 = val;
+                  else if (idx == 2) {
+                    if (val == "Conflict")
+                      entry.relation = ModuleInfo::ConflictEntry::Conflict;
+                    else if (val == "ConflictFree")
+                      entry.relation = ModuleInfo::ConflictEntry::ConflictFree;
+                    else if (val == "SequentialBefore")
+                      entry.relation = ModuleInfo::ConflictEntry::SequentialBefore;
+                  }
+                  idx++;
+                }
+                if (idx >= 3) {
+                  info.conflictMatrix.push_back(entry);
+                }
+              }
+            }
+          }
+        } else if (modKey == "build") {
+          // Parse build info
+          if (auto *buildMap = llvm::dyn_cast<llvm::yaml::MappingNode>(modKvp.getValue())) {
+            ModuleInfo::BuildInfo buildInfo;
+            buildInfo.useCache = false;
+            for (auto &buildKvp : *buildMap) {
+              std::string buildKey = getScalar(buildKvp.getKey());
+              if (buildKey == "command") {
+                buildInfo.command = getScalar(buildKvp.getValue());
+              } else if (buildKey == "output_pattern") {
+                buildInfo.outputPattern = getScalar(buildKvp.getValue());
+              } else if (buildKey == "cache") {
+                buildInfo.useCache = getBool(buildKvp.getValue());
+              } else if (buildKey == "args") {
+                if (auto *argsSeq = llvm::dyn_cast<llvm::yaml::SequenceNode>(buildKvp.getValue())) {
+                  for (auto &argNode : *argsSeq) {
+                    buildInfo.args.push_back(getScalar(&argNode));
+                  }
+                }
+              }
+            }
+            info.buildInfo = buildInfo;
           }
         }
+      }
 
-        // Extract required flag (optional)
-        size_t requiredPos = content.find("required:", paramPos);
-        if (requiredPos != std::string::npos && requiredPos < content.find("- name:", paramPos + 1)) {
-          paramInfo.required = content.find("true", requiredPos) != std::string::npos;
-        } else {
-          paramInfo.required = false;
-        }
-
-        info.parameters.push_back(paramInfo);
-
-        // Find next parameter
-        paramPos = content.find("- name:", pnameEnd);
-        if (paramPos >= buildSectionPos) break;
+      if (!info.name.empty()) {
+        modules_[info.name] = info;
       }
     }
-
-    // For Chisel modules, extract build info
-    if (info.type == ModuleInfo::Chisel) {
-      ModuleInfo::BuildInfo buildInfo;
-
-      size_t buildPos = content.find("build:", pathPos);
-      if (buildPos != std::string::npos) {
-        size_t cmdPos = content.find("command:", buildPos);
-        size_t cmdStart = content.find("\"", cmdPos) + 1;
-        size_t cmdEnd = content.find("\"", cmdStart);
-        buildInfo.command = content.substr(cmdStart, cmdEnd - cmdStart);
-
-        size_t outPos = content.find("output_pattern:", buildPos);
-        size_t outStart = content.find("\"", outPos) + 1;
-        size_t outEnd = content.find("\"", outStart);
-        buildInfo.outputPattern = content.substr(outStart, outEnd - outStart);
-
-        buildInfo.useCache = content.find("cache: true", buildPos) != std::string::npos;
-
-        info.buildInfo = buildInfo;
-      }
-    }
-
-    modules_[info.name] = info;
-
-    // Find next module
-    pos = content.find("- name:", nameEnd);
   }
 
   return mlir::success();

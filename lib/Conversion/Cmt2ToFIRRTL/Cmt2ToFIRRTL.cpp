@@ -555,6 +555,16 @@ void LowerCmt2ToFIRRTLPass::createFunctionPorts(
                                {}, func.getLoc()));
     }
   }
+
+  // Add debug firing ports if requested (via debug.firing_ports attribute)
+  if (auto firingPortsAttr = module->getAttrOfType<ArrayAttr>("debug.firing_ports")) {
+    for (auto attr : firingPortsAttr) {
+      auto portName = cast<StringAttr>(attr).getValue();
+      ports.push_back(PortInfo(builder.getStringAttr(portName),
+                               UIntType::get(builder.getContext(), 1),
+                               Direction::Out, {}, module.getLoc()));
+    }
+  }
 }
 
 LogicalResult LowerCmt2ToFIRRTLPass::createInstances(
@@ -888,6 +898,37 @@ LowerCmt2ToFIRRTLPass::connectOutputPorts(cmt2::ModuleOp module,
           builder.create<ConnectOp>(func.getLoc(), resultPort,
                                     bodyResults[idx]);
         }
+      }
+    }
+  }
+
+  // Connect debug firing ports
+  if (auto firingPortsAttr = module->getAttrOfType<ArrayAttr>("debug.firing_ports")) {
+    for (auto attr : firingPortsAttr) {
+      auto firingPortName = cast<StringAttr>(attr).getValue();
+      Value firingPort = firrtlModule.getBodyBlock()->getArgument(portIndex++);
+
+      // Find the rule with this debug.firing_port attribute
+      Value fireSignal;
+      for (auto &op : module.getBodyRegion().front()) {
+        if (auto rule = dyn_cast<RuleOp>(op)) {
+          if (auto debugAttr = rule->getAttrOfType<StringAttr>("debug.firing_port")) {
+            if (debugAttr.getValue() == firingPortName) {
+              auto func = cast<Cmt2FunctionLike>(rule.getOperation());
+              fireSignal = ctx.getSignalTracker().getFire(func.functionNameAttr());
+              break;
+            }
+          }
+        }
+      }
+
+      if (fireSignal) {
+        builder.create<ConnectOp>(module.getLoc(), firingPort, fireSignal);
+      } else {
+        // No fire signal found - connect to constant 0
+        Value zero = builder.create<ConstantOp>(
+            module.getLoc(), UIntType::get(builder.getContext(), 1), APInt(1, 0));
+        builder.create<ConnectOp>(module.getLoc(), firingPort, zero);
       }
     }
   }
@@ -1323,7 +1364,7 @@ LogicalResult LowerCmt2ToFIRRTLPass::cloneRegionOps(
     // NOTE: Token operations (token.create, token.valid, token.data, token.join)
     // should be eliminated by the cmt2-token-materialize pass BEFORE this pass runs.
     // If token ops reach here, it means the pass pipeline is misconfigured.
-    // See docs/Dialects/Cmt2/tmp/PipelinedDesign-Implementation.md Section 8.
+    // See docs/Cmt2/features/Lowering.md (dataflow/proc lowering overview).
     if (isa<TokenCreateOp, TokenValidOp, TokenDataOp, TokenJoinOp>(op)) {
       return op.emitError("Token operation reached cmt2-to-firrtl. "
                           "Run cmt2-token-materialize pass first to convert "

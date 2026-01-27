@@ -89,6 +89,35 @@ void DynamicControlPlugin::markStepDone(llvm::StringRef stepName) {
 
 void DynamicControlPlugin::clearStepsDone() { stepsDone_.clear(); }
 
+bool DynamicControlPlugin::executeRegionOps(mlir::Region &region, OpContext &ctx) {
+  if (region.empty())
+    return true;
+
+  mlir::Block &block = region.front();
+
+  for (mlir::Operation &op : block) {
+    // Skip step done ops - they are handled separately
+    if (mlir::isa<ProcStepDoneOp>(op))
+      continue;
+
+    // Skip yield ops
+    if (mlir::isa<YieldOp>(op))
+      continue;
+
+    // Dispatch to the registry if available
+    if (registry_ && registry_->hasHandler(&op)) {
+      auto result = registry_->execute(&op, ctx);
+      // If operation has results, they're stored in ctx.valueMap by the handler
+      (void)result;
+    } else {
+      LLVM_DEBUG(llvm::dbgs() << "DynamicControlPlugin: no handler for op '"
+                              << op.getName().getStringRef() << "'\n");
+    }
+  }
+
+  return true;
+}
+
 bool DynamicControlPlugin::executeStep(ProcStepOp step, OpContext &ctx) {
   mlir::Region &body = step.getBody();
   if (body.empty())
@@ -97,7 +126,10 @@ bool DynamicControlPlugin::executeStep(ProcStepOp step, OpContext &ctx) {
   mlir::Block &block = body.front();
   bool stepDone = false;
 
-  // Execute the step body
+  // Execute the step body operations first
+  executeRegionOps(body, ctx);
+
+  // Then check for done condition
   for (mlir::Operation &op : block) {
     if (auto doneOp = mlir::dyn_cast<ProcStepDoneOp>(op)) {
       // Evaluate the done condition
@@ -105,7 +137,6 @@ bool DynamicControlPlugin::executeStep(ProcStepOp step, OpContext &ctx) {
       stepDone = doneVal != 0;
       break;
     }
-    // Note: In a full implementation, we'd dispatch to OpHandlerRegistry here
   }
 
   if (stepDone) {
@@ -205,8 +236,43 @@ void StaticControlPlugin::commit() {
 
 void StaticControlPlugin::reset() {
   timingViolations_.clear();
+  repeatIterations_.clear();
   for (const auto &entry : staticSteps_)
     state_->resetStaticStep(entry.first());
+}
+
+bool StaticControlPlugin::executeRegionOps(mlir::Region &region, OpContext &ctx) {
+  if (region.empty())
+    return true;
+
+  mlir::Block &block = region.front();
+
+  for (mlir::Operation &op : block) {
+    // Handle nested static constructs recursively
+    if (auto nestedIf = mlir::dyn_cast<ProcStaticIfOp>(op)) {
+      executeStaticIf(nestedIf, ctx);
+      continue;
+    }
+    if (auto nestedRepeat = mlir::dyn_cast<ProcStaticRepeatOp>(op)) {
+      executeStaticRepeat(nestedRepeat, ctx);
+      continue;
+    }
+
+    // Skip yield ops
+    if (mlir::isa<YieldOp>(op))
+      continue;
+
+    // Dispatch to the registry if available
+    if (registry_ && registry_->hasHandler(&op)) {
+      auto result = registry_->execute(&op, ctx);
+      (void)result;
+    } else {
+      LLVM_DEBUG(llvm::dbgs() << "StaticControlPlugin: no handler for op '"
+                              << op.getName().getStringRef() << "'\n");
+    }
+  }
+
+  return true;
 }
 
 bool StaticControlPlugin::executeStaticStep(ProcStaticStepOp step,
@@ -226,9 +292,17 @@ bool StaticControlPlugin::executeStaticStep(ProcStaticStepOp step,
   if (currentCycle == 0) {
     mlir::Region &body = step.getBody();
     if (!body.empty()) {
-      // Execute body operations
-      // In a full implementation, we'd dispatch to OpHandlerRegistry
-      // and validate timing of each CallOp
+      // Execute body operations using registry dispatch
+      executeRegionOps(body, ctx);
+
+      // Validate timing of CallOps in the body
+      if (validateTiming_) {
+        for (mlir::Operation &op : body.front()) {
+          if (auto call = mlir::dyn_cast<CallOp>(op)) {
+            validateCallTiming(call, currentCycle);
+          }
+        }
+      }
     }
   }
 
@@ -248,6 +322,9 @@ bool StaticControlPlugin::executeStaticIf(ProcStaticIfOp ifOp, OpContext &ctx) {
   InterpValue cond = ctx.getValue(ifOp.getCond());
   bool takeThen = cond != 0;
 
+  LLVM_DEBUG(llvm::dbgs() << "StaticControlPlugin: static_if taking "
+                          << (takeThen ? "then" : "else") << " branch\n");
+
   // Both branches should have same latency in static control
   // Execute the selected branch
   mlir::Region &branch = takeThen ? ifOp.getThenRegion() : ifOp.getElseRegion();
@@ -255,22 +332,55 @@ bool StaticControlPlugin::executeStaticIf(ProcStaticIfOp ifOp, OpContext &ctx) {
   if (branch.empty())
     return true;
 
-  // In a full implementation, execute branch body
-  LLVM_DEBUG(llvm::dbgs() << "StaticControlPlugin: static_if taking "
-                          << (takeThen ? "then" : "else") << " branch\n");
+  // Execute the branch body
+  executeRegionOps(branch, ctx);
 
-  return true; // For now, assume instant completion
+  return true;
 }
 
 bool StaticControlPlugin::executeStaticRepeat(ProcStaticRepeatOp repeatOp,
                                               OpContext &ctx) {
   unsigned tripCount = repeatOp.getCount();
+  mlir::Operation *opPtr = repeatOp.getOperation();
 
-  // In a full implementation, track iteration count
-  LLVM_DEBUG(llvm::dbgs() << "StaticControlPlugin: static_repeat with "
-                          << tripCount << " iterations\n");
+  // Get or initialize iteration counter for this repeat
+  auto it = repeatIterations_.find(opPtr);
+  if (it == repeatIterations_.end()) {
+    repeatIterations_[opPtr] = 0;
+    it = repeatIterations_.find(opPtr);
+  }
 
-  return true; // For now, assume instant completion
+  unsigned currentIter = it->second;
+
+  LLVM_DEBUG(llvm::dbgs() << "StaticControlPlugin: static_repeat iteration "
+                          << currentIter << "/" << tripCount << "\n");
+
+  // Check if all iterations are done
+  if (currentIter >= tripCount) {
+    // Reset for next invocation
+    repeatIterations_.erase(opPtr);
+    LLVM_DEBUG(llvm::dbgs() << "StaticControlPlugin: static_repeat completed\n");
+    return true;
+  }
+
+  // Execute the body for this iteration
+  mlir::Region &body = repeatOp.getBody();
+  if (!body.empty()) {
+    executeRegionOps(body, ctx);
+  }
+
+  // Increment iteration counter
+  repeatIterations_[opPtr] = currentIter + 1;
+
+  // Check if we just finished the last iteration
+  if (currentIter + 1 >= tripCount) {
+    repeatIterations_.erase(opPtr);
+    LLVM_DEBUG(llvm::dbgs() << "StaticControlPlugin: static_repeat completed\n");
+    return true;
+  }
+
+  // More iterations remaining
+  return false;
 }
 
 bool StaticControlPlugin::validateCallTiming(CallOp call,

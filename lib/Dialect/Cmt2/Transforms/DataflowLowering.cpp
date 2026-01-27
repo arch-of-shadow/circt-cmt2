@@ -44,6 +44,15 @@ struct DataflowLoweringPass
   void runOnOperation() override;
 
 private:
+  /// Next storage index to assign within the current module.
+  ///
+  /// Note: `dataflow.storage_index` is used by later passes (TokenRTLGen) to
+  /// name and wire token storage instances. Indices must be unique across all
+  /// proc.dataflow regions lowered into a single module; multiple independent
+  /// dataflows may otherwise reuse indices starting from 0, causing unrelated
+  /// token channels to alias the same `__tok_N` storage instance.
+  unsigned nextStorageIdx_ = 0;
+
   /// Process a single module - lower all proc.dataflow ops.
   void processModule(cmt2::ModuleOp module);
 
@@ -53,6 +62,9 @@ private:
   /// Lower a single dataflow.task to a rule.
   RuleOp lowerTask(DataflowTaskOp task, ProcDataflowOp dataflow,
                    OpBuilder &builder, IRMapping &valueMapping);
+
+  /// Flatten nested dataflows - recursively process dataflows inside tasks.
+  LogicalResult flattenNestedDataflows(cmt2::ModuleOp module);
 };
 
 } // end anonymous namespace
@@ -329,7 +341,7 @@ RuleOp DataflowLoweringPass::lowerTask(DataflowTaskOp task,
 //===----------------------------------------------------------------------===//
 
 LogicalResult DataflowLoweringPass::lowerDataflow(ProcDataflowOp dataflow,
-                                                   cmt2::ModuleOp module) {
+                                                 cmt2::ModuleOp module) {
   LLVM_DEBUG(llvm::dbgs() << "Lowering dataflow @" << dataflow.getSymName()
                           << "\n");
 
@@ -348,7 +360,7 @@ LogicalResult DataflowLoweringPass::lowerDataflow(ProcDataflowOp dataflow,
   // Each task that produces tokens gets storage indices assigned in order
   SmallVector<DataflowTaskOp> tasks;
   llvm::DenseMap<Value, unsigned> tokenToStorageIdx;
-  unsigned storageIdx = 0;
+  unsigned storageIdx = nextStorageIdx_;
 
   for (auto &op : dataflowBlock) {
     if (auto task = dyn_cast<DataflowTaskOp>(op)) {
@@ -360,6 +372,39 @@ LogicalResult DataflowLoweringPass::lowerDataflow(ProcDataflowOp dataflow,
                                 << " output mapped to storage __tok_"
                                 << (storageIdx - 1) << "\n");
       }
+
+      // Annotate each token.create op with its storage index
+      // The yield op tells us which position each token goes to
+      // The i-th yielded token corresponds to the i-th task output
+      LLVM_DEBUG(llvm::dbgs() << "  Annotating token.create ops for @"
+                              << task.getSymName() << "\n");
+      task.walk([&](DataflowYieldOp yieldOp) {
+        auto yieldedTokens = yieldOp.getTokens();
+        auto taskOutputs = task.getTokenOutputs();
+
+        LLVM_DEBUG(llvm::dbgs() << "    yieldedTokens.size()=" << yieldedTokens.size()
+                                << " taskOutputs.size()=" << taskOutputs.size() << "\n");
+
+        for (size_t i = 0; i < yieldedTokens.size() && i < taskOutputs.size(); ++i) {
+          Value yieldedToken = yieldedTokens[i];
+          Value taskOutput = taskOutputs[i];
+          LLVM_DEBUG(llvm::dbgs() << "    yield " << i << ": ");
+          if (auto createOp = yieldedToken.getDefiningOp<TokenCreateOp>()) {
+            // The i-th yield position maps to the i-th task output
+            auto it = tokenToStorageIdx.find(taskOutput);
+            LLVM_DEBUG(llvm::dbgs() << "found token.create, ");
+            if (it != tokenToStorageIdx.end()) {
+              createOp->setAttr("dataflow.storage_index",
+                                builder.getI64IntegerAttr(it->second));
+              LLVM_DEBUG(llvm::dbgs() << "annotated with storage_index=" << it->second << "\n");
+            } else {
+              LLVM_DEBUG(llvm::dbgs() << "taskOutput not found in tokenToStorageIdx!\n");
+            }
+          } else {
+            LLVM_DEBUG(llvm::dbgs() << "not a token.create op\n");
+          }
+        }
+      });
     }
   }
 
@@ -396,6 +441,9 @@ LogicalResult DataflowLoweringPass::lowerDataflow(ProcDataflowOp dataflow,
     generatedRules.push_back(rule);
   }
 
+  // Keep indices unique across all lowered dataflows in this module.
+  nextStorageIdx_ = storageIdx;
+
   // Erase the dataflow op after successful lowering
   // The rules now handle all the logic - keeping the dataflow op would cause
   // TokenRTLGen to process it again and create duplicate storage instances
@@ -408,6 +456,282 @@ LogicalResult DataflowLoweringPass::lowerDataflow(ProcDataflowOp dataflow,
 }
 
 //===----------------------------------------------------------------------===//
+// Nested Dataflow Flattening
+//===----------------------------------------------------------------------===//
+
+LogicalResult DataflowLoweringPass::flattenNestedDataflows(cmt2::ModuleOp module) {
+  LLVM_DEBUG(llvm::dbgs() << "Flattening nested dataflows in module @"
+                          << module.getSymName() << "\n");
+
+  // Iteratively flatten until no nested dataflows remain. Flattening may expose
+  // additional nested structures, so we loop to a fixed point.
+  bool changed = true;
+  while (changed) {
+    changed = false;
+
+    struct NestedInfo {
+      ProcDataflowOp nested;
+      DataflowTaskOp parentTask;
+      ProcDataflowOp parentDataflow;
+    };
+
+    SmallVector<NestedInfo> worklist;
+
+    module.walk([&](DataflowTaskOp task) {
+      auto parentDataflow = task->getParentOfType<ProcDataflowOp>();
+      if (!parentDataflow)
+        return;
+
+      task.walk([&](ProcDataflowOp nested) {
+        // Only process truly nested dataflows (directly inside a task body).
+        auto nestedParentTask = nested->getParentOfType<DataflowTaskOp>();
+        if (!nestedParentTask || nestedParentTask != task)
+          return;
+        LLVM_DEBUG(llvm::dbgs()
+                   << "  Found nested dataflow @" << nested.getSymName()
+                   << " inside task @" << task.getSymName() << " of @"
+                   << parentDataflow.getSymName() << "\n");
+        worklist.push_back({nested, task, parentDataflow});
+      });
+    });
+
+    if (worklist.empty())
+      return success();
+
+    OpBuilder builder(module.getContext());
+
+    for (const auto &item : worklist) {
+      ProcDataflowOp nested = item.nested;
+      DataflowTaskOp parentTask = item.parentTask;
+      ProcDataflowOp parentDataflow = item.parentDataflow;
+
+      Block &nestedBlock = nested.getBody().front();
+      Block &parentBlock = parentDataflow.getBody().front();
+
+      // Capture parent task token inputs (used to gate inner tasks and to
+      // connect inner completion back to the parent task).
+      SmallVector<Value> parentTokenIns(parentTask.getTokenInputs().begin(),
+                                        parentTask.getTokenInputs().end());
+      auto parentTokenInNames = parentTask.getTokenInNames();
+
+      // Collect the inner tasks in order before moving them.
+      SmallVector<DataflowTaskOp> innerTasks;
+      for (auto &op : nestedBlock) {
+        if (auto t = dyn_cast<DataflowTaskOp>(op))
+          innerTasks.push_back(t);
+      }
+
+      // Identify "completion" tokens from the nested dataflow: tokens that
+      // must become valid before the parent task can proceed. We conservatively
+      // use the token inputs of tasks that return values in the nested dataflow.
+      SmallVector<Value> completionTokens;
+      for (auto t : innerTasks) {
+        if (isa<DataflowReturnOp>(t.getBody().front().getTerminator())) {
+          for (Value tok : t.getTokenInputs())
+            completionTokens.push_back(tok);
+        }
+      }
+
+      // Map nested dataflow block arguments to values available in the parent
+      // dataflow:
+      //  - Prefer using parent task token inputs (via cmt2.token.data) when the
+      //    token carries matching data.
+      //  - Otherwise fall back to parent dataflow block arguments by position.
+      SmallVector<std::optional<unsigned>> argTokenMap; // nested arg i -> parent token i
+      SmallVector<std::optional<unsigned>> argValueMap; // nested arg i -> parent df arg i
+      argTokenMap.resize(nestedBlock.getNumArguments());
+      argValueMap.resize(nestedBlock.getNumArguments());
+
+      for (unsigned i = 0; i < nestedBlock.getNumArguments(); ++i) {
+        Type nestedArgTy = nestedBlock.getArgument(i).getType();
+
+        if (i < parentTokenIns.size()) {
+          auto tokTy = dyn_cast<SyncTokenType>(parentTokenIns[i].getType());
+          if (tokTy && tokTy.getDataType() && tokTy.getDataType() == nestedArgTy) {
+            argTokenMap[i] = i;
+            continue;
+          }
+        }
+
+        if (i < parentBlock.getNumArguments() &&
+            parentBlock.getArgument(i).getType() == nestedArgTy) {
+          argValueMap[i] = i;
+          continue;
+        }
+
+        // No mapping found; leave it unmapped for now (will error if used).
+        LLVM_DEBUG(llvm::dbgs()
+                   << "  Warning: No mapping found for nested arg " << i
+                   << " of type ";
+                   nestedArgTy.print(llvm::dbgs());
+                   llvm::dbgs() << "\n");
+      }
+
+      // Move inner tasks into the parent dataflow block, right before the
+      // parent task, so any completion tokens dominate the parent task.
+      for (auto t : innerTasks) {
+        t->moveBefore(parentTask);
+      }
+
+      // Rename moved tasks to avoid symbol conflicts in the parent dataflow's
+      // symbol table: "{parentTask}_{nestedDf}_{innerTask}".
+      llvm::StringSet<> usedTaskNames;
+      for (auto &op : parentBlock) {
+        if (auto t = dyn_cast<DataflowTaskOp>(op)) {
+          usedTaskNames.insert(t.getSymName());
+        }
+      }
+
+      auto makeUniqueName = [&](StringRef base) -> std::string {
+        std::string name = base.str();
+        if (!usedTaskNames.contains(name)) {
+          usedTaskNames.insert(name);
+          return name;
+        }
+        for (unsigned suffix = 0;; ++suffix) {
+          std::string candidate = (base + "_" + std::to_string(suffix)).str();
+          if (!usedTaskNames.contains(candidate)) {
+            usedTaskNames.insert(candidate);
+            return candidate;
+          }
+        }
+      };
+
+      // Timing propagation: offset inner task timing by the parent task's
+      // timing start (if present).
+      int64_t timingOffset = 0;
+      if (auto parentTiming = parentTask.getTiming())
+        timingOffset = parentTiming->getStart();
+
+      for (auto t : innerTasks) {
+        std::string baseName =
+            (parentTask.getSymName() + "_" + nested.getSymName() + "_" +
+             t.getSymName()).str();
+        auto newName = makeUniqueName(baseName);
+        t->setAttr(SymbolTable::getSymbolAttrName(),
+                   StringAttr::get(module.getContext(), newName));
+
+        // Adjust task timing (relative nested timings -> parent timeline).
+        if (auto timing = t.getTiming()) {
+          auto adjusted = TimingIntervalAttr::get(
+              module.getContext(), timing->getStart() + timingOffset,
+              timing->getEnd() + timingOffset);
+          t->setAttr("timing", adjusted);
+        }
+
+        // Ensure tasks that depend on nested args can access the parent task's
+        // token inputs by appending them to token_inputs (if any).
+        if (!parentTokenIns.empty()) {
+          SmallVector<Value> newInputs(t.getTokenInputs().begin(),
+                                       t.getTokenInputs().end());
+          SmallVector<Attribute> newNames;
+          for (auto a : t.getTokenInNames())
+            newNames.push_back(a);
+
+          // Append parent tokens (avoid duplicates).
+          for (unsigned i = 0; i < parentTokenIns.size(); ++i) {
+            Value tok = parentTokenIns[i];
+            if (llvm::is_contained(newInputs, tok))
+              continue;
+            newInputs.push_back(tok);
+            if (i < parentTokenInNames.size())
+              newNames.push_back(parentTokenInNames[i]);
+            else
+              newNames.push_back(StringAttr::get(module.getContext(), "tok"));
+          }
+
+          t.getOperation()->setOperands(newInputs);
+          t->setAttr("token_in_names", ArrayAttr::get(module.getContext(), newNames));
+        }
+
+        // Replace uses of nested dataflow block arguments inside the task body.
+        Block &taskBody = t.getBody().front();
+        OpBuilder taskBuilder(&taskBody, taskBody.begin());
+
+        // Lazily create token.data ops per mapped token input in this task.
+        llvm::DenseMap<unsigned, Value> tokenDataCache;
+
+        auto getMappedValue = [&](unsigned argIdx) -> Value {
+          if (argIdx >= nestedBlock.getNumArguments())
+            return nullptr;
+          if (argTokenMap[argIdx].has_value()) {
+            unsigned tokIdx = *argTokenMap[argIdx];
+            if (tokIdx >= parentTokenIns.size())
+              return nullptr;
+            auto it = tokenDataCache.find(tokIdx);
+            if (it != tokenDataCache.end())
+              return it->second;
+            Value tok = parentTokenIns[tokIdx];
+            Value data =
+                taskBuilder.create<TokenDataOp>(t.getLoc(),
+                                                nestedBlock.getArgument(argIdx).getType(),
+                                                tok)
+                    .getResult();
+            tokenDataCache[tokIdx] = data;
+            return data;
+          }
+          if (argValueMap[argIdx].has_value()) {
+            unsigned valIdx = *argValueMap[argIdx];
+            if (valIdx >= parentBlock.getNumArguments())
+              return nullptr;
+            return parentBlock.getArgument(valIdx);
+          }
+          return nullptr;
+        };
+
+        for (unsigned argIdx = 0; argIdx < nestedBlock.getNumArguments(); ++argIdx) {
+          Value nestedArg = nestedBlock.getArgument(argIdx);
+          Value mapped = getMappedValue(argIdx);
+          if (!mapped)
+            continue;
+
+          // Replace uses in the task body region.
+          t.walk([&](Operation *op) {
+            for (OpOperand &operand : op->getOpOperands()) {
+              if (operand.get() == nestedArg)
+                operand.set(mapped);
+            }
+          });
+        }
+
+        // If this task previously ended the nested dataflow (dataflow.return),
+        // convert it to a yield so it doesn't terminate the parent dataflow.
+        if (auto ret = dyn_cast<DataflowReturnOp>(taskBody.getTerminator())) {
+          OpBuilder termBuilder(ret);
+          termBuilder.create<DataflowYieldOp>(ret.getLoc(), ValueRange{});
+          ret.erase();
+        }
+      }
+
+      // Connect inner completion back to the parent task by adding completion
+      // tokens as additional parent task inputs.
+      if (!completionTokens.empty()) {
+        SmallVector<Value> newParentInputs(parentTask.getTokenInputs().begin(),
+                                           parentTask.getTokenInputs().end());
+        SmallVector<Attribute> newParentNames;
+        for (auto a : parentTask.getTokenInNames())
+          newParentNames.push_back(a);
+
+        for (Value tok : completionTokens) {
+          if (llvm::is_contained(newParentInputs, tok))
+            continue;
+          newParentInputs.push_back(tok);
+          newParentNames.push_back(StringAttr::get(module.getContext(), "nested_done"));
+        }
+
+        parentTask.getOperation()->setOperands(newParentInputs);
+        parentTask->setAttr("token_in_names",
+                            ArrayAttr::get(module.getContext(), newParentNames));
+      }
+
+      // Erase the nested dataflow op now that its tasks have been flattened.
+      nested.erase();
+      changed = true;
+    }
+  }
+}
+
+//===----------------------------------------------------------------------===//
 // Module Processing
 //===----------------------------------------------------------------------===//
 
@@ -415,7 +739,16 @@ void DataflowLoweringPass::processModule(cmt2::ModuleOp module) {
   LLVM_DEBUG(llvm::dbgs() << "Processing module @" << module.getSymName()
                           << "\n");
 
-  // Collect all proc.dataflow ops
+  // Reset module-scoped storage numbering.
+  nextStorageIdx_ = 0;
+
+  // Check for nested dataflows and warn/handle them
+  if (failed(flattenNestedDataflows(module))) {
+    signalPassFailure();
+    return;
+  }
+
+  // Collect all proc.dataflow ops (at module level)
   SmallVector<ProcDataflowOp> dataflows;
   for (auto &op : module.getBodyRegion().front()) {
     if (auto dataflow = dyn_cast<ProcDataflowOp>(op))

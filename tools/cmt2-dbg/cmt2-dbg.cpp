@@ -152,6 +152,8 @@ State Inspection:
   set <name> <val> Set a register value
   value <name>     Read a value method output
   cycle            Print current cycle number
+  info             Print summary (cycle + active rules + recent changes)
+  modules          List all modules in the circuit
 
 Breakpoints:
   break <rule>     Set breakpoint on rule fire
@@ -166,8 +168,10 @@ Breakpoints:
 Tracing:
   trace on|off     Enable/disable execution tracing
   history [n]      Show last n trace entries (default 10)
+  stats            Show simulation statistics
 
 Other:
+  source <file>    Execute commands from a file
   help             Show this help
   quit             Exit the debugger
 
@@ -470,6 +474,69 @@ static bool executeCommand(Cmt2Interpreter &interp,
       for (unsigned i = start; i < traces.size(); ++i) {
         interp.printTrace(traces[i]);
       }
+    }
+    return true;
+  }
+
+  // info - summary of current state
+  if (cmd == "info") {
+    os << "=== CMT2 Debugger Info ===\n";
+    os << "Cycle: " << interp.getCycle() << "\n";
+    os << "Tracing: " << (interp.isTracingEnabled() ? "on" : "off") << "\n";
+    os << "Breakpoints: " << interp.getBreakpoints().size() << "\n";
+
+    // Show enabled rules
+    os << "\nRegisters:\n";
+    interp.printState();
+    return true;
+  }
+
+  // modules - list all modules
+  if (cmd == "modules") {
+    os << "Modules in circuit:\n";
+    auto moduleNames = interp.getModuleNames();
+    for (const auto &name : moduleNames) {
+      os << "  " << name << "\n";
+    }
+    if (moduleNames.empty()) {
+      os << "  (no modules found)\n";
+    }
+    return true;
+  }
+
+  // stats - show simulation statistics
+  if (cmd == "stats") {
+    os << "=== Simulation Statistics ===\n";
+    os << "Total cycles: " << interp.getCycle() << "\n";
+    os << "Trace entries: " << interp.getTraces().size() << "\n";
+    os << "Breakpoints: " << interp.getBreakpoints().size() << "\n";
+    os << "Registers: " << interp.getRegisterNames().size() << "\n";
+    return true;
+  }
+
+  // source <file> - execute commands from file
+  if (cmd == "source") {
+    if (tokens.size() < 2) {
+      os << "usage: source <file>\n";
+      return true;
+    }
+    auto fileOrErr = MemoryBuffer::getFile(tokens[1]);
+    if (std::error_code error = fileOrErr.getError()) {
+      os << "error: could not open file '" << tokens[1] << "': "
+         << error.message() << "\n";
+      return true;
+    }
+    StringRef script = (*fileOrErr)->getBuffer();
+    SmallVector<StringRef> lines;
+    script.split(lines, '\n');
+    for (StringRef line : lines) {
+      line = line.trim();
+      if (line.empty() || line.starts_with("#"))
+        continue;
+      os << "> " << line << "\n";
+      auto lineTokens = tokenize(line);
+      if (!executeCommand(interp, lineTokens, os))
+        break;
     }
     return true;
   }

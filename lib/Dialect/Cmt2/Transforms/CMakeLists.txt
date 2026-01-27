@@ -1,6 +1,7 @@
 add_circt_dialect_library(CIRCTCmt2Transforms
   # GenerateConflictMatrix.cpp
   # InferRules.cpp
+  AddRuleFiringPort.cpp
   Test.cpp
   CompileInvoke.cpp
   CompileStatic.cpp
@@ -29,7 +30,6 @@ add_circt_dialect_library(CIRCTCmt2Transforms
   ModuleInliner.cpp
   PrivateFuncAnalysis.cpp
   InlinePrivateFuncs.cpp
-  Scheduler.cpp
   PrintScheduler.cpp
   VerifyPrivateFuncsInlined.cpp
   VerifyCallSequence.cpp

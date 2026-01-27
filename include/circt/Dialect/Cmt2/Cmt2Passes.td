@@ -558,6 +558,49 @@ def StaticFSMAllocation : Pass<"cmt2-static-fsm-allocation", "cmt2::CircuitOp"> 
   ];
 }
 
+//===----------------------------------------------------------------------===//
+// Debug Passes
+//===----------------------------------------------------------------------===//
+
+def AddRuleFiringPort : Pass<"cmt2-add-rule-firing-port", "cmt2::CircuitOp"> {
+  let summary = "Add debug output ports for rule firing signals.";
+  let description = [{
+    This pass adds output ports to modules that indicate when each rule fires.
+    These ports are useful for debugging and waveform analysis.
+
+    For each rule in a module, the pass adds:
+    - An output port `<rule_name>_firing` of type `!firrtl.uint<1>`
+
+    The firing signal is 1 when the rule's guard is true and it executes
+    (i.e., ready ∧ ¬conflict with higher priority rules).
+
+    Note: This pass should run BEFORE Cmt2ToFIRRTL conversion.
+
+    Usage:
+    - Run with `--cmt2-add-rule-firing-port`
+    - The generated Verilog will have additional output ports
+    - Use these in testbenches or waveform viewers to observe rule firing
+
+    Example:
+    ```mlir
+    // Before:
+    cmt2.rule @my_rule { /* guard */ } { /* body */ }
+
+    // After (attribute added):
+    cmt2.module @Top ... {
+      // ...
+      cmt2.rule @my_rule { /* guard */ } { /* body */ } {debug.firing_port = "my_rule_firing"}
+    }
+    // Module gains output port annotation
+    ```
+  }];
+
+  let options = [
+    Option<"prefix", "prefix", "std::string", /*default=*/"\"dbg_\"",
+           "Prefix for generated firing port names">
+  ];
+}
+
 // def InferRules : Pass<"cmt2-infer-rules", "cmt2::CircuitOp"> {
 //   let summary = "generate all Cmt2::RuleRefOp for a circuit.";
 //   let description = [{

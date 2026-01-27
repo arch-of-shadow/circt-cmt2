@@ -824,7 +824,7 @@ void ProcStmtToActionPass::generateStateRules(
         // 1. After lowering, timing is implicit in the FSM state structure
         // 2. The CallOp verifier rejects timing outside static_step
         // 3. The FSM state machine already enforces correct timing
-        // See TL2/TL5 design decision in Development-Tracker.md
+        // See docs/Cmt2/features/Lowering.md for lowering overview and pointers.
 
         if (bodyRegion && !bodyRegion->empty()) {
           for (auto &op : bodyRegion->front()) {
@@ -1991,8 +1991,8 @@ LogicalResult ProcStmtToActionPass::processProcRule(ProcRuleOp rule,
   generateStatusValues(rule, module, builder, fsmInstName, fsmWidth, doneState);
 
   // Update module precedence to include generated state rules
-  // Order: branch body states >> branch header states >> fork/join states >> reset
-  // This ensures branches execute before the fork state can interfere
+  // Principle: Later states in control flow have HIGHER precedence (pipeline semantics)
+  // This ensures downstream stages drain before upstream produces more.
   {
     SmallVector<Attribute> newPrecedenceChains;
 
@@ -2003,62 +2003,84 @@ LogicalResult ProcStmtToActionPass::processProcRule(ProcRuleOp rule,
       }
     }
 
-    // Build precedence chain for state rules
-    // Parse par_blocks to identify fork/join states and branch states
-    SmallVector<uint64_t> forkJoinStates;
-    SmallVector<uint64_t> branchHeaderStates;
-    SmallVector<uint64_t> branchBodyStates;
+    // Build precedence chain using state sequence order from TDCC
+    // Later states (higher seq_idx) have higher precedence, so they go first in chain
+    StringRef ruleName = rule.getSymName();
+    SmallVector<Attribute> stateChain;
 
-    if (auto parBlocksAttr = rule->getAttrOfType<ArrayAttr>("tdcc.par_blocks")) {
-      for (auto blockAttr : parBlocksAttr) {
-        auto dict = cast<DictionaryAttr>(blockAttr);
-        uint64_t forkState = dict.getAs<IntegerAttr>("fork_state").getInt();
-        uint64_t joinState = dict.getAs<IntegerAttr>("join_state").getInt();
-        forkJoinStates.push_back(forkState);
-        forkJoinStates.push_back(joinState);
+    // Read state order from TDCC
+    auto stateOrderAttr = rule->getAttrOfType<ArrayAttr>("tdcc.state_order");
+    if (stateOrderAttr) {
+      // Parse state order: [{state: N, seq_idx: M}, ...]
+      SmallVector<std::pair<uint64_t, uint64_t>> stateSeqPairs; // (state, seq_idx)
+      for (auto attr : stateOrderAttr) {
+        auto dict = cast<DictionaryAttr>(attr);
+        uint64_t state = dict.getAs<IntegerAttr>("state").getInt();
+        uint64_t seqIdx = dict.getAs<IntegerAttr>("seq_idx").getInt();
+        stateSeqPairs.push_back({state, seqIdx});
+      }
 
-        if (auto needsFsmAttr = dict.getAs<BoolAttr>("needs_per_branch_fsm")) {
-          if (needsFsmAttr.getValue()) {
-            if (auto branchesAttr = dict.getAs<ArrayAttr>("branches")) {
-              for (auto branchAttr : branchesAttr) {
-                auto brDict = cast<DictionaryAttr>(branchAttr);
-                uint64_t firstState = brDict.getAs<IntegerAttr>("first_state").getInt();
-                uint64_t lastState = brDict.getAs<IntegerAttr>("last_state").getInt();
-                // Header is first state, body states are the rest
-                branchHeaderStates.push_back(firstState);
-                for (uint64_t s = firstState + 1; s < lastState; ++s) {
-                  branchBodyStates.push_back(s);
+      // Sort by sequence index DESCENDING (later states first = higher precedence)
+      llvm::sort(stateSeqPairs, [](auto &a, auto &b) {
+        return a.second > b.second;
+      });
+
+      // Build precedence chain for main FSM states
+      for (auto &[state, seqIdx] : stateSeqPairs) {
+        std::string stateName = (ruleName + "_state" + std::to_string(state)).str();
+        stateChain.push_back(FlatSymbolRefAttr::get(builder.getContext(), stateName));
+      }
+
+      LLVM_DEBUG(llvm::dbgs() << "  Generated precedence chain with "
+                              << stateSeqPairs.size() << " states (by seq_idx desc)\n");
+    } else {
+      // Fallback: Use old par_blocks-based approach if no state_order
+      SmallVector<uint64_t> forkJoinStates;
+      SmallVector<uint64_t> branchHeaderStates;
+      SmallVector<uint64_t> branchBodyStates;
+
+      if (auto parBlocksAttr = rule->getAttrOfType<ArrayAttr>("tdcc.par_blocks")) {
+        for (auto blockAttr : parBlocksAttr) {
+          auto dict = cast<DictionaryAttr>(blockAttr);
+          uint64_t forkState = dict.getAs<IntegerAttr>("fork_state").getInt();
+          uint64_t joinState = dict.getAs<IntegerAttr>("join_state").getInt();
+          forkJoinStates.push_back(forkState);
+          forkJoinStates.push_back(joinState);
+
+          if (auto needsFsmAttr = dict.getAs<BoolAttr>("needs_per_branch_fsm")) {
+            if (needsFsmAttr.getValue()) {
+              if (auto branchesAttr = dict.getAs<ArrayAttr>("branches")) {
+                for (auto branchAttr : branchesAttr) {
+                  auto brDict = cast<DictionaryAttr>(branchAttr);
+                  uint64_t firstState = brDict.getAs<IntegerAttr>("first_state").getInt();
+                  uint64_t lastState = brDict.getAs<IntegerAttr>("last_state").getInt();
+                  branchHeaderStates.push_back(firstState);
+                  for (uint64_t s = firstState + 1; s < lastState; ++s) {
+                    branchBodyStates.push_back(s);
+                  }
                 }
               }
             }
           }
         }
       }
+
+      // Build precedence: body states >> header states >> fork/join
+      for (uint64_t s : branchBodyStates) {
+        std::string stateName = (ruleName + "_state" + std::to_string(s)).str();
+        stateChain.push_back(FlatSymbolRefAttr::get(builder.getContext(), stateName));
+      }
+      for (uint64_t s : branchHeaderStates) {
+        std::string stateName = (ruleName + "_state" + std::to_string(s)).str();
+        stateChain.push_back(FlatSymbolRefAttr::get(builder.getContext(), stateName));
+      }
+      for (uint64_t s : forkJoinStates) {
+        std::string stateName = (ruleName + "_state" + std::to_string(s)).str();
+        stateChain.push_back(FlatSymbolRefAttr::get(builder.getContext(), stateName));
+      }
     }
 
-    // Build precedence: body states >> header states >> fork/join >> reset
-    SmallVector<Attribute> stateChain;
-    StringRef ruleName = rule.getSymName();
-
-    // Body states first (highest priority)
-    for (uint64_t s : branchBodyStates) {
-      std::string stateName = (ruleName + "_state" + std::to_string(s)).str();
-      stateChain.push_back(FlatSymbolRefAttr::get(builder.getContext(), stateName));
-    }
-
-    // Then header states
-    for (uint64_t s : branchHeaderStates) {
-      std::string stateName = (ruleName + "_state" + std::to_string(s)).str();
-      stateChain.push_back(FlatSymbolRefAttr::get(builder.getContext(), stateName));
-    }
-
-    // Then fork/join states
-    for (uint64_t s : forkJoinStates) {
-      std::string stateName = (ruleName + "_state" + std::to_string(s)).str();
-      stateChain.push_back(FlatSymbolRefAttr::get(builder.getContext(), stateName));
-    }
-
-    // Finally reset rule
+    // Finally reset rule (lowest precedence)
     std::string resetName = (ruleName + "_reset").str();
     stateChain.push_back(FlatSymbolRefAttr::get(builder.getContext(), resetName));
 

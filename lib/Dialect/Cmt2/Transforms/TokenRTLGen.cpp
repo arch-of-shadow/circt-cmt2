@@ -104,6 +104,9 @@ private:
   /// Map from token.join result to the AND of valid signals
   llvm::DenseMap<Value, Value> joinResultToAndSignal_;
 
+  /// Map from storage instance name to ready signal
+  llvm::StringMap<Value> storageReadySignals_;
+
   /// Counter for generating unique instance names
   unsigned instanceCounter_ = 0;
 
@@ -112,6 +115,10 @@ private:
 
   /// Get string key for a token type (for matching)
   std::string getTokenTypeKey(Type type);
+
+  /// Generate stall controller logic for pipelined dataflow
+  /// This creates ready signal propagation for backpressure handling
+  LogicalResult generateStallController(cmt2::ModuleOp module);
 };
 
 //===----------------------------------------------------------------------===//
@@ -391,9 +398,23 @@ LogicalResult TokenRTLGenPass::createStorageInstances(cmt2::ModuleOp module) {
   // Find insertion point at beginning of module body (after arguments)
   builder.setInsertionPointToStart(&module.getBody().front());
 
-  // Collect all token.create ops and create storage for each
+  // Collect all token.create ops
   SmallVector<TokenCreateOp> createOps;
   module.walk([&](TokenCreateOp op) { createOps.push_back(op); });
+
+  // Sort by storage index if available (from DataflowLowering annotations)
+  // This ensures storage indices match what DataflowLowering assigned
+  llvm::stable_sort(createOps, [](TokenCreateOp a, TokenCreateOp b) {
+    auto aIdx = a->getAttrOfType<IntegerAttr>("dataflow.storage_index");
+    auto bIdx = b->getAttrOfType<IntegerAttr>("dataflow.storage_index");
+    // Ops with storage_index go first, sorted by index
+    if (aIdx && bIdx) {
+      return aIdx.getInt() < bIdx.getInt();
+    }
+    if (aIdx && !bIdx) return true;
+    if (!aIdx && bIdx) return false;
+    return false;  // Preserve order for ops without index
+  });
 
   for (auto createOp : createOps) {
     Value token = createOp.getToken();
@@ -402,7 +423,29 @@ LogicalResult TokenRTLGenPass::createStorageInstances(cmt2::ModuleOp module) {
     unsigned depth = getStorageDepth(createOp);
     bool isLI = isTokenLI(tokenType);
 
-    std::string instName = "__tok_" + std::to_string(instanceCounter_++);
+    // Use storage index from DataflowLowering if available, else use counter
+    std::string instName;
+    if (auto storageIdxAttr = createOp->getAttrOfType<IntegerAttr>("dataflow.storage_index")) {
+      instName = "__tok_" + std::to_string(storageIdxAttr.getInt());
+    } else {
+      instName = "__tok_" + std::to_string(instanceCounter_++);
+    }
+
+    // Skip if we've already created storage with this name
+    if (instanceNameToOp_.count(instName)) {
+      LLVM_DEBUG(llvm::dbgs() << "  Skipping duplicate storage instance: " << instName << "\n");
+      // Just annotate the token.create with the existing storage
+      createOp->setAttr("token.storage_instance",
+                        builder.getStringAttr(instName));
+      // Find an existing token that maps to this storage
+      for (auto &pair : tokenStorage_) {
+        if (pair.second.instanceName == instName) {
+          tokenStorage_[token] = pair.second;
+          break;
+        }
+      }
+      continue;
+    }
 
     LLVM_DEBUG(llvm::dbgs() << "  Creating storage instance: " << instName
                             << " (width=" << dataWidth << ", depth=" << depth
@@ -791,6 +834,7 @@ void TokenRTLGenPass::processModule(cmt2::ModuleOp module) {
   tokenTypeToStorage_.clear();
   instanceNameToOp_.clear();
   joinResultToAndSignal_.clear();
+  storageReadySignals_.clear();
 
   // Step 1: Collect information about all tokens
   collectTokenInfo(module);
@@ -809,6 +853,172 @@ void TokenRTLGenPass::processModule(cmt2::ModuleOp module) {
     signalPassFailure();
     return;
   }
+
+  // Step 5: Generate stall controller for backpressure handling
+  if (failed(generateStallController(module))) {
+    signalPassFailure();
+    return;
+  }
+}
+
+//===----------------------------------------------------------------------===//
+// Stall Controller Generation
+//===----------------------------------------------------------------------===//
+
+LogicalResult TokenRTLGenPass::generateStallController(cmt2::ModuleOp module) {
+  LLVM_DEBUG(llvm::dbgs() << "Generating stall controller for module @"
+                          << module.getSymName() << "\n");
+
+  // Skip if no token storage was created (no dataflow tokens)
+  if (tokenStorage_.empty() && tokenArgToStorage_.empty()) {
+    LLVM_DEBUG(llvm::dbgs() << "  No token storage - skipping stall controller\n");
+    return success();
+  }
+
+  auto circuit = module->getParentOfType<CircuitOp>();
+  if (!circuit)
+    return module.emitError("Module not inside a circuit");
+
+  ModuleGenerator gen(circuit);
+
+  auto boolType = firrtl::UIntType::get(module.getContext(), 1);
+
+  // Identify LI storage instance names.
+  llvm::StringSet<> liStorageNames;
+  for (auto &entry : tokenStorage_) {
+    const TokenStorageInfo &info = entry.second;
+    if (info.isLatencyInsensitive)
+      liStorageNames.insert(info.instanceName);
+  }
+
+  // Map: producer rule op -> list of LI storage instance names that must be
+  // ready (not full) for the rule to enqueue. Build this from the actual
+  // storage calls (token.create ops may be erased during rewriting).
+  llvm::DenseMap<Operation *, SmallVector<StringRef>> ruleToLIOutputs;
+  module.walk([&](CallOp call) {
+    if (!call.getMethodOrValueAttr() || !call.getCalleeAttr())
+      return;
+
+    if (call.getMethodOrValueAttr().getLeafReference().getValue() != "write")
+      return;
+
+    StringRef calleeName = call.getCalleeAttr().getLeafReference().getValue();
+    if (!liStorageNames.contains(calleeName))
+      return;
+
+    auto parentRule = call->getParentOfType<RuleOp>();
+    if (!parentRule)
+      return;
+
+    ruleToLIOutputs[parentRule.getOperation()].push_back(calleeName);
+  });
+
+  // 1) Build per-rule guard conditions:
+  //    enabled = (AND over token input valids) && (AND over LI output readies)
+  // 2) For LI token inputs, dequeue at end of rule body (consume).
+  module.walk([&](RuleOp rule) {
+    Block &guardBlock = rule.getGuard().front();
+    Block &bodyBlock = rule.getBody().front();
+
+    // Token arguments follow the regular function arguments.
+    unsigned numFuncArgs = rule.getFunctionType().getNumInputs();
+
+    OpBuilder guardBuilder(&guardBlock, std::prev(guardBlock.end()));
+    Value cond = guardBuilder.create<firrtl::ConstantOp>(rule.getLoc(), boolType,
+                                                        APInt(1, 1));
+
+    // AND in any existing guard return operand (if present).
+    auto existingRet = cast<ReturnOp>(guardBlock.getTerminator());
+    if (!existingRet.getOutputs().empty()) {
+      if (existingRet.getOutputs().size() == 1)
+        cond = guardBuilder.create<firrtl::AndPrimOp>(rule.getLoc(), cond,
+                                                     existingRet.getOutputs()[0]);
+    }
+
+    // Token input validity checks. Token args are appended after function args
+    // in both guard and body regions.
+    unsigned numTokenArgs =
+        guardBlock.getNumArguments() > numFuncArgs
+            ? (guardBlock.getNumArguments() - numFuncArgs)
+            : 0;
+    for (unsigned i = 0; i < numTokenArgs; ++i) {
+      Value tokenArg = guardBlock.getArgument(numFuncArgs + i);
+
+      auto storageNameIt = tokenArgToStorage_.find(tokenArg);
+      if (storageNameIt == tokenArgToStorage_.end())
+        continue;
+
+      auto instIt = instanceNameToOp_.find(storageNameIt->second);
+      if (instIt == instanceNameToOp_.end())
+        continue;
+
+      auto results = gen.createStorageCall(rule.getLoc(), instIt->second,
+                                           "valid", {}, guardBuilder);
+      if (!results.empty())
+        cond = guardBuilder.create<firrtl::AndPrimOp>(rule.getLoc(), cond,
+                                                     results[0]);
+    }
+
+    // LI output readiness checks.
+    auto outIt = ruleToLIOutputs.find(rule.getOperation());
+    if (outIt != ruleToLIOutputs.end()) {
+      for (StringRef instName : outIt->second) {
+        auto instIt = instanceNameToOp_.find(instName.str());
+        if (instIt == instanceNameToOp_.end())
+          continue;
+
+        auto results = gen.createStorageCall(rule.getLoc(), instIt->second,
+                                             "ready", {}, guardBuilder);
+        if (!results.empty()) {
+          storageReadySignals_[instName] = results[0];
+          cond = guardBuilder.create<firrtl::AndPrimOp>(rule.getLoc(), cond,
+                                                       results[0]);
+        }
+      }
+    }
+
+    // Update the guard terminator to `cmt2.return %cond`.
+    // Keep the existing terminator to avoid invalidating insertion points.
+    existingRet.getOperation()->setOperands(cond);
+
+    // Dequeue LI token inputs at end of the rule body.
+    // This models token consumption for latency-insensitive (FIFO) tokens.
+    OpBuilder bodyBuilder(&bodyBlock, std::prev(bodyBlock.end()));
+    unsigned numBodyTokenArgs =
+        bodyBlock.getNumArguments() > numFuncArgs
+            ? (bodyBlock.getNumArguments() - numFuncArgs)
+            : 0;
+    for (unsigned i = 0; i < numBodyTokenArgs; ++i) {
+      Value tokenArg = bodyBlock.getArgument(numFuncArgs + i);
+      auto tokenTy = dyn_cast<SyncTokenType>(tokenArg.getType());
+      if (!tokenTy || tokenTy.getMode() != TokenMode::LI)
+        continue;
+
+      auto storageNameIt = tokenArgToStorage_.find(tokenArg);
+      if (storageNameIt == tokenArgToStorage_.end())
+        continue;
+
+      auto instIt = instanceNameToOp_.find(storageNameIt->second);
+      if (instIt == instanceNameToOp_.end())
+        continue;
+
+      // Call deq() and ignore the returned data.
+      (void)gen.createStorageCall(rule.getLoc(), instIt->second, "deq", {},
+                                  bodyBuilder);
+    }
+  });
+
+  LLVM_DEBUG({
+    unsigned liCount = 0;
+    for (const auto &entry : tokenStorage_) {
+      if (entry.second.isLatencyInsensitive)
+        ++liCount;
+    }
+    llvm::dbgs() << "  Stall controller: rewrote guards and inserted deq for "
+                 << liCount << " LI storage elements\n";
+  });
+
+  return success();
 }
 
 //===----------------------------------------------------------------------===//

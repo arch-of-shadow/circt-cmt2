@@ -34,7 +34,7 @@ include "mlir/IR/BuiltinAttributeInterfaces.td"
 //
 // 3. Timing validation: Verify call timing matches method contracts
 //
-// See docs/Dialects/Cmt2/Cmt2ProcVsCalyx.md for design rationale.
+// See docs/Cmt2/reference/Attributes.md for user-facing attribute reference.
 //===----------------------------------------------------------------------===//
 
 /// TimingIntervalAttr represents a half-open cycle interval [start, end).
