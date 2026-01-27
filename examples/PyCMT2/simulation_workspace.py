@@ -4,39 +4,32 @@
 #  SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
 """
-Simulation Workspace Generation Example for PyCMT2.
+Simulation Workspace Generation Example for PyCMT2 - Using Testbench DSL.
 
-This example demonstrates how to use SimulationWorkspace to generate
-a complete Verilator simulation environment with a placeholder testbench.
+This example demonstrates how to use SimulationWorkspace with Testbench DSL
+to generate a complete Verilator simulation environment with functional tests.
 
 The generated workspace includes:
 - rtl/          : Generated Verilog RTL files (including STL modules)
-- tb/           : Placeholder C++ testbench for Verilator
+- tb/           : C++ testbench generated from Testbench DSL
 - build/        : Build output directory
 - waves/        : VCD waveform output directory
 - Makefile      : Build and run automation
-- README.md     : Instructions for using the workspace
 
 Usage:
     cd circt-cmt2/build
-    PYTHONPATH=tools/circt/python_packages/circt_core python3 ../examples/PyCMT2/simulation_workspace_example.py
-
-After running, the workspace will be at:
-    examples/PyCMT2/sim_workspace_demo/
-
-To build and run the simulation:
-    cd examples/PyCMT2/sim_workspace_demo
-    make        # Build the simulation
-    make run    # Run the simulation
-    make waves  # View waveforms (requires GTKWave)
+    PYTHONPATH=tools/circt/python_packages/circt_core python3 \
+        ../examples/PyCMT2/simulation_workspace.py
 """
 
 import shutil
+import sys
 from pathlib import Path
 
 from circt.pycmt2 import Circuit, UInt
 from circt.pycmt2.simulation import SimulationWorkspace
 from circt.pycmt2.stl import Reg, clear_stl_registry
+from circt.pycmt2.testbench import Testbench
 
 
 def create_demo_circuit():
@@ -110,9 +103,127 @@ def create_demo_circuit():
     return circuit
 
 
+def create_counter_testbench(circuit):
+    """Create testbench using DSL for counter demonstration."""
+    tb = Testbench(circuit, auto_debug_ports=True)
+
+    # =========================================================================
+    # Test Sequence: Reset Test
+    # =========================================================================
+    with tb.sequence("test_reset") as seq:
+        seq.comment("Test: Verify reset behavior")
+        seq.reset(5)
+        seq.wait(1)
+        seq.expect("get_count_res0", 0, "Count should be 0 after reset")
+        seq.expect("is_running_res0", 0, "Should not be running after reset")
+        seq.print("Reset test passed - count=0, is_running=0")
+
+    # =========================================================================
+    # Test Sequence: Start/Stop Counting
+    # =========================================================================
+    with tb.sequence("test_start_stop") as seq:
+        seq.comment("=" * 60)
+        seq.comment("Test: Start counting, wait, then stop")
+        seq.comment("=" * 60)
+        seq.reset(5)
+
+        # Start the counter
+        seq.comment("Starting counter...")
+        seq.drive("start_enable", 1)
+        seq.wait(1)
+        seq.drive("start_enable", 0)
+
+        seq.expect("is_running_res0", 1, "Should be running after start")
+
+        # Wait for some cycles and observe counting
+        seq.comment("Counting for 10 cycles...")
+        seq.record_cycle("count_start")
+        for i in range(10):
+            seq.wait(1)
+            seq.print("count=", "get_count_res0")
+
+        seq.record_cycle("count_end")
+
+        # Stop the counter
+        seq.comment("Stopping counter...")
+        seq.drive("stop_enable", 1)
+        seq.wait(1)
+        seq.drive("stop_enable", 0)
+
+        seq.expect("is_running_res0", 0, "Should not be running after stop")
+        seq.print("Final count = ", "get_count_res0")
+        seq.print_cycle_diff("count_start", "count_end", "Counting duration")
+        seq.print("Start/Stop test PASSED")
+
+    # =========================================================================
+    # Test Sequence: Reset Count Method
+    # =========================================================================
+    with tb.sequence("test_reset_count") as seq:
+        seq.comment("=" * 60)
+        seq.comment("Test: Reset count method")
+        seq.comment("=" * 60)
+        seq.reset(5)
+
+        # Start counting
+        seq.drive("start_enable", 1)
+        seq.wait(1)
+        seq.drive("start_enable", 0)
+
+        # Count for a few cycles
+        seq.wait(5)
+        seq.print("Count before reset: ", "get_count_res0")
+
+        # Reset the count
+        seq.comment("Resetting count...")
+        seq.drive("reset_count_enable", 1)
+        seq.wait(1)
+        seq.drive("reset_count_enable", 0)
+
+        seq.expect("get_count_res0", 0, "Count should be 0 after reset_count")
+        seq.print("Count after reset: ", "get_count_res0")
+
+        # Should still be running
+        seq.expect("is_running_res0", 1, "Should still be running after reset_count")
+        seq.print("Reset count test PASSED")
+
+    # =========================================================================
+    # Test Sequence: Debug Port Verification
+    # =========================================================================
+    with tb.sequence("test_debug_ports") as seq:
+        seq.comment("=" * 60)
+        seq.comment("Debug Port Verification")
+        seq.comment("=" * 60)
+        seq.reset(5)
+
+        # Increment rule should not fire when not running
+        seq.wait(1)
+        seq.comment("Before start, increment should not fire")
+        seq.expect_rule_fired("increment", False)
+        seq.print_rule_status("increment")
+
+        # Start counting
+        seq.drive("start_enable", 1)
+        seq.wait(1)
+        seq.drive("start_enable", 0)
+
+        # Increment rule should fire when running
+        seq.wait(1)
+        seq.comment("After start, increment should fire")
+        seq.print_rule_status("increment")
+
+        # Monitor for a few cycles
+        for i in range(5):
+            seq.wait(1)
+            seq.print_rule_status("increment")
+
+        seq.print("Debug port verification completed")
+
+    return tb
+
+
 def main():
     print("=" * 70)
-    print("Simulation Workspace Generation Example")
+    print("Simulation Workspace Generation - Using Testbench DSL")
     print("=" * 70)
 
     # Setup paths
@@ -128,16 +239,24 @@ def main():
     print("\n1. Creating Counter circuit...")
     circuit = create_demo_circuit()
 
-    # Create simulation workspace
-    print("\n2. Creating SimulationWorkspace...")
-    ws = SimulationWorkspace(circuit, workspace_dir)
+    # Create testbench using DSL
+    print("\n2. Creating testbench using Testbench DSL...")
+    tb = create_counter_testbench(circuit)
+    print(f"   Test sequences: {len(tb._sequences)}")
+    for seq in tb._sequences:
+        print(f"      - {seq.name}: {len(seq._ops)} operations")
 
-    # Generate the workspace with placeholder testbench
-    print("\n3. Generating workspace with placeholder testbench...")
-    ws.generate_placeholder()
+    # Create simulation workspace with debug ports
+    print("\n3. Setting up simulation workspace with debug_ports=True...")
+    ws = SimulationWorkspace(circuit, workspace_dir, debug_ports=True)
+
+    # Generate the workspace with testbench
+    print("\n4. Generating workspace with Testbench DSL...")
+    ws.generate_with_testbench(tb)
+    print(f"   Workspace generated at: {workspace_dir}")
 
     # Show the generated structure
-    print("\n4. Generated workspace structure:")
+    print("\n5. Generated workspace structure:")
     print("-" * 70)
 
     def show_tree(path, prefix=""):
@@ -153,79 +272,39 @@ def main():
     show_tree(workspace_dir)
     print("-" * 70)
 
-    # Show generated RTL files
-    print("\n5. Generated RTL files:")
-    rtl_dir = workspace_dir / "rtl"
-    for rtl_file in sorted(rtl_dir.iterdir()):
-        print(f"\n   {rtl_file.name}:")
-        content = rtl_file.read_text()
-        lines = content.split("\n")[:20]  # First 20 lines
-        for line in lines:
-            print(f"      {line}")
-        if len(content.split("\n")) > 20:
-            print(f"      ... ({len(content.split(chr(10))) - 20} more lines)")
+    # Build simulation
+    print("\n6. Building simulation...")
+    if not ws.build():
+        print("Build failed!")
+        return 1
+    print("   Build successful!")
 
-    # Show the placeholder testbench
-    print("\n6. Generated placeholder testbench (tb/testbench.cpp):")
-    print("-" * 70)
-    tb_file = workspace_dir / "tb" / "testbench.cpp"
-    tb_content = tb_file.read_text()
-    print(tb_content[:2000])
-    if len(tb_content) > 2000:
-        print(f"... ({len(tb_content) - 2000} more characters)")
-    print("-" * 70)
+    # Run simulation
+    print("\n7. Running simulation...")
+    success, output = ws.run()
+    print(output)
 
-    # Show the Makefile
-    print("\n7. Generated Makefile:")
-    print("-" * 70)
-    makefile = workspace_dir / "Makefile"
-    print(makefile.read_text()[:1500])
-    print("-" * 70)
+    if not success:
+        print("Simulation failed!")
+        return 1
 
-    # Instructions
+    # Summary
     print("\n" + "=" * 70)
-    print("Workspace generated successfully!")
+    print("Workspace generated and tests passed!")
     print("=" * 70)
     print(f"""
-Next steps:
+Workspace location: {workspace_dir}
+Waveforms: {workspace_dir / 'waves' / 'Counter.vcd'}
 
-1. Navigate to the workspace:
+To rebuild and run manually:
    cd {workspace_dir}
-
-2. Edit the testbench to add your test logic:
-   vim tb/testbench.cpp
-
-3. Build the simulation:
-   make
-
-4. Run the simulation:
-   make run
-
-5. View waveforms (requires GTKWave):
-   make waves
-
-Example testbench modifications:
-
-   // In the test logic section, you can:
-
-   // Start the counter:
-   dut->start_enable = 1;
-   tick();
-   dut->start_enable = 0;
-
-   // Wait and check count:
-   for (int i = 0; i < 10; i++) tick();
-   std::cout << "Count: " << dut->get_count_res0 << std::endl;
-
-   // Stop the counter:
-   dut->stop_enable = 1;
-   tick();
-   dut->stop_enable = 0;
-
-   // Check if running:
-   std::cout << "Running: " << (int)dut->is_running_res0 << std::endl;
+   make        # Build the simulation
+   make run    # Run the simulation
+   make waves  # View waveforms (requires GTKWave)
 """)
+
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

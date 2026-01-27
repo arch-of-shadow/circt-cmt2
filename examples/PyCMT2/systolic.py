@@ -39,11 +39,13 @@ Usage:
 """
 
 import shutil
+import sys
 from pathlib import Path
 
 from circt.pycmt2 import Circuit, UInt
 from circt.pycmt2.simulation import SimulationWorkspace
 from circt.pycmt2.stl import Reg, clear_stl_registry
+from circt.pycmt2.testbench import Testbench
 
 
 def create_systolic_circuit():
@@ -303,139 +305,129 @@ def create_systolic_circuit():
     return circuit
 
 
-# Verilator C++ testbench
-SYSTOLIC_TESTBENCH_CPP = """\
-// Systolic Array 2x2 Testbench
-// Tests matrix multiplication with pre-loaded matrices
+def create_systolic_testbench(circuit):
+    """Create testbench using DSL for systolic array.
 
-#include "VSystolicArray2x2.h"
-#include "verilated.h"
-#include "verilated_vcd_c.h"
+    Test: C = A * B where:
+      A = [[1, 2], [3, 4]]
+      B = [[5, 6], [7, 8]]
+      C = [[1*5+2*7, 1*6+2*8], [3*5+4*7, 3*6+4*8]] = [[19, 22], [43, 50]]
+    """
+    tb = Testbench(circuit, auto_debug_ports=True)
 
-#include <iostream>
+    # =========================================================================
+    # Test Sequence: Reset Test
+    # =========================================================================
+    with tb.sequence("test_reset") as seq:
+        seq.comment("Test: Verify reset behavior")
+        seq.reset(5)
+        seq.wait(1)
+        seq.expect("is_done_res0", 1, "Should be idle (not busy) after reset")
+        seq.print("Reset test passed - is_done=1")
 
-int main(int argc, char** argv) {
-    Verilated::commandArgs(argc, argv);
-    Verilated::traceEverOn(true);
+    # =========================================================================
+    # Test Sequence: Matrix Multiplication
+    # =========================================================================
+    with tb.sequence("test_matmul") as seq:
+        seq.comment("=" * 60)
+        seq.comment("Test: Matrix multiplication C = A * B")
+        seq.comment("=" * 60)
+        seq.comment("A = [[1,2],[3,4]], B = [[5,6],[7,8]]")
+        seq.comment("Expected C = [[19,22],[43,50]]")
+        seq.reset(5)
 
-    auto dut = new VSystolicArray2x2();
-    auto tfp = new VerilatedVcdC();
-    dut->trace(tfp, 99);
-    tfp->open("waves/SystolicArray2x2.vcd");
+        # Load matrix A: [[1, 2], [3, 4]]
+        seq.comment("Loading matrix A...")
+        seq.drive("load_a_a00", 1)
+        seq.drive("load_a_a01", 2)
+        seq.drive("load_a_a10", 3)
+        seq.drive("load_a_a11", 4)
+        seq.drive("load_a_enable", 1)
+        seq.wait(1)
+        seq.drive("load_a_enable", 0)
 
-    dut->clk = 0;
-    dut->rst = 1;
-    dut->start_enable = 0;
-    dut->load_a_enable = 0;
-    dut->load_b_enable = 0;
+        # Load matrix B: [[5, 6], [7, 8]]
+        seq.comment("Loading matrix B...")
+        seq.drive("load_b_b00", 5)
+        seq.drive("load_b_b01", 6)
+        seq.drive("load_b_b10", 7)
+        seq.drive("load_b_b11", 8)
+        seq.drive("load_b_enable", 1)
+        seq.wait(1)
+        seq.drive("load_b_enable", 0)
 
-    int cycle = 0;
+        # Start computation
+        seq.comment("Starting systolic computation...")
+        seq.record_cycle("start")
+        seq.drive("start_enable", 1)
+        seq.wait(1)
+        seq.drive("start_enable", 0)
 
-    auto tick = [&]() {
-        dut->clk = 0;
-        dut->eval();
-        tfp->dump(cycle * 10);
-        dut->clk = 1;
-        dut->eval();
-        tfp->dump(cycle * 10 + 5);
-        cycle++;
-    };
+        # Wait for completion
+        seq.wait_condition("dut->is_done_res0", timeout=20)
+        seq.record_cycle("end")
 
-    std::cout << "=== Systolic Array 2x2 Matrix Multiply ===" << std::endl;
-    std::cout << std::endl;
+        # Verify results
+        seq.expect("get_c00_res0", 19, "C[0,0] = 1*5 + 2*7 = 19")
+        seq.expect("get_c01_res0", 22, "C[0,1] = 1*6 + 2*8 = 22")
+        seq.expect("get_c10_res0", 43, "C[1,0] = 3*5 + 4*7 = 43")
+        seq.expect("get_c11_res0", 50, "C[1,1] = 3*6 + 4*8 = 50")
 
-    // Test: C = A * B where:
-    // A = [[1, 2], [3, 4]]
-    // B = [[5, 6], [7, 8]]
-    // C = [[1*5+2*7, 1*6+2*8], [3*5+4*7, 3*6+4*8]] = [[19, 22], [43, 50]]
+        seq.print_cycle_diff("start", "end", "Systolic computation latency")
+        seq.print("C[0,0] = ", "get_c00_res0")
+        seq.print("C[0,1] = ", "get_c01_res0")
+        seq.print("C[1,0] = ", "get_c10_res0")
+        seq.print("C[1,1] = ", "get_c11_res0")
+        seq.print("Matrix multiplication test PASSED")
 
-    std::cout << "Matrix A = [[1,2],[3,4]]" << std::endl;
-    std::cout << "Matrix B = [[5,6],[7,8]]" << std::endl;
-    std::cout << "Expected C = [[19,22],[43,50]]" << std::endl;
-    std::cout << std::endl;
+    # =========================================================================
+    # Test Sequence: Debug Port Verification
+    # =========================================================================
+    with tb.sequence("test_debug_ports") as seq:
+        seq.comment("=" * 60)
+        seq.comment("Debug Port Verification - Observe cycle rules")
+        seq.comment("=" * 60)
+        seq.reset(5)
 
-    // Reset
-    std::cout << "Resetting..." << std::endl;
-    for (int i = 0; i < 5; i++) tick();
-    dut->rst = 0;
-    tick();
+        # Load matrices
+        seq.drive("load_a_a00", 1)
+        seq.drive("load_a_a01", 2)
+        seq.drive("load_a_a10", 3)
+        seq.drive("load_a_a11", 4)
+        seq.drive("load_a_enable", 1)
+        seq.wait(1)
+        seq.drive("load_a_enable", 0)
 
-    // Load matrix A: [[1, 2], [3, 4]]
-    std::cout << "Loading matrix A..." << std::endl;
-    dut->load_a_a00 = 1;
-    dut->load_a_a01 = 2;
-    dut->load_a_a10 = 3;
-    dut->load_a_a11 = 4;
-    dut->load_a_enable = 1;
-    tick();
-    dut->load_a_enable = 0;
+        seq.drive("load_b_b00", 5)
+        seq.drive("load_b_b01", 6)
+        seq.drive("load_b_b10", 7)
+        seq.drive("load_b_b11", 8)
+        seq.drive("load_b_enable", 1)
+        seq.wait(1)
+        seq.drive("load_b_enable", 0)
 
-    // Load matrix B: [[5, 6], [7, 8]]
-    std::cout << "Loading matrix B..." << std::endl;
-    dut->load_b_b00 = 5;
-    dut->load_b_b01 = 6;
-    dut->load_b_b10 = 7;
-    dut->load_b_b11 = 8;
-    dut->load_b_enable = 1;
-    tick();
-    dut->load_b_enable = 0;
+        # Start and monitor cycle rules
+        seq.drive("start_enable", 1)
+        seq.wait(1)
+        seq.drive("start_enable", 0)
 
-    // Start computation
-    std::cout << "Starting systolic computation..." << std::endl;
-    dut->start_enable = 1;
-    tick();
-    dut->start_enable = 0;
+        # Monitor which cycle rule fires each clock
+        seq.comment("Monitoring cycle rules during systolic computation...")
+        for i in range(6):
+            seq.wait(1)
+            seq.print_rule_status("cycle0")
+            seq.print_rule_status("cycle1")
+            seq.print_rule_status("cycle2")
+            seq.print_rule_status("cycle3")
 
-    // Wait for completion (4 cycles for 2x2 systolic)
-    std::cout << "Running systolic schedule:" << std::endl;
-    std::cout << "  Cycle 0: PE[0,0] += a00*b00" << std::endl;
-    std::cout << "  Cycle 1: PE[0,0] += a01*b10, PE[0,1] += a00*b01, PE[1,0] += a10*b00" << std::endl;
-    std::cout << "  Cycle 2: PE[0,1] += a01*b11, PE[1,0] += a11*b10, PE[1,1] += a10*b01" << std::endl;
-    std::cout << "  Cycle 3: PE[1,1] += a11*b11" << std::endl;
+        seq.print("Debug port verification completed")
 
-    int wait = 0;
-    while (!dut->is_done_res0 && wait < 20) {
-        tick();
-        wait++;
-    }
-
-    std::cout << "Completed after " << wait << " cycles" << std::endl;
-    tick();  // One more cycle to ensure results are ready
-
-    // Read and verify results
-    std::cout << std::endl << "Results:" << std::endl;
-    uint32_t c00 = dut->get_c00_res0;
-    uint32_t c01 = dut->get_c01_res0;
-    uint32_t c10 = dut->get_c10_res0;
-    uint32_t c11 = dut->get_c11_res0;
-
-    bool pass = true;
-    std::cout << "  C[0,0] = " << c00 << " (expected 19) " << (c00 == 19 ? "PASS" : "FAIL") << std::endl;
-    std::cout << "  C[0,1] = " << c01 << " (expected 22) " << (c01 == 22 ? "PASS" : "FAIL") << std::endl;
-    std::cout << "  C[1,0] = " << c10 << " (expected 43) " << (c10 == 43 ? "PASS" : "FAIL") << std::endl;
-    std::cout << "  C[1,1] = " << c11 << " (expected 50) " << (c11 == 50 ? "PASS" : "FAIL") << std::endl;
-
-    if (c00 != 19 || c01 != 22 || c10 != 43 || c11 != 50) pass = false;
-
-    tfp->close();
-    delete tfp;
-    delete dut;
-
-    std::cout << std::endl;
-    if (pass) {
-        std::cout << "=== ALL TESTS PASSED ===" << std::endl;
-        return 0;
-    } else {
-        std::cout << "=== SOME TESTS FAILED ===" << std::endl;
-        return 1;
-    }
-}
-"""
+    return tb
 
 
 def main():
     print("=" * 70)
-    print("Systolic Array for Matrix Multiplication")
+    print("Systolic Array for Matrix Multiplication - Using Testbench DSL")
     print("=" * 70)
     print()
     print("Inspired by Calyx's systolic-lang:")
@@ -469,35 +461,42 @@ def main():
     print("     Cycle 2: C01 += A01*B11, C10 += A11*B10, C11 += A10*B01")
     print("     Cycle 3: C11 += A11*B11")
 
-    print("\n3. Setting up simulation workspace...")
-    ws = SimulationWorkspace(circuit, sim_dir)
-    ws._add_stl_rtl()
-    ws._create_directories()
-    ws._generate_rtl()
-    ws._generate_makefile()
+    # Create testbench using DSL
+    print("\n3. Creating testbench using Testbench DSL...")
+    tb = create_systolic_testbench(circuit)
+    print(f"   Test sequences: {len(tb._sequences)}")
+    for seq in tb._sequences:
+        print(f"      - {seq.name}: {len(seq._ops)} operations")
 
-    tb_file = sim_dir / "tb" / "testbench.cpp"
-    tb_file.write_text(SYSTOLIC_TESTBENCH_CPP)
-    print(f"   Workspace: {sim_dir}")
+    # Create simulation workspace with debug ports
+    print("\n4. Setting up simulation workspace with debug_ports=True...")
+    ws = SimulationWorkspace(circuit, sim_dir, debug_ports=True)
 
-    print("\n4. Building simulation...")
+    # Generate workspace with testbench
+    ws.generate_with_testbench(tb)
+    print(f"   Workspace generated at: {sim_dir}")
+
+    print("\n5. Building simulation...")
     if not ws.build():
         print("Build failed!")
         return 1
     print("   Build successful!")
 
-    print("\n5. Running simulation...")
+    print("\n6. Running simulation...")
     success, output = ws.run()
     print(output)
+
+    if not success:
+        print("Simulation failed!")
+        return 1
 
     print("\n" + "=" * 70)
     print("Systolic Array Example Complete!")
     print(f"Waveforms: {sim_dir / 'waves' / 'SystolicArray2x2.vcd'}")
     print("=" * 70)
 
-    return 0 if success else 1
+    return 0
 
 
 if __name__ == "__main__":
-    import sys
     sys.exit(main())

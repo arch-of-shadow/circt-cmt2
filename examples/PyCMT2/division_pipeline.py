@@ -15,10 +15,16 @@ The example shows:
 - Token-based synchronization between stages
 - Timing annotation for each pipeline stage
 
+Includes E2E simulation for the explicit dataflow version.
+
 Usage:
     cd circt-cmt2/build
     PYTHONPATH=tools/circt/python_packages/circt_core python3 ../examples/PyCMT2/division_pipeline.py
 """
+
+import shutil
+import sys
+from pathlib import Path
 
 from circt.pycmt2 import (
     Circuit,
@@ -27,6 +33,10 @@ from circt.pycmt2 import (
     timing_interval,
     pipeline_timing,
 )
+from circt.pycmt2.types import SyncToken
+from circt.pycmt2.stl import clear_stl_registry
+from circt.pycmt2.simulation import SimulationWorkspace
+from circt.pycmt2.testbench import Testbench
 
 
 def create_division_pipeline_shorthand():
@@ -130,6 +140,157 @@ def create_division_pipeline_explicit():
     print(circuit.emit_mlir())
 
 
+def create_simulatable_shift_pipeline():
+    """Create a multiply pipeline for E2E simulation.
+
+    This is a simpler version that multiplies by 4 (equivalent to << 2).
+    """
+    clear_stl_registry()
+    circuit = Circuit("MultiplyPipelineSim")
+
+    with circuit.module("MultiplyPipeline") as mod:
+        clk = mod.clock()
+        rst = mod.reset()
+
+        with mod.dataflow(
+            "mul_pipe",
+            args=[("input", UInt(16))],
+            returns=[UInt(16)],
+            interval=1,
+        ) as df:
+            # Stage 0: Input
+            with df.task("init", timing=(0, 1),
+                        tokens_out=[SyncToken(UInt(16))]) as task:
+                tok0 = task.create_token(df.input, UInt(16))
+                task.yield_tokens(tok0)
+
+            # Stage 1: Multiply by 2
+            with df.task("mul2", tokens_in=[tok0], timing=(1, 2),
+                        tokens_out=[SyncToken(UInt(16))]) as task:
+                data = task.token_data(tok0)
+                result = task.mul(data, task.const(2, 16))
+                tok1 = task.create_token(task.bits(result, 15, 0), UInt(16))
+                task.yield_tokens(tok1)
+
+            # Stage 2: Multiply by 2 again (total: x * 4)
+            with df.task("mul2_2", tokens_in=[tok1], timing=(2, 3),
+                        tokens_out=[SyncToken(UInt(16))]) as task:
+                data = task.token_data(tok1)
+                result = task.mul(data, task.const(2, 16))
+                tok2 = task.create_token(task.bits(result, 15, 0), UInt(16))
+                task.yield_tokens(tok2)
+
+            # Stage 3: Output
+            with df.task("output", tokens_in=[tok2], timing=(3, 4)) as task:
+                result = task.token_data(tok2)
+                task.return_values(result)
+
+    return circuit
+
+
+def create_multiply_testbench(circuit):
+    """Create testbench for the multiply pipeline.
+
+    Computation: output = input * 4
+    """
+    tb = Testbench(circuit, auto_debug_ports=False)
+
+    # Test cases: (input, expected_output)
+    # Expected: input * 4
+    test_cases = [
+        (1, 4),      # 1 * 4 = 4
+        (5, 20),     # 5 * 4 = 20
+        (10, 40),    # 10 * 4 = 40
+        (100, 400),  # 100 * 4 = 400
+    ]
+
+    # Pipeline latency: 4 cycles
+    PIPELINE_LATENCY = 4
+
+    # =========================================================================
+    # Test Sequence: Reset Test
+    # =========================================================================
+    with tb.sequence("test_reset") as seq:
+        seq.comment("Test: Verify reset behavior")
+        seq.reset(5)
+        seq.wait(2)
+        seq.print("Reset test passed")
+
+    # =========================================================================
+    # Test Sequences: Multiply Pipeline Tests
+    # =========================================================================
+    for i, (input_val, expected) in enumerate(test_cases):
+        with tb.sequence(f"test_mul_{i+1}") as seq:
+            seq.comment(f"Test: {input_val} * 4 = {expected}")
+            seq.reset(5)
+
+            # Drive input
+            seq.drive("mul_pipe_init_input", input_val)
+
+            # Wait for pipeline
+            seq.record_cycle(f"start_{i}")
+            seq.wait(PIPELINE_LATENCY)
+            seq.record_cycle(f"end_{i}")
+
+            # Verify result
+            seq.expect("mul_pipe_output_result_0", expected,
+                      f"{input_val} * 4 = {expected}")
+            seq.print_cycle_diff(f"start_{i}", f"end_{i}", f"Test {i+1} latency")
+            seq.print(f"Test {i+1}: result=", "mul_pipe_output_result_0")
+
+            seq.wait(1)
+
+    return tb
+
+
+def run_simulation():
+    """Run E2E simulation for the multiply pipeline."""
+    print("\n" + "=" * 60)
+    print("E2E Simulation: Multiply Pipeline (x * 4)")
+    print("=" * 60)
+
+    script_dir = Path(__file__).parent
+    sim_dir = script_dir / "sim_division_pipeline"
+
+    if sim_dir.exists():
+        shutil.rmtree(sim_dir)
+
+    print("\n1. Creating multiply pipeline circuit...")
+    circuit = create_simulatable_shift_pipeline()
+
+    print("\n2. Creating testbench using Testbench DSL...")
+    tb = create_multiply_testbench(circuit)
+    print(f"   Test sequences: {len(tb._sequences)}")
+    for seq in tb._sequences:
+        print(f"      - {seq.name}: {len(seq._ops)} operations")
+
+    print("\n3. Setting up simulation workspace...")
+    ws = SimulationWorkspace(circuit, sim_dir, debug_ports=True)
+
+    print("\n4. Generating workspace with testbench...")
+    ws.generate_with_testbench(tb)
+    print(f"   Workspace: {sim_dir}")
+
+    print("\n5. Building simulation...")
+    if not ws.build():
+        print("Build failed!")
+        return 1
+    print("   Build successful!")
+
+    print("\n6. Running simulation...")
+    success, output = ws.run()
+    print(output)
+
+    print("\n" + "=" * 60)
+    if success:
+        print("E2E Simulation PASSED!")
+    else:
+        print("E2E Simulation FAILED!")
+    print("=" * 60)
+
+    return 0 if success else 1
+
+
 def main():
     """Run both division pipeline examples."""
     # Example using the shorthand Pipeline builder
@@ -138,10 +299,19 @@ def main():
     # Example using explicit dataflow builders
     create_division_pipeline_explicit()
 
+    # Run E2E simulation
+    sim_result = run_simulation()
+
     print("\n" + "=" * 60)
-    print("Examples completed successfully!")
+    print("MLIR generation examples completed!")
+    if sim_result == 0:
+        print("E2E simulation passed!")
+    else:
+        print("E2E simulation failed!")
     print("=" * 60)
+
+    return sim_result
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

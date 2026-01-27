@@ -16,16 +16,25 @@ The example shows:
 - Using the ForkJoinPipeline shorthand builder
 - Using explicit dataflow builders for complex patterns
 
+This file includes E2E simulation for the DiamondPipeline example.
+
 Usage:
     cd circt-cmt2/build
     PYTHONPATH=tools/circt/python_packages/circt_core python3 ../examples/PyCMT2/dataflow_forkjoin.py
 """
+
+import shutil
+import sys
+from pathlib import Path
 
 from circt.pycmt2 import (
     Circuit,
     UInt,
     ForkJoinPipeline,
 )
+from circt.pycmt2.stl import Reg, clear_stl_registry
+from circt.pycmt2.simulation import SimulationWorkspace
+from circt.pycmt2.testbench import Testbench
 
 
 def create_forkjoin_shorthand():
@@ -189,16 +198,205 @@ def create_multiway_fork():
     print(circuit.emit_mlir())
 
 
+def create_simulatable_diamond():
+    """Create a simulatable DiamondPipeline circuit.
+
+    Diamond dataflow pattern:
+              source
+             /      \
+        branch_a   branch_b
+             \      /
+              join
+               |
+             output
+
+    Computation: result = (x * 2) + (x + 10)
+    For x=5: result = 10 + 15 = 25
+    """
+    from circt.pycmt2.types import SyncToken
+
+    clear_stl_registry()
+    circuit = Circuit("DiamondPipelineSim")
+
+    with circuit.module("DiamondPipeline") as mod:
+        clk = mod.clock()
+        rst = mod.reset()
+
+        with mod.dataflow(
+            "diamond",
+            args=[("x", UInt(16))],
+            returns=[UInt(16)],
+        ) as df:
+            # Source task: create token with input data
+            with df.task("source", timing=(0, 1),
+                        tokens_out=[SyncToken(UInt(16))]) as task:
+                tok_src = task.create_token(df.x, UInt(16))
+                task.yield_tokens(tok_src)
+
+            # Branch A: multiply by 2
+            with df.task("branch_a", tokens_in=[tok_src], timing=(1, 2),
+                        tokens_out=[SyncToken(UInt(16))]) as task:
+                data = task.token_data(tok_src)
+                result_a = task.mul(data, task.const(2, 16))
+                tok_a = task.create_token(task.bits(result_a, 15, 0), UInt(16))
+                task.yield_tokens(tok_a)
+
+            # Branch B: add 10 (same tok_src - fork pattern)
+            with df.task("branch_b", tokens_in=[tok_src], timing=(1, 2),
+                        tokens_out=[SyncToken(UInt(16))]) as task:
+                data = task.token_data(tok_src)
+                result_b = task.add(data, task.const(10, 16))
+                tok_b = task.create_token(task.bits(result_b, 15, 0), UInt(16))
+                task.yield_tokens(tok_b)
+
+            # Join task: wait for both branches and sum results
+            with df.task("join", tokens_in=[tok_a, tok_b], timing=(2, 3),
+                        tokens_out=[SyncToken(UInt(16))]) as task:
+                val_a = task.token_data(tok_a)
+                val_b = task.token_data(tok_b)
+                sum_val = task.add(val_a, val_b)
+                tok_sum = task.create_token(task.bits(sum_val, 15, 0), UInt(16))
+                task.yield_tokens(tok_sum)
+
+            # Output task: final result
+            with df.task("output", tokens_in=[tok_sum], timing=(3, 4)) as task:
+                result = task.token_data(tok_sum)
+                task.return_values(result)
+
+    return circuit
+
+
+def create_dataflow_testbench(circuit):
+    """Create testbench for diamond dataflow pipeline.
+
+    Dataflow pipelines expose ports directly:
+    - diamond_source_x: input to the pipeline
+    - diamond_output_result_0: output from the pipeline
+    """
+    tb = Testbench(circuit, auto_debug_ports=False)
+
+    # Test cases: (input, expected_output)
+    # Expected result: (x * 2) + (x + 10) = 3*x + 10
+    test_cases = [
+        (5, 25),     # (5*2) + (5+10) = 10 + 15 = 25
+        (10, 40),    # (10*2) + (10+10) = 20 + 20 = 40
+        (0, 10),     # (0*2) + (0+10) = 0 + 10 = 10
+        (100, 310),  # (100*2) + (100+10) = 200 + 110 = 310
+    ]
+
+    # Pipeline latency: 4 cycles (timing 0-1, 1-2, 2-3, 3-4)
+    PIPELINE_LATENCY = 4
+
+    # =========================================================================
+    # Test Sequence: Reset Test
+    # =========================================================================
+    with tb.sequence("test_reset") as seq:
+        seq.comment("Test: Verify reset behavior")
+        seq.reset(5)
+        seq.wait(2)
+        seq.print("Reset test passed")
+
+    # =========================================================================
+    # Test Sequences: Diamond Dataflow Pipeline Tests
+    # =========================================================================
+    for i, (input_val, expected) in enumerate(test_cases):
+        with tb.sequence(f"test_diamond_{i+1}") as seq:
+            seq.comment(f"Test: input={input_val}, expected={expected}")
+            seq.comment(f"Computation: ({input_val}*2) + ({input_val}+10) = {expected}")
+            seq.reset(5)
+
+            # Drive input to the dataflow pipeline
+            seq.comment("Drive input to dataflow pipeline")
+            seq.drive("diamond_source_x", input_val)
+
+            # Clock through the pipeline latency
+            seq.record_cycle(f"start_{i}")
+            seq.wait(PIPELINE_LATENCY)
+            seq.record_cycle(f"end_{i}")
+
+            # Read result from the dataflow output
+            seq.expect("diamond_output_result_0", expected,
+                      f"({input_val}*2)+({input_val}+10)={expected}")
+            seq.print_cycle_diff(f"start_{i}", f"end_{i}", f"Test {i+1} latency")
+            seq.print(f"Test {i+1} passed: result=", "diamond_output_result_0")
+
+            # Extra cycle between tests
+            seq.wait(1)
+
+    return tb
+
+
+def run_simulation():
+    """Run E2E simulation for diamond dataflow."""
+    print("\n" + "=" * 60)
+    print("E2E Simulation: Diamond Fork-Join Dataflow")
+    print("=" * 60)
+
+    script_dir = Path(__file__).parent
+    sim_dir = script_dir / "sim_dataflow_forkjoin"
+
+    if sim_dir.exists():
+        shutil.rmtree(sim_dir)
+
+    print("\n1. Creating diamond pipeline circuit...")
+    circuit = create_simulatable_diamond()
+
+    print("\n2. Creating testbench using Testbench DSL...")
+    tb = create_dataflow_testbench(circuit)
+    print(f"   Test sequences: {len(tb._sequences)}")
+    for seq in tb._sequences:
+        print(f"      - {seq.name}: {len(seq._ops)} operations")
+
+    print("\n3. Setting up simulation workspace...")
+    ws = SimulationWorkspace(circuit, sim_dir, debug_ports=True)
+
+    print("\n4. Generating workspace with testbench...")
+    ws.generate_with_testbench(tb)
+    print(f"   Workspace: {sim_dir}")
+
+    print("\n5. Building simulation...")
+    if not ws.build():
+        print("Build failed!")
+        print("Note: Dataflow lowering may not be fully implemented yet.")
+        # Show MLIR for debugging
+        mlir = circuit.emit_mlir()
+        print(f"\n   MLIR size: {len(mlir)} chars")
+        return 1
+    print("   Build successful!")
+
+    print("\n6. Running simulation...")
+    success, output = ws.run()
+    print(output)
+
+    print("\n" + "=" * 60)
+    if success:
+        print("E2E Simulation PASSED!")
+    else:
+        print("E2E Simulation FAILED!")
+    print("=" * 60)
+
+    return 0 if success else 1
+
+
 def main():
     """Run all fork-join examples."""
     create_forkjoin_shorthand()
     create_forkjoin_explicit()
     create_multiway_fork()
 
+    # Run E2E simulation
+    sim_result = run_simulation()
+
     print("\n" + "=" * 60)
-    print("Examples completed successfully!")
+    print("MLIR generation examples completed!")
+    if sim_result == 0:
+        print("E2E simulation passed!")
+    else:
+        print("E2E simulation failed!")
     print("=" * 60)
+
+    return sim_result
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

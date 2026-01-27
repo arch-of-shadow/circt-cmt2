@@ -26,7 +26,7 @@ The testbench validates:
 Usage:
     cd circt-cmt2/build
     PYTHONPATH=tools/circt/python_packages/circt_core python3 \
-        ../examples/PyCMT2/proc_testbench_example.py
+        ../examples/PyCMT2/proc_testbench.py
 """
 
 import shutil
@@ -645,7 +645,8 @@ def create_proc_testable_circuit():
 def create_proc_testbench(circuit):
     """Create a comprehensive testbench for procedural control testing."""
 
-    tb = Testbench(circuit)
+    # Enable auto_debug_ports for rule firing observation
+    tb = Testbench(circuit, auto_debug_ports=True)
 
     # =========================================================================
     # Test Sequence 1: Basic Initialization
@@ -1312,6 +1313,88 @@ def create_proc_testbench(circuit):
         seq.print("Complex par test - counter", "get_counter_res0")
         seq.print("Complex par test PASSED", "get_result_res0")
 
+    # =========================================================================
+    # Test Sequence 19: Debug Port Verification
+    # Verifies that rule firing debug ports work correctly
+    # =========================================================================
+
+    with tb.sequence("test_debug_ports") as seq:
+        seq.comment("=" * 60)
+        seq.comment("DEBUG PORT VERIFICATION TEST")
+        seq.comment("Verifies dbg_*_firing ports are working correctly")
+        seq.comment("=" * 60)
+        seq.reset(10)
+
+        # Test 1: Trigger seq_add_sub rule and verify debug port
+        seq.comment("Test 1: Verify seq_add_sub debug port fires")
+        seq.drive("load_a", 50)
+        seq.drive("load_b", 20)
+        seq.drive("load_enable", 1)
+        seq.wait(1)
+        seq.drive("load_enable", 0)
+        seq.wait(2)
+
+        seq.drive("select_op_op", 1)  # seq_add_sub
+        seq.drive("select_op_enable", 1)
+        seq.wait(1)
+        seq.drive("select_op_enable", 0)
+
+        # Wait a cycle and check that seq_add_sub is firing
+        seq.wait(1)
+        seq.print_rule_status("seq_add_sub_state0")
+        seq.wait_condition("dut->is_done_res0 == 1", timeout=30)
+        seq.wait(2)
+        seq.print("seq_add_sub debug port verification: completed")
+
+        # Reset for next test
+        seq.drive("reset_state_enable", 1)
+        seq.wait(1)
+        seq.drive("reset_state_enable", 0)
+        seq.wait(5)
+
+        # Test 2: Trigger par_load and verify debug port
+        seq.comment("Test 2: Verify par_load debug port fires")
+        seq.drive("select_op_op", 2)  # par_load
+        seq.drive("select_op_enable", 1)
+        seq.wait(1)
+        seq.drive("select_op_enable", 0)
+
+        seq.wait(1)
+        seq.print_rule_status("par_load_state0")
+        seq.wait(15)
+        seq.print("par_load debug port verification: completed")
+
+        # Reset for next test
+        seq.drive("reset_state_enable", 1)
+        seq.wait(1)
+        seq.drive("reset_state_enable", 0)
+        seq.wait(5)
+
+        # Test 3: Trigger mixed_compute (uses static steps)
+        seq.comment("Test 3: Verify mixed_compute debug port fires")
+        seq.drive("load_a", 6)
+        seq.drive("load_b", 7)
+        seq.drive("load_enable", 1)
+        seq.wait(1)
+        seq.drive("load_enable", 0)
+        seq.wait(2)
+
+        seq.drive("select_op_op", 5)  # mixed_compute
+        seq.drive("select_op_enable", 1)
+        seq.wait(1)
+        seq.drive("select_op_enable", 0)
+
+        seq.wait(1)
+        seq.print_rule_status("mixed_compute_state0")
+        seq.wait_condition("dut->is_done_res0 == 1", timeout=30)
+        seq.wait(2)
+        seq.expect("get_result_res0", 42, "6*7=42 from mixed_compute")
+        seq.print("mixed_compute debug port verification: completed")
+
+        seq.comment("=" * 60)
+        seq.print("DEBUG PORT VERIFICATION TEST PASSED")
+        seq.comment("=" * 60)
+
     return tb
 
 
@@ -1353,9 +1436,10 @@ def main():
     for seq in tb._sequences:
         print(f"      - {seq.name}: {len(seq._ops)} operations")
 
-    # Create simulation workspace
-    print("\n4. Creating simulation workspace...")
-    ws = SimulationWorkspace(circuit, workspace_dir)
+    # Create simulation workspace with debug ports enabled
+    # debug_ports=True adds output ports for each rule's firing signal
+    print("\n4. Creating simulation workspace with debug_ports=True...")
+    ws = SimulationWorkspace(circuit, workspace_dir, debug_ports=True)
 
     # Generate with testbench
     print("\n5. Generating workspace with testbench DSL...")
@@ -1424,6 +1508,9 @@ Test sequences included:
 
   Per-branch FSM tests (complex parallel control):
   18. test_complex_par         - Test par with nested seq (per-branch FSM)
+
+  Debug port verification:
+  19. test_debug_ports         - Verify rule firing debug ports are working
 
 To run the simulation:
     cd {workspace_dir}

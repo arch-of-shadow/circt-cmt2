@@ -84,213 +84,12 @@ if os.path.exists(python_pkg_dir):
 from circt.pycmt2 import Circuit, UInt, SInt
 from circt.pycmt2.stl import Reg, Wire, FIFO1Push, clear_stl_registry
 from circt.pycmt2.simulation import SimulationWorkspace
+from circt.pycmt2.testbench import Testbench
 from pathlib import Path
 import shutil
 
 # Clear any cached STL modules from previous runs
 clear_stl_registry()
-
-# C++ Testbench for DataProcessor
-DATAPROCESSOR_TESTBENCH_CPP = r"""
-#include <verilated.h>
-#include <verilated_vcd_c.h>
-#include "VDataProcessor.h"
-#include <iostream>
-#include <vector>
-#include <tuple>
-
-VDataProcessor* dut;
-VerilatedVcdC* tfp;
-uint64_t sim_time = 0;
-
-void tick() {
-    dut->clk = 0;
-    dut->eval();
-    tfp->dump(sim_time++);
-
-    dut->clk = 1;
-    dut->eval();
-    tfp->dump(sim_time++);
-}
-
-void reset() {
-    dut->rst = 1;
-    for (int i = 0; i < 5; i++) tick();
-    dut->rst = 0;
-    tick();
-}
-
-// Calculate expected result based on even/odd path
-// Even: fast_path = data * 2
-// Odd: slow_path = data * 4 (static_repeat(4) always does 4 iterations)
-// Bonus: if result >= 500, add 100 (demonstrates if_ with condition function)
-uint32_t expected_result(uint16_t data) {
-    uint32_t result;
-    if (data % 2 == 0) {
-        // Even: fast_path (2x multiply)
-        result = (uint32_t)data * 2;
-    } else {
-        // Odd: slow_path with static_repeat(4) - always 4 iterations
-        result = (uint32_t)data * 4;
-    }
-    // Bonus for large results (demonstrates if_ with condition function)
-    if (result >= 500) {
-        result += 100;
-    }
-    return result;
-}
-
-int main(int argc, char** argv) {
-    Verilated::commandArgs(argc, argv);
-    Verilated::traceEverOn(true);
-
-    dut = new VDataProcessor;
-    tfp = new VerilatedVcdC;
-    dut->trace(tfp, 99);
-    tfp->open("waves/DataProcessor.vcd");
-
-    // Initialize inputs
-    dut->clk = 0;
-    dut->rst = 0;
-    dut->enqueue_enable = 0;
-    dut->enqueue_data = 0;
-    dut->acknowledge_enable = 0;
-
-    // Reset
-    std::cout << "Resetting..." << std::endl;
-    reset();
-
-    // Test cases: data values
-    // Even numbers use fast path (2x), odd numbers use slow path (iterative accumulation)
-    // Format: (data, is_even, expected_result)
-    std::vector<std::tuple<uint16_t, bool, uint32_t>> test_cases = {
-        {4, true, 8},       // even: 4 * 2 = 8
-        {7, false, 28},     // odd: 7 * 4 = 28 (static_repeat(4))
-        {100, true, 200},   // even: 100 * 2 = 200
-        {255, false, 1120}, // odd: 255 * 4 = 1020 + 100 bonus = 1120
-        {2, true, 4},       // even: 2 * 2 = 4
-        {9, false, 36},     // odd: 9 * 4 = 36 (static_repeat(4))
-    };
-
-    bool all_passed = true;
-    int even_cycles = 0, odd_cycles = 0;
-    int even_count = 0, odd_count = 0;
-
-    for (auto& tc : test_cases) {
-        uint16_t data = std::get<0>(tc);
-        bool is_even = std::get<1>(tc);
-        uint32_t expected = std::get<2>(tc);
-
-        std::cout << "\n=== Testing " << (is_even ? "EVEN" : "ODD")
-                  << " value: " << data << " ===" << std::endl;
-        std::cout << "  Expected result: " << expected << std::endl;
-
-        // Enqueue data to FIFO
-        std::cout << "  Enqueuing to FIFO..." << std::endl;
-        int wait = 0;
-        while (!dut->enqueue_ready && wait < 20) {
-            tick();
-            wait++;
-        }
-        if (wait >= 20) {
-            std::cerr << "  TIMEOUT waiting for enqueue_ready" << std::endl;
-            all_passed = false;
-            continue;
-        }
-
-        dut->enqueue_data = data;
-        dut->enqueue_enable = 1;
-        tick();
-        dut->enqueue_enable = 0;
-
-        // Wait for processing to complete (check is_valid)
-        std::cout << "  Processing..." << std::endl;
-        wait = 0;
-        while (!dut->is_valid_res0 && wait < 200) {
-            tick();
-            wait++;
-        }
-
-        if (wait >= 200) {
-            std::cerr << "  TIMEOUT: processing did not complete after " << wait << " cycles" << std::endl;
-            std::cerr << "    is_busy = " << (int)dut->is_busy_res0 << std::endl;
-            all_passed = false;
-            continue;
-        }
-
-        // Track cycle counts by path
-        if (is_even) {
-            even_cycles += wait;
-            even_count++;
-        } else {
-            odd_cycles += wait;
-            odd_count++;
-        }
-
-        // Read and verify result
-        uint32_t result = dut->get_result_res0;
-        std::cout << "  Result = " << result << " (took " << wait << " cycles)" << std::endl;
-
-        if (result == expected) {
-            std::cout << "  VALUE CHECK: PASS" << std::endl;
-        } else {
-            std::cerr << "  VALUE CHECK: FAIL (expected " << expected << ")" << std::endl;
-            all_passed = false;
-        }
-
-        // Acknowledge result to clear valid flag
-        wait = 0;
-        while (!dut->acknowledge_ready && wait < 10) {
-            tick();
-            wait++;
-        }
-        dut->acknowledge_enable = 1;
-        tick();
-        dut->acknowledge_enable = 0;
-        tick();
-        tick();
-    }
-
-    // Summary
-    std::cout << "\n" << std::string(60, '=') << std::endl;
-    std::cout << "TEST SUMMARY:" << std::endl;
-    std::cout << "  Total tests: " << test_cases.size() << std::endl;
-    std::cout << "\nCYCLE COUNT ANALYSIS:" << std::endl;
-    if (even_count > 0)
-        std::cout << "  Even path average: " << (even_cycles / even_count) << " cycles" << std::endl;
-    if (odd_count > 0)
-        std::cout << "  Odd path average: " << (odd_cycles / odd_count) << " cycles" << std::endl;
-
-    if (odd_count > 0 && even_count > 0) {
-        if (odd_cycles / odd_count > even_cycles / even_count) {
-            std::cout << "  TIMING CHECK: PASS (odd path takes longer as expected)" << std::endl;
-        } else {
-            std::cout << "  TIMING CHECK: WARNING (odd path should take longer)" << std::endl;
-        }
-    }
-    std::cout << std::string(60, '=') << std::endl;
-
-    tfp->close();
-    delete tfp;
-    delete dut;
-
-    if (all_passed) {
-        std::cout << "\nALL TESTS PASSED!" << std::endl;
-        std::cout << "\nFeatures verified:" << std::endl;
-        std::cout << "  - FIFO buffering (enqueue/dequeue)" << std::endl;
-        std::cout << "  - Parallel processing (par block)" << std::endl;
-        std::cout << "  - Conditional routing (if_ with condition function)" << std::endl;
-        std::cout << "  - Submodule proc_rule triggering (MagnitudeCalc)" << std::endl;
-        std::cout << "  - Iterative submodule with while_ loop (IterativeAccumulator)" << std::endl;
-        std::cout << "  - Static steps and static_repeat" << std::endl;
-        std::cout << "  - Mutually exclusive guards for path selection" << std::endl;
-        return 0;
-    } else {
-        std::cerr << "\nSOME TESTS FAILED!" << std::endl;
-        return 1;
-    }
-}
-"""
 
 
 def create_comprehensive_example():
@@ -767,12 +566,174 @@ def create_comprehensive_example():
     return circuit
 
 
+def create_comprehensive_testbench(circuit):
+    """Create testbench using DSL for comprehensive example."""
+    tb = Testbench(circuit, auto_debug_ports=True)
+
+    # Test cases: (data, is_even, expected_result)
+    # Even: fast_path = data * 2
+    # Odd: slow_path = data * 4 (static_repeat(4))
+    # Bonus: if result >= 500, add 100
+    test_cases = [
+        (4, True, 8),       # even: 4 * 2 = 8
+        (7, False, 28),     # odd: 7 * 4 = 28 (static_repeat(4))
+        (100, True, 200),   # even: 100 * 2 = 200
+        (255, False, 1120), # odd: 255 * 4 = 1020 + 100 bonus = 1120
+        (2, True, 4),       # even: 2 * 2 = 4
+        (9, False, 36),     # odd: 9 * 4 = 36 (static_repeat(4))
+    ]
+
+    # =========================================================================
+    # Test Sequence: Reset Test
+    # =========================================================================
+    with tb.sequence("test_reset") as seq:
+        seq.comment("Test: Verify reset behavior")
+        seq.reset(5)
+        seq.wait(2)
+        seq.expect("is_busy_res0", 0, "Should not be busy after reset")
+        seq.expect("is_valid_res0", 0, "Should not be valid after reset")
+        seq.print("Reset test passed")
+
+    # =========================================================================
+    # Test Sequences: Data Processing Tests
+    # =========================================================================
+    for i, (data, is_even, expected) in enumerate(test_cases):
+        path_name = "EVEN" if is_even else "ODD"
+        with tb.sequence(f"test_data_{i+1}") as seq:
+            seq.comment(f"Test {path_name} value: {data}, expected result: {expected}")
+            seq.reset(5)
+
+            # Wait for enqueue to be ready
+            seq.comment("Enqueue data to FIFO")
+            seq.wait_condition("dut->enqueue_ready", timeout=20)
+            seq.drive("enqueue_data", data)
+            seq.drive("enqueue_enable", 1)
+            seq.wait(1)
+            seq.drive("enqueue_enable", 0)
+
+            # Wait for processing to complete
+            seq.comment("Wait for processing to complete")
+            seq.record_cycle(f"proc_start_{i}")
+            seq.wait_condition("dut->is_valid_res0", timeout=200)
+            seq.record_cycle(f"proc_end_{i}")
+
+            # Verify result
+            seq.expect("get_result_res0", expected, f"Data {data} should produce {expected}")
+            seq.print_cycle_diff(f"proc_start_{i}", f"proc_end_{i}", f"{path_name} path processing time")
+            seq.print(f"Test {i+1} result: ", "get_result_res0")
+
+            # Acknowledge result
+            seq.wait_condition("dut->acknowledge_ready", timeout=10)
+            seq.drive("acknowledge_enable", 1)
+            seq.wait(1)
+            seq.drive("acknowledge_enable", 0)
+            seq.wait(2)
+
+    # =========================================================================
+    # Test Sequence: Debug Port Verification
+    # =========================================================================
+    with tb.sequence("test_debug_ports") as seq:
+        seq.comment("=" * 60)
+        seq.comment("Debug Port Verification Test")
+        seq.comment("=" * 60)
+        seq.reset(5)
+
+        # Process an even number (fast path)
+        seq.comment("Process even number to verify stage debug ports")
+        seq.wait_condition("dut->enqueue_ready", timeout=20)
+        seq.drive("enqueue_data", 10)  # even: 10 * 2 = 20
+        seq.drive("enqueue_enable", 1)
+        seq.wait(1)
+        seq.drive("enqueue_enable", 0)
+
+        # Monitor debug ports during processing
+        seq.wait(2)
+        seq.print_rule_status("stage0_dequeue_state0")
+        seq.wait(3)
+        seq.print_rule_status("stage1_analysis_state0")
+        seq.wait(3)
+        seq.print_rule_status("stage2_even_fast_state0")
+
+        # Wait for completion
+        seq.wait_condition("dut->is_valid_res0", timeout=100)
+        seq.expect("get_result_res0", 20, "10*2=20 for even path")
+
+        # Acknowledge
+        seq.wait_condition("dut->acknowledge_ready", timeout=10)
+        seq.drive("acknowledge_enable", 1)
+        seq.wait(1)
+        seq.drive("acknowledge_enable", 0)
+        seq.wait(2)
+
+        # Process an odd number (slow path)
+        seq.comment("Process odd number to verify slow path debug ports")
+        seq.wait_condition("dut->enqueue_ready", timeout=20)
+        seq.drive("enqueue_data", 5)  # odd: 5 * 4 = 20
+        seq.drive("enqueue_enable", 1)
+        seq.wait(1)
+        seq.drive("enqueue_enable", 0)
+
+        seq.wait(5)
+        seq.print_rule_status("stage2_odd_slow_state0")
+
+        seq.wait_condition("dut->is_valid_res0", timeout=100)
+        seq.expect("get_result_res0", 20, "5*4=20 for odd path")
+
+        seq.print("Debug port verification PASSED")
+
+    # =========================================================================
+    # Test Sequence: Timing Comparison (Even vs Odd path)
+    # =========================================================================
+    with tb.sequence("test_timing_comparison") as seq:
+        seq.comment("=" * 60)
+        seq.comment("Timing Comparison: Even (fast) vs Odd (slow) paths")
+        seq.comment("=" * 60)
+
+        # Test even path timing
+        seq.reset(5)
+        seq.comment("--- Even path timing ---")
+        seq.wait_condition("dut->enqueue_ready", timeout=20)
+        seq.drive("enqueue_data", 6)  # even
+        seq.drive("enqueue_enable", 1)
+        seq.wait(1)
+        seq.drive("enqueue_enable", 0)
+
+        seq.record_cycle("even_start")
+        seq.wait_condition("dut->is_valid_res0", timeout=100)
+        seq.record_cycle("even_end")
+        seq.print_cycle_diff("even_start", "even_end", "Even path cycles")
+
+        # Acknowledge
+        seq.wait_condition("dut->acknowledge_ready", timeout=10)
+        seq.drive("acknowledge_enable", 1)
+        seq.wait(1)
+        seq.drive("acknowledge_enable", 0)
+        seq.wait(5)
+
+        # Test odd path timing
+        seq.comment("--- Odd path timing ---")
+        seq.wait_condition("dut->enqueue_ready", timeout=20)
+        seq.drive("enqueue_data", 7)  # odd
+        seq.drive("enqueue_enable", 1)
+        seq.wait(1)
+        seq.drive("enqueue_enable", 0)
+
+        seq.record_cycle("odd_start")
+        seq.wait_condition("dut->is_valid_res0", timeout=100)
+        seq.record_cycle("odd_end")
+        seq.print_cycle_diff("odd_start", "odd_end", "Odd path cycles")
+
+        seq.print("Timing comparison completed - odd path should take longer")
+
+    return tb
+
+
 def main():
     """
     Main entry point: create circuit and run E2E simulation.
     """
     print("=" * 70)
-    print("Comprehensive PyCMT2 Example - All Features Demonstrated")
+    print("Comprehensive PyCMT2 Example - Using Testbench DSL")
     print("=" * 70)
     print()
 
@@ -797,7 +758,7 @@ def main():
 
     print()
     print("-" * 70)
-    print("Setting up RTL simulation...")
+    print("Setting up RTL simulation with Testbench DSL...")
     print("-" * 70)
 
     # Setup simulation directory
@@ -808,20 +769,19 @@ def main():
     if sim_dir.exists():
         shutil.rmtree(sim_dir)
 
-    # Create simulation workspace
-    ws = SimulationWorkspace(circuit, sim_dir)
+    # Create testbench using DSL
+    print("Creating testbench using Testbench DSL...")
+    tb = create_comprehensive_testbench(circuit)
+    print(f"   Test sequences: {len(tb._sequences)}")
+    for seq in tb._sequences:
+        print(f"      - {seq.name}: {len(seq._ops)} operations")
 
-    # Generate workspace
-    ws._add_stl_rtl()
-    ws._create_directories()
-    ws._generate_rtl()
-    ws._generate_makefile()
+    # Create simulation workspace with debug ports enabled
+    ws = SimulationWorkspace(circuit, sim_dir, debug_ports=True)
 
-    # Write custom testbench
-    tb_file = sim_dir / "tb" / "testbench.cpp"
-    tb_file.write_text(DATAPROCESSOR_TESTBENCH_CPP)
-
-    print(f"Simulation workspace created at: {sim_dir}")
+    # Generate workspace with testbench
+    print(f"Generating workspace at: {sim_dir}")
+    ws.generate_with_testbench(tb)
 
     # Build simulation
     print()

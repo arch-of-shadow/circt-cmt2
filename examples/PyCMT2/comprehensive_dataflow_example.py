@@ -4,7 +4,7 @@
 #  SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
 """
-Comprehensive Dataflow Example with E2E Simulation
+Comprehensive Dataflow Example with E2E Simulation using Testbench DSL
 
 IMPORTANT: DO NOT SIMPLIFY THIS EXAMPLE!
 Simplification will harm the coverage of expected features. This example
@@ -47,7 +47,7 @@ Usage:
 """
 
 import os
-import subprocess
+import shutil
 import sys
 from pathlib import Path
 
@@ -60,6 +60,7 @@ from circt.pycmt2 import Circuit, UInt
 from circt.pycmt2.types import SyncToken
 from circt.pycmt2.stl import Reg, clear_stl_registry
 from circt.pycmt2.simulation import SimulationWorkspace
+from circt.pycmt2.testbench import Testbench
 
 
 def create_comprehensive_dataflow():
@@ -227,146 +228,120 @@ def create_comprehensive_dataflow():
     return circuit
 
 
-def generate_testbench():
-    """Generate C++ testbench for the dataflow example."""
-    return '''\
-// Testbench for ComprehensiveDataflow - Fork-Join Pipeline
-// Tests: Fork pattern, Join pattern, Token operations, Timing
-//
-// The dataflow pipeline processes data through:
-//   source -> branch_add (data + 100)
-//          -> branch_mul (data * 2)
-//          -> join ((data+100) + (data*2))
-//          -> finalize (output)
-//
-// Expected latency: 4 cycles (source:0-1, branches:1-2, join:2-3, finalize:3-4)
-// Result formula: (data + 100) + (data * 2) = 3*data + 100
+def create_dataflow_testbench(circuit):
+    """Create testbench using DSL for the dataflow example."""
+    tb = Testbench(circuit, auto_debug_ports=True)
 
-#include "VDataflowProcessor.h"
-#include "verilated.h"
-#include "verilated_vcd_c.h"
+    # Test cases: (input, expected_output)
+    # Expected result: (data + 100) + (data * 2) = 3*data + 100
+    test_cases = [
+        (10, 130),    # 3*10 + 100 = 130
+        (50, 250),    # 3*50 + 100 = 250
+        (100, 400),   # 3*100 + 100 = 400
+        (0, 100),     # 3*0 + 100 = 100
+        (255, 865),   # 3*255 + 100 = 865
+    ]
 
-#include <iostream>
-#include <memory>
-#include <vector>
-#include <tuple>
+    # Pipeline latency is 4 cycles (timing: source 0-1, branches 1-2, join 2-3, finalize 3-4)
+    PIPELINE_LATENCY = 4
 
-// Expected result: (data + 100) + (data * 2) = 3*data + 100
-uint32_t expected_result(uint16_t data) {
-    return 3 * (uint32_t)data + 100;
-}
+    # =========================================================================
+    # Test Sequence: Reset Test
+    # =========================================================================
+    with tb.sequence("test_reset") as seq:
+        seq.comment("Test: Verify reset behavior")
+        seq.reset(5)
+        seq.wait(2)
+        seq.print("Reset complete")
 
-int main(int argc, char** argv) {
-    Verilated::commandArgs(argc, argv);
-    Verilated::traceEverOn(true);
+    # =========================================================================
+    # Test Sequences: Dataflow Pipeline Tests
+    # =========================================================================
+    for i, (input_val, expected) in enumerate(test_cases):
+        with tb.sequence(f"test_dataflow_{i+1}") as seq:
+            seq.comment(f"Test input: {input_val}, expected result: {expected}")
+            seq.reset(5)
 
-    auto dut = std::make_unique<VDataflowProcessor>();
+            # Drive input to the dataflow pipeline directly
+            seq.comment("Drive input to dataflow pipeline")
+            seq.drive("fork_join_pipeline_source_data_in", input_val)
 
-    auto tfp = std::make_unique<VerilatedVcdC>();
-    dut->trace(tfp.get(), 99);
-    tfp->open("waves/DataflowProcessor.vcd");
+            # Clock through the pipeline latency
+            seq.record_cycle(f"start_{i}")
+            seq.wait(PIPELINE_LATENCY)
+            seq.record_cycle(f"end_{i}")
 
-    int tick = 0;
-    auto clock_cycle = [&]() {
-        dut->clk = 0; dut->eval(); tfp->dump(tick++);
-        dut->clk = 1; dut->eval(); tfp->dump(tick++);
-    };
+            # Read result from the dataflow output
+            seq.expect("fork_join_pipeline_finalize_result_0", expected,
+                      f"Input {input_val}: 3*{input_val}+100 = {expected}")
+            seq.print_cycle_diff(f"start_{i}", f"end_{i}", f"Test {i+1} latency")
+            seq.print(f"Test {i+1} result: ", "fork_join_pipeline_finalize_result_0")
 
-    // Initialize
-    dut->clk = 0;
-    dut->rst = 1;
-    dut->start_enable = 0;
-    dut->start_data = 0;
-    dut->fork_join_pipeline_source_data_in = 0;
+            # Extra cycle between tests
+            seq.wait(1)
 
-    // Reset (5 cycles)
-    for (int i = 0; i < 5; i++) {
-        clock_cycle();
-    }
-    dut->rst = 0;
-    clock_cycle();
+    # =========================================================================
+    # Test Sequence: Debug Port Verification
+    # =========================================================================
+    with tb.sequence("test_debug_ports") as seq:
+        seq.comment("=" * 60)
+        seq.comment("Debug Port Verification for Dataflow Tasks")
+        seq.comment("=" * 60)
+        seq.reset(5)
 
-    std::cout << "Reset complete" << std::endl;
+        # Drive input
+        seq.drive("fork_join_pipeline_source_data_in", 42)
 
-    // Test cases: (input, expected_output)
-    std::vector<std::tuple<uint16_t, uint32_t>> test_cases = {
-        {10, expected_result(10)},    // 3*10 + 100 = 130
-        {50, expected_result(50)},    // 3*50 + 100 = 250
-        {100, expected_result(100)},  // 3*100 + 100 = 400
-        {0, expected_result(0)},      // 3*0 + 100 = 100
-        {255, expected_result(255)},  // 3*255 + 100 = 865
-    };
+        # Monitor debug ports during pipeline execution
+        seq.wait(1)
+        seq.comment("Check source task debug port")
+        seq.print_rule_status("fork_join_pipeline_source")
 
-    int passed = 0;
-    int failed = 0;
+        seq.wait(1)
+        seq.comment("Check branch tasks debug ports")
+        seq.print_rule_status("fork_join_pipeline_branch_add")
+        seq.print_rule_status("fork_join_pipeline_branch_mul")
 
-    // Pipeline latency is 4 cycles (timing: source 0-1, branches 1-2, join 2-3, finalize 3-4)
-    const int PIPELINE_LATENCY = 4;
+        seq.wait(1)
+        seq.comment("Check join task debug port")
+        seq.print_rule_status("fork_join_pipeline_join")
 
-    for (auto& [input, expected] : test_cases) {
-        std::cout << "\\n=== Testing input: " << input << " ===" << std::endl;
-        std::cout << "  Expected result: " << expected << std::endl;
+        seq.wait(1)
+        seq.comment("Check finalize task debug port")
+        seq.print_rule_status("fork_join_pipeline_finalize")
 
-        // Drive input to the dataflow pipeline directly
-        // The dataflow has its own input port: fork_join_pipeline_source_data_in
-        dut->fork_join_pipeline_source_data_in = input;
+        # Verify result: 3*42 + 100 = 226
+        seq.expect("fork_join_pipeline_finalize_result_0", 226, "3*42+100=226")
+        seq.print("Debug port verification completed")
 
-        // Clock through the pipeline latency
-        for (int i = 0; i < PIPELINE_LATENCY; i++) {
-            clock_cycle();
-        }
+    # =========================================================================
+    # Test Sequence: Latency Verification
+    # =========================================================================
+    with tb.sequence("test_latency") as seq:
+        seq.comment("=" * 60)
+        seq.comment("Latency Verification: Pipeline should complete in 4 cycles")
+        seq.comment("=" * 60)
+        seq.reset(5)
 
-        // Read result from the dataflow output
-        uint32_t result = dut->fork_join_pipeline_finalize_result_0;
-        std::cout << "  Result = " << result << " (after " << PIPELINE_LATENCY << " cycles)" << std::endl;
+        # Drive input
+        seq.drive("fork_join_pipeline_source_data_in", 20)
 
-        if (result == expected) {
-            std::cout << "  PASS" << std::endl;
-            passed++;
-        } else {
-            std::cerr << "  FAIL (expected " << expected << ", got " << result << ")" << std::endl;
-            failed++;
-        }
+        # Record and verify latency
+        seq.record_cycle("lat_start")
+        seq.wait(PIPELINE_LATENCY)
+        seq.record_cycle("lat_end")
 
-        // Extra cycle between tests
-        clock_cycle();
-    }
+        seq.expect("fork_join_pipeline_finalize_result_0", 160, "3*20+100=160")
+        seq.print_cycle_diff("lat_start", "lat_end", "Pipeline latency")
+        seq.print("Latency verification: Pipeline completed in expected cycles")
 
-    // Run a few more cycles for waveform observation
-    for (int i = 0; i < 5; i++) {
-        clock_cycle();
-    }
-
-    tfp->close();
-
-    std::cout << "\\n============================================================" << std::endl;
-    std::cout << "TEST SUMMARY:" << std::endl;
-    std::cout << "  Passed: " << passed << std::endl;
-    std::cout << "  Failed: " << failed << std::endl;
-    std::cout << "============================================================" << std::endl;
-
-    if (failed == 0) {
-        std::cout << "\\nALL TESTS PASSED!" << std::endl;
-        std::cout << "\\nFeatures verified:" << std::endl;
-        std::cout << "  - SyncToken creation and data extraction" << std::endl;
-        std::cout << "  - Fork pattern (one token, multiple consumers)" << std::endl;
-        std::cout << "  - Join pattern (multiple token inputs)" << std::endl;
-        std::cout << "  - Timing attributes on tasks" << std::endl;
-        std::cout << "  - Dataflow pipeline execution" << std::endl;
-        std::cout << "  - Correct pipeline latency (4 cycles)" << std::endl;
-        return 0;
-    } else {
-        std::cerr << "\\nSOME TESTS FAILED!" << std::endl;
-        return 1;
-    }
-}
-'''
+    return tb
 
 
 def main():
     """Run the comprehensive dataflow example with e2e simulation."""
     print("=" * 70)
-    print("Comprehensive Dataflow Example - All Features Demonstrated")
+    print("Comprehensive Dataflow Example - Using Testbench DSL")
     print("=" * 70)
 
     # Create circuit
@@ -384,39 +359,37 @@ def main():
 
     # Generate simulation workspace
     print("\n" + "-" * 70)
-    print("Setting up RTL simulation...")
+    print("Setting up RTL simulation with Testbench DSL...")
     print("-" * 70)
 
     sim_dir = script_dir / "comprehensive_dataflow_sim"
-    ws = SimulationWorkspace(circuit, sim_dir)
 
-    # Generate with custom testbench
-    ws.generate_placeholder()
+    # Clean previous simulation
+    if sim_dir.exists():
+        shutil.rmtree(sim_dir)
 
-    # Write custom testbench
-    tb_path = sim_dir / "tb" / "testbench.cpp"
-    tb_path.write_text(generate_testbench())
+    # Create testbench using DSL
+    print("Creating testbench using Testbench DSL...")
+    tb = create_dataflow_testbench(circuit)
+    print(f"   Test sequences: {len(tb._sequences)}")
+    for seq in tb._sequences:
+        print(f"      - {seq.name}: {len(seq._ops)} operations")
 
-    print(f"Simulation workspace created at: {sim_dir}")
+    ws = SimulationWorkspace(circuit, sim_dir, debug_ports=True)
+
+    # Generate workspace with testbench
+    print(f"Generating workspace at: {sim_dir}")
+    ws.generate_with_testbench(tb)
 
     # Build and run
     print("\n" + "-" * 70)
     print("Building simulation...")
     print("-" * 70)
 
-    result = subprocess.run(
-        ["make", "-C", str(sim_dir)],
-        capture_output=True,
-        text=True
-    )
-
-    if result.returncode != 0:
-        print("Build output:")
-        print(result.stdout)
-        print(result.stderr)
-        print("\nBuild failed - this is expected if dataflow lowering is not fully implemented.")
+    if not ws.build():
+        print("Build failed - this may be expected if dataflow lowering is not fully implemented.")
         print("The MLIR generation and structure is correct.")
-        return
+        return 1
 
     print("Build successful!")
 
@@ -425,16 +398,20 @@ def main():
     print("Running simulation...")
     print("-" * 70)
 
-    result = subprocess.run(
-        ["make", "-C", str(sim_dir), "run"],
-        capture_output=False
-    )
+    success, output = ws.run()
+    print(output)
+
+    if not success:
+        print("Simulation failed!")
+        return 1
 
     print("\n" + "=" * 70)
     print("Example completed!")
     print(f"Waveforms available at: {sim_dir}/waves/DataflowProcessor.vcd")
     print("=" * 70)
 
+    return 0
+
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
