@@ -93,11 +93,6 @@ Example:
 > Define an interface.
 
 
-**`interpreter(self, output: "'Callable[[str], None] | None'" = None) -> "'Interpreter'"`**
-
-> Create a Python interpreter for this circuit.
-
-
 **`module(self, name: 'str | None' = None) -> 'Iterator[ModuleBuilder]'`**
 
 > Create a module within this circuit.
@@ -774,6 +769,31 @@ Example:
 > Create a dataflow task.
 
 
+### `NestedDataflowBuilder`
+
+Builder for nested dataflows inside tasks.
+
+Nested dataflows allow hierarchical decomposition of complex pipelines.
+They are created inside a DataflowTaskOp and can access the parent task's
+context (though they are IsolatedFromAbove in MLIR semantics).
+
+Example:
+    with df.task("outer") as task:
+        with task.dataflow("inner", args=[("x", UInt(32))],
+                           returns=[UInt(32)]) as inner:
+            with inner.task("process") as t:
+                t.return_values(inner.x)
+
+#### Methods
+
+**`__init__(self, parent_task: 'TaskBuilder', name: 'str | None', args: 'list[tuple[str, Cmt2Type]]', returns: 'list[Cmt2Type]', interval: 'int | None' = None)`**
+
+
+**`task(self, name: 'str | None' = None, tokens_in: 'list[Token] | None' = None, tokens_out: 'list[SyncToken] | None' = None, timing: 'tuple[int, int] | None' = None) -> 'Iterator[TaskBuilder]'`**
+
+> Create a dataflow task.
+
+
 ### `TaskBuilder`
 
 Builder for dataflow tasks.
@@ -853,6 +873,11 @@ Example:
 **`create_token(self, data: 'Signal | None' = None, data_type: 'Cmt2Type | None' = None, mode: 'str' = 'ls') -> 'Token'`**
 
 > Create a new token, optionally with data.
+
+
+**`dataflow(self, name: 'str | None' = None, args: 'list[tuple[str, Cmt2Type]] | None' = None, returns: 'list[Cmt2Type] | None' = None, interval: 'int | None' = None) -> 'Iterator[NestedDataflowBuilder]'`**
+
+> Create a nested dataflow inside this task.
 
 
 **`enable(self, step_name: 'str') -> 'None'`**
@@ -1487,6 +1512,11 @@ Directory structure:
 **`generate_placeholder(self)`**
 
 > Generate workspace with placeholder testbench.
+
+
+**`generate_waveform_config(self, output_file: 'str | None' = None) -> 'str'`**
+
+> Generate GTKWave save file with signal annotations.
 
 
 **`generate_with_testbench(self, testbench: 'Testbench')`**
@@ -2284,3 +2314,4 @@ Returns:
     Diagnostic for the undefined reference.
 
 ---
+
