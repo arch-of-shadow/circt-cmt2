@@ -218,17 +218,27 @@ class RegionBuilder:
 
     def shl(self, a: Signal, amount: Signal | int) -> Signal:
         """Left shift."""
-        from circt.ir import InsertionPoint
+        from circt.ir import InsertionPoint, IntegerAttr, IntegerType, Operation
         from circt.dialects import firrtl
 
         with InsertionPoint(self._block):
             if isinstance(amount, int):
-                shl_op = firrtl.ShlPrimOp(a.value, amount, loc=self._loc)
                 result_width = a.type.bit_width() + amount
+                # Use Operation.create to ensure correct widened result type
+                # (The Python bindings' ShlPrimOp doesn't properly infer the wider type).
+                result_ty = firrtl.UIntType.get(self._ctx.mlir_context, result_width)
+                op = Operation.create(
+                    "firrtl.shl",
+                    results=[result_ty],
+                    operands=[a.value],
+                    attributes={"amount": IntegerAttr.get(IntegerType.get_signless(32), amount)},
+                    loc=self._loc
+                )
             else:
                 shl_op = firrtl.DShlPrimOp(a.value, amount.value, loc=self._loc)
                 result_width = a.type.bit_width() + (2 ** amount.type.bit_width() - 1)
-            return Signal(shl_op.result, UInt(result_width), self)
+                return Signal(shl_op.result, UInt(result_width), self)
+            return Signal(op.result, UInt(result_width), self)
 
     def shr(self, a: Signal, amount: Signal | int) -> Signal:
         """Right shift."""

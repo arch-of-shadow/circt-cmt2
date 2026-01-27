@@ -64,6 +64,7 @@ from .stl import (
     FIFO1Push,
     FIFO1Pull,
     FIFO2I,
+    ShiftReg,
     Memory,
     get_stl_rtl_files,
     add_stl_rtl_to_workspace,
@@ -86,14 +87,6 @@ from .diagnostics import (
     undefined_reference_error,
     scheduling_conflict_warning,
     format_diagnostic_with_source,
-)
-
-from .interpreter import (
-    Interpreter,
-    Breakpoint,
-    BreakpointType,
-    RuleResult,
-    CycleTrace,
 )
 
 from .dataflow_builders import (
@@ -181,6 +174,10 @@ __all__ = [
     "Reg",
     "Wire",
     "FIFO",
+    "FIFO1Push",
+    "FIFO1Pull",
+    "FIFO2I",
+    "ShiftReg",
     "Memory",
     "get_stl_rtl_files",
     "add_stl_rtl_to_workspace",
@@ -204,10 +201,4 @@ __all__ = [
     "undefined_reference_error",
     "scheduling_conflict_warning",
     "format_diagnostic_with_source",
-    # Interpreter
-    "Interpreter",
-    "Breakpoint",
-    "BreakpointType",
-    "RuleResult",
-    "CycleTrace",
 ]

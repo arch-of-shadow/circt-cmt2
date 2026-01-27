@@ -280,7 +280,7 @@ class Circuit:
 
         return str(cloned)
 
-    def emit_verilog(self, output_dir: str | None = None) -> str:
+    def emit_verilog(self, output_dir: str | None = None, debug_ports: bool = False) -> str:
         """Run full compilation pipeline and emit Verilog.
 
         This runs the complete pipeline: CMT2 -> FIRRTL -> HW -> Verilog.
@@ -288,6 +288,9 @@ class Circuit:
         Args:
             output_dir: Optional directory to write Verilog files.
                        If None, returns Verilog as a string.
+            debug_ports: If True, adds debug firing ports for each rule.
+                        These ports expose the rule fire signals for debugging
+                        and testbench assertions. Default is False.
 
         Returns:
             The Verilog representation of the circuit.
@@ -298,24 +301,32 @@ class Circuit:
         # Clone the module to preserve original
         cloned = self._clone_module()
 
+        # Build the CMT2 pass pipeline
+        # The debug pass must run after cmt2-proc-to-gaa (rules exist) but before lowering
+        passes = [
+            "cmt2-compile-invoke",
+            "cmt2-dataflow-lowering",
+            "cmt2-token-lowering",
+            "cmt2-token-rtl-gen",
+            "cmt2-tdcc",
+            "cmt2-proc-stmt-to-action",
+            "cmt2-proc-to-gaa",
+        ]
+        if debug_ports:
+            passes.append("cmt2-add-rule-firing-port")
+
+        cmt2_passes = ",".join(passes)
+
         # Run full pipeline: CMT2 -> FIRRTL -> lower-to-hw -> export-verilog
         try:
             # First run CMT2 to FIRRTL
             # CMT2 passes operate on cmt2.circuit, conversion operates on builtin.module
             # Pipeline includes dataflow passes for token-based pipelines
             cmt2_pm = PassManager.parse(
-                "builtin.module("
-                "cmt2.circuit("
-                "cmt2-compile-invoke,"
-                "cmt2-dataflow-lowering,"
-                "cmt2-token-lowering,"
-                "cmt2-token-rtl-gen,"
-                "cmt2-tdcc,"
-                "cmt2-proc-stmt-to-action,"
-                "cmt2-proc-to-gaa"
-                "),"
-                "lower-cmt2-to-firrtl"
-                ")",
+                f"builtin.module("
+                f"cmt2.circuit({cmt2_passes}),"
+                f"lower-cmt2-to-firrtl"
+                f")",
                 context=self._ctx.mlir_context
             )
             cmt2_pm.run(cloned.operation)
@@ -363,21 +374,25 @@ class Circuit:
 
         return result
 
-    def to_verilog(self) -> str:
+    def to_verilog(self, debug_ports: bool = False) -> str:
         """Run the compilation pipeline and emit Verilog.
 
         Deprecated: Use emit_verilog() instead.
 
+        Args:
+            debug_ports: If True, adds debug firing ports for rules.
+
         Returns:
             The Verilog representation of the circuit.
         """
-        return self.emit_verilog()
+        return self.emit_verilog(debug_ports=debug_ports)
 
     def debug_pipeline(
         self,
         output_dir: str,
         passes: list[str] | None = None,
         stop_on_error: bool = True,
+        debug_ports: bool = False,
     ) -> dict[str, str]:
         """Run passes and dump IR after each pass for debugging.
 
@@ -390,6 +405,8 @@ class Circuit:
                    CMT2 compilation pipeline.
             stop_on_error: If True, stops at first failing pass. Otherwise
                           continues and logs errors.
+            debug_ports: If True, includes cmt2-add-rule-firing-port in the
+                        default pass list.
 
         Returns:
             Dict mapping pass name to the IR after that pass (or error message).
@@ -400,6 +417,7 @@ class Circuit:
                 "cmt2-tdcc",
                 "cmt2-proc-stmt-to-action",
                 "cmt2-proc-to-gaa",
+                "cmt2-add-rule-firing-port",
                 "lower-cmt2-to-firrtl",
             ])
         """
@@ -421,6 +439,11 @@ class Circuit:
                 "cmt2-tdcc",
                 "cmt2-proc-stmt-to-action",
                 "cmt2-proc-to-gaa",
+            ]
+            # Optionally add debug ports pass
+            if debug_ports:
+                passes.append("cmt2-add-rule-firing-port")
+            passes.extend([
                 # Lowering to FIRRTL
                 "lower-cmt2-to-firrtl",
                 # FIRRTL passes
@@ -429,7 +452,7 @@ class Circuit:
                 # HW passes
                 "lower-firrtl-to-hw",
                 "lower-seq-to-sv",
-            ]
+            ])
 
         results = {}
         cloned = self._clone_module()
@@ -529,35 +552,6 @@ class Circuit:
         # Create FIRRTL external modules for each CMT2 external module
         for name, ext_mod in self._external_modules.items():
             self._create_firrtl_extmodule(mlir_module, ext_mod)
-
-    def interpreter(self, output: "Callable[[str], None] | None" = None) -> "Interpreter":
-        """Create a Python interpreter for this circuit.
-
-        The interpreter provides cycle-accurate simulation with GAA semantics:
-        - One-Rule-At-A-Time (ORAAT) execution
-        - Conflict resolution via precedence
-        - Breakpoint support
-        - State inspection and modification
-
-        Args:
-            output: Optional callback for output messages. Defaults to print.
-
-        Returns:
-            An Interpreter instance for this circuit.
-
-        Example:
-            circuit = Circuit("Counter")
-            # ... define circuit ...
-
-            interp = circuit.interpreter()
-            interp.reset()
-
-            for _ in range(10):
-                results = interp.step()
-                print(f"Cycle {interp.cycle}: counter = {interp.get_register('counter')}")
-        """
-        from .interpreter import Interpreter
-        return Interpreter(self, output)
 
     def __repr__(self) -> str:
         return f"Circuit({self.name!r})"

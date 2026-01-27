@@ -240,6 +240,57 @@ class PrintCycleDiffOp(TestOp):
         return f'print(f"{self.message}: {{cycle_{self.end_label} - cycle_{self.start_label}}} cycles")'
 
 
+@dataclass
+class DebugPortCheckOp(TestOp):
+    """Check debug firing port for a rule."""
+    rule_name: str
+    expected_fired: bool = True
+
+    def to_cpp(self) -> str:
+        port_name = f"dbg_{self.rule_name}_firing"
+        expected = "true" if self.expected_fired else "false"
+        return f'expect("{port_name}", dut->{port_name}, {expected});'
+
+    def to_python(self) -> str:
+        port_name = f"dbg_{self.rule_name}_firing"
+        expected = "True" if self.expected_fired else "False"
+        return f'assert dut.{port_name}.value == {expected}, "{self.rule_name} firing mismatch"'
+
+
+@dataclass
+class DebugPortPrintOp(TestOp):
+    """Print debug firing port status for a rule."""
+    rule_name: str
+
+    def to_cpp(self) -> str:
+        port_name = f"dbg_{self.rule_name}_firing"
+        return f'std::cout << "{self.rule_name} fired: " << (dut->{port_name} ? "yes" : "no") << std::endl;'
+
+    def to_python(self) -> str:
+        port_name = f"dbg_{self.rule_name}_firing"
+        return f'print(f"{self.rule_name} fired: {{\\"yes\\" if dut.{port_name}.value else \\"no\\"}}")'
+
+
+@dataclass
+class DebugPortAllOp(TestOp):
+    """Print all debug firing ports."""
+    rule_names: tuple[str, ...]
+
+    def to_cpp(self) -> str:
+        lines = ['std::cout << "=== Rule Firing Status ===" << std::endl;']
+        for rule in self.rule_names:
+            port_name = f"dbg_{rule}_firing"
+            lines.append(f'std::cout << "  {rule}: " << (dut->{port_name} ? "FIRED" : "-") << std::endl;')
+        return "\n".join(lines)
+
+    def to_python(self) -> str:
+        lines = ['print("=== Rule Firing Status ===")']
+        for rule in self.rule_names:
+            port_name = f"dbg_{rule}_firing"
+            lines.append(f'print(f"  {rule}: {{\\"FIRED\\" if dut.{port_name}.value else \\"-\\"}}")')
+        return "\n".join(lines)
+
+
 class TestSequence:
     """A sequence of test operations.
 
@@ -413,6 +464,49 @@ class TestSequence:
         self._ops.append(PrintCycleDiffOp(start_label, end_label, message))
         return self
 
+    def expect_rule_fired(self, rule_name: str, fired: bool = True) -> TestSequence:
+        """Assert that a rule fired (or did not fire) this cycle.
+
+        Requires debug_ports=True when building the circuit.
+
+        Args:
+            rule_name: Name of the rule to check.
+            fired: Expected firing status (default True = expect it fired).
+
+        Returns:
+            self for chaining.
+        """
+        self._ops.append(DebugPortCheckOp(rule_name, fired))
+        return self
+
+    def print_rule_status(self, rule_name: str) -> TestSequence:
+        """Print whether a rule fired this cycle.
+
+        Requires debug_ports=True when building the circuit.
+
+        Args:
+            rule_name: Name of the rule to check.
+
+        Returns:
+            self for chaining.
+        """
+        self._ops.append(DebugPortPrintOp(rule_name))
+        return self
+
+    def print_all_rule_status(self, rule_names: list[str]) -> TestSequence:
+        """Print firing status of all specified rules.
+
+        Requires debug_ports=True when building the circuit.
+
+        Args:
+            rule_names: List of rule names to display status for.
+
+        Returns:
+            self for chaining.
+        """
+        self._ops.append(DebugPortAllOp(tuple(rule_names)))
+        return self
+
     def __enter__(self) -> TestSequence:
         return self
 
@@ -437,16 +531,32 @@ class Testbench:
         # Generate with SimulationWorkspace
         ws = SimulationWorkspace(circuit, "./sim")
         ws.generate_with_testbench(tb)
+
+    Example with debug ports:
+        tb = Testbench(circuit, auto_debug_ports=True)
+
+        with tb.sequence("test_rule_firing") as seq:
+            seq.reset(5)
+            seq.wait(1)
+            # Check specific rule fired
+            seq.expect_rule_fired("increment")
+            # Print all rule firing status
+            seq.print_all_rule_status(tb.get_rule_names())
     """
 
-    def __init__(self, circuit: Circuit):
+    def __init__(self, circuit: Circuit, auto_debug_ports: bool = False):
         """Create a testbench for a circuit.
 
         Args:
             circuit: The CMT2 circuit to test.
+            auto_debug_ports: If True, enables debug port helpers for rule firing
+                            observation. The circuit must be compiled with
+                            debug_ports=True for these to work at runtime.
         """
         self.circuit = circuit
         self._sequences: list[TestSequence] = []
+        self._auto_debug_ports = auto_debug_ports
+        self._rule_names: list[str] | None = None
 
     @contextmanager
     def sequence(self, name: str) -> Iterator[TestSequence]:
@@ -477,6 +587,76 @@ class Testbench:
         Returns:
             self for chaining.
         """
+        self._sequences.append(seq)
+        return self
+
+    def get_rule_names(self, module_name: str | None = None) -> list[str]:
+        """Get all rule names from the circuit.
+
+        This collects rule names from both regular rules and procedural rules.
+        Useful for auto_debug_ports functionality.
+
+        Args:
+            module_name: Optional specific module to get rules from.
+                        If None, gets rules from the top-level module.
+
+        Returns:
+            List of rule names.
+        """
+        if self._rule_names is not None and module_name is None:
+            return self._rule_names
+
+        rule_names = []
+
+        # Get target module
+        if module_name:
+            module = self.circuit._modules.get(module_name)
+        elif self.circuit._modules:
+            # Get first (top) module
+            module = next(iter(self.circuit._modules.values()))
+        else:
+            return []
+
+        if module is None:
+            return []
+
+        # Collect regular rules
+        rule_names.extend(module._rules.keys())
+
+        # Collect procedural rules
+        rule_names.extend(module._proc_rules.keys())
+
+        if module_name is None:
+            self._rule_names = rule_names
+
+        return rule_names
+
+    def add_debug_print_sequence(
+        self, name: str = "debug_print_all", cycles: int = 10
+    ) -> Testbench:
+        """Add a sequence that prints debug port status each cycle.
+
+        This creates a test sequence that runs for N cycles and prints
+        the firing status of all rules on each cycle. Useful for debugging.
+
+        Args:
+            name: Name for the generated sequence.
+            cycles: Number of cycles to run.
+
+        Returns:
+            self for chaining.
+        """
+        rule_names = self.get_rule_names()
+        if not rule_names:
+            return self
+
+        seq = TestSequence(name)
+        seq.reset(5)
+        for i in range(cycles):
+            seq.comment(f"Cycle {i}")
+            seq.print_all_rule_status(rule_names)
+            seq.wait(1)
+
         self._sequences.append(seq)
         return self
 

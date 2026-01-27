@@ -512,6 +512,59 @@ class TaskBuilder(RegionBuilder):
                 loc=self._loc,
             )
 
+    @contextmanager
+    def dataflow(
+        self,
+        name: str | None = None,
+        args: list[tuple[str, Cmt2Type]] | None = None,
+        returns: list[Cmt2Type] | None = None,
+        interval: int | None = None,
+    ) -> Iterator[NestedDataflowBuilder]:
+        """Create a nested dataflow inside this task.
+
+        Nested dataflows allow hierarchical decomposition of complex
+        dataflow pipelines. The nested dataflow operates within the
+        parent task's execution context.
+
+        Args:
+            name: Optional name for the nested dataflow.
+            args: Input arguments (name, type) pairs.
+            returns: Return types.
+            interval: Optional initiation interval.
+
+        Yields:
+            A NestedDataflowBuilder for defining the nested dataflow.
+
+        Example:
+            with df.task("complex_stage", tokens_in=[tok_in]) as task:
+                data = task.token_data(tok_in)
+                # Create nested dataflow for complex processing
+                with task.dataflow("inner_pipeline",
+                                   args=[("x", UInt(32))],
+                                   returns=[UInt(32)]) as inner:
+                    # Define inner pipeline tasks...
+                    pass
+                task.return_values(result)
+        """
+        if args is None:
+            args = []
+        if returns is None:
+            returns = []
+
+        # Import NestedDataflowBuilder at runtime to avoid circular reference
+        # (it's defined after this class in the same file)
+        nested = _create_nested_dataflow(
+            parent_task=self,
+            name=name,
+            args=args,
+            returns=returns,
+            interval=interval,
+        )
+
+        yield nested
+
+        nested._finalize()
+
     def yield_tokens(self, *tokens: Token) -> None:
         """Yield tokens from this task for downstream consumption.
 
@@ -804,6 +857,129 @@ class DataflowBuilder:
             )
 
 
+class NestedDataflowBuilder(DataflowBuilder):
+    """Builder for nested dataflows inside tasks.
+
+    Nested dataflows allow hierarchical decomposition of complex pipelines.
+    They are created inside a DataflowTaskOp and can access the parent task's
+    context (though they are IsolatedFromAbove in MLIR semantics).
+
+    Example:
+        with df.task("outer") as task:
+            with task.dataflow("inner", args=[("x", UInt(32))],
+                               returns=[UInt(32)]) as inner:
+                with inner.task("process") as t:
+                    t.return_values(inner.x)
+    """
+
+    def __init__(
+        self,
+        parent_task: TaskBuilder,
+        name: str | None,
+        args: list[tuple[str, Cmt2Type]],
+        returns: list[Cmt2Type],
+        interval: int | None = None,
+    ):
+        self._parent_task = parent_task
+        # Don't call super().__init__ directly - we override _create_dataflow_op
+        self._module = parent_task._dataflow._module
+        self._name = name
+        self._arg_types = args
+        self._return_types = returns
+        self._interval = interval
+        self._op = None
+        self._body_block = None
+        self._arg_signals: dict[str, Signal] = {}
+        self._tasks: list[TaskBuilder] = []
+        self._pending_tasks: list[tuple[TaskBuilder, list[SyncToken]]] = []
+
+        # Capture Python source location
+        self._python_loc = get_python_location(depth=4)
+
+        # Create the nested dataflow op inside the parent task
+        self._create_nested_dataflow_op()
+
+    def _create_nested_dataflow_op(self):
+        """Create the MLIR nested dataflow operation inside parent task."""
+        from circt.ir import (
+            InsertionPoint,
+            StringAttr,
+            ArrayAttr,
+            Block,
+            FunctionType,
+            TypeAttr,
+            IntegerAttr,
+            IntegerType,
+            Operation,
+        )
+
+        ctx = self._module._circuit._ctx
+        mlir_loc = self._python_loc.to_mlir_location(ctx.mlir_context)
+
+        # Build function type
+        arg_mlir_types = [
+            ty.to_firrtl_type(ctx.mlir_context) for _, ty in self._arg_types
+        ]
+        ret_mlir_types = [
+            ty.to_firrtl_type(ctx.mlir_context) for ty in self._return_types
+        ]
+        func_type = FunctionType.get(arg_mlir_types, ret_mlir_types, context=ctx.mlir_context)
+
+        # Build argNames array
+        arg_name_attrs = [StringAttr.get(name, context=ctx.mlir_context) for name, _ in self._arg_types]
+
+        # Build attributes
+        attrs = {
+            "sym_name": StringAttr.get(self.name, context=ctx.mlir_context),
+            "function_type": TypeAttr.get(func_type, context=ctx.mlir_context),
+            "argNames": ArrayAttr.get(arg_name_attrs, context=ctx.mlir_context),
+        }
+
+        # Add interval attribute if specified
+        if self._interval is not None:
+            attrs["interval"] = IntegerAttr.get(
+                IntegerType.get_signless(64, context=ctx.mlir_context), self._interval
+            )
+
+        # Create inside the parent task's block (not module body!)
+        with InsertionPoint(self._parent_task._block):
+            self._op = Operation.create(
+                "cmt2.proc.dataflow",
+                results=[],
+                operands=[],
+                attributes=attrs,
+                regions=1,  # Single body region
+                loc=mlir_loc,
+            )
+
+            # Create body block with arguments
+            arg_locs = [mlir_loc] * len(arg_mlir_types)
+            self._body_block = Block.create_at_start(
+                self._op.regions[0], arg_mlir_types, arg_locs
+            )
+
+            # Create signals for arguments (accessible via nested_df.argname)
+            from .builders import RegionBuilder
+
+            dummy_builder = RegionBuilder(self._body_block, mlir_loc, ctx)
+            for i, (arg_name, arg_ty) in enumerate(self._arg_types):
+                sig = Signal(self._body_block.arguments[i], arg_ty, dummy_builder)
+                self._arg_signals[arg_name] = sig
+
+    @property
+    def name(self) -> str:
+        """Get the nested dataflow name."""
+        if self._name is None:
+            from .circuit import _get_assignment_target
+
+            jit_name = _get_assignment_target(depth=6)
+            if jit_name:
+                self._name = jit_name
+            else:
+                self._name = f"nested_dataflow_{id(self):x}"
+        return self._name
+
+
 # Convenience function for creating dataflow with pipeline semantics
 def pipeline_dataflow(
     module: ModuleBuilder,
@@ -836,5 +1012,27 @@ def pipeline_dataflow(
         name,
         args=[("input", data_type)],
         returns=[data_type],
+        interval=interval,
+    )
+
+
+# Factory function for creating nested dataflows (avoids forward reference issues)
+def _create_nested_dataflow(
+    parent_task: TaskBuilder,
+    name: str | None,
+    args: list[tuple[str, Cmt2Type]],
+    returns: list[Cmt2Type],
+    interval: int | None = None,
+) -> NestedDataflowBuilder:
+    """Create a NestedDataflowBuilder instance.
+
+    This factory function is called from TaskBuilder.dataflow() to avoid
+    forward reference issues (TaskBuilder is defined before NestedDataflowBuilder).
+    """
+    return NestedDataflowBuilder(
+        parent_task=parent_task,
+        name=name,
+        args=args,
+        returns=returns,
         interval=interval,
     )

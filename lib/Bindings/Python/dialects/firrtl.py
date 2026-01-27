@@ -46,7 +46,10 @@ class ConstantOp:
 
 
 class _BinaryPrimOp:
-    """Base class for binary primitive operations."""
+    """Base class for binary primitive operations.
+
+    For bitwise operations (and, or, xor), the result width is max(w1, w2).
+    """
 
     OP_NAME = None
 
@@ -58,11 +61,16 @@ class _BinaryPrimOp:
 
         from ..ir import Operation
 
-        # Result type is typically derived from operand types
-        # For simplicity, use lhs type (this may need adjustment)
+        # Result type is max(lhs_width, rhs_width) for bitwise ops
+        ctx = lhs.type.context
+        lhs_width = _get_uint_width(lhs.type)
+        rhs_width = _get_uint_width(rhs.type)
+        result_width = max(lhs_width, rhs_width)
+        result_type = UIntType.get(ctx, result_width)
+
         self.op = Operation.create(
             self.OP_NAME,
-            results=[lhs.type],
+            results=[result_type],
             operands=[lhs, rhs],
             loc=loc,
             ip=ip,
@@ -338,14 +346,69 @@ class ShrPrimOp:
         return self.op.result
 
 
-class DShlPrimOp(_BinaryPrimOp):
-    """Dynamic shift left."""
+class DShlPrimOp:
+    """Dynamic shift left.
+
+    Result width is lhs_width + 2^rhs_width - 1.
+    For example, dshl(uint<32>, uint<5>) -> uint<63> (32 + 31 = 63).
+    """
     OP_NAME = "firrtl.dshl"
 
+    def __init__(self, lhs, rhs, *, loc=None, ip=None):
+        if loc is None:
+            loc = Location.unknown()
+        if ip is None:
+            ip = InsertionPoint.current
 
-class DShrPrimOp(_BinaryPrimOp):
-    """Dynamic shift right."""
+        from ..ir import Operation
+
+        # For dshl, result width = lhs_width + 2^rhs_width - 1
+        ctx = lhs.type.context
+        lhs_width = _get_uint_width(lhs.type)
+        rhs_width = _get_uint_width(rhs.type)
+        result_width = lhs_width + (2 ** rhs_width - 1)
+        result_type = UIntType.get(ctx, result_width)
+
+        self.op = Operation.create(
+            self.OP_NAME,
+            results=[result_type],
+            operands=[lhs, rhs],
+            loc=loc,
+            ip=ip,
+        )
+
+    @property
+    def result(self):
+        return self.op.result
+
+
+class DShrPrimOp:
+    """Dynamic shift right.
+
+    Result width stays the same as lhs (bits shifted out are discarded).
+    """
     OP_NAME = "firrtl.dshr"
+
+    def __init__(self, lhs, rhs, *, loc=None, ip=None):
+        if loc is None:
+            loc = Location.unknown()
+        if ip is None:
+            ip = InsertionPoint.current
+
+        from ..ir import Operation
+
+        # For dshr, result width = lhs_width (same as input)
+        self.op = Operation.create(
+            self.OP_NAME,
+            results=[lhs.type],
+            operands=[lhs, rhs],
+            loc=loc,
+            ip=ip,
+        )
+
+    @property
+    def result(self):
+        return self.op.result
 
 
 class BitsPrimOp:

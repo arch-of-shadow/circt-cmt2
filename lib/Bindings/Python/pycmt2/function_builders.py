@@ -99,6 +99,7 @@ class BodyBuilder(RegionBuilder):
         ctx,
         args: list[tuple[str, Signal]] | None = None,
         return_types: list[Cmt2Type] | None = None,
+        use_yield: bool = False,
     ):
         super().__init__(block, loc, ctx)
         self._parent = parent
@@ -106,6 +107,7 @@ class BodyBuilder(RegionBuilder):
         self._return_types = return_types or []
         self._results: list[Signal] = []
         self._has_return = False
+        self._use_yield = use_yield  # If True, emit cmt2.yield instead of cmt2.return
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         # Ensure body block has a return even if empty (for rules)
@@ -155,12 +157,17 @@ class BodyBuilder(RegionBuilder):
         self._emit_body_return(*converted_values)
 
     def _emit_body_return(self, *values: Signal):
-        """Emit the return operation for the body."""
+        """Emit the return/yield operation for the body."""
         from circt.ir import InsertionPoint
         from circt.dialects import cmt2
 
         with InsertionPoint(self._block):
-            cmt2.ReturnOp([v.value for v in values], loc=self._loc)
+            if self._use_yield:
+                # Inside cmt2.if regions, use cmt2.yield
+                cmt2.YieldOp([v.value for v in values], loc=self._loc)
+            else:
+                # Inside rule/method/value bodies, use cmt2.return
+                cmt2.ReturnOp([v.value for v in values], loc=self._loc)
 
     @contextmanager
     def if_(self, condition: Signal) -> Iterator[IfBuilder]:
@@ -210,11 +217,13 @@ class IfBuilder:
 
         # Create then block
         then_block = Block.create_at_start(self._op.thenRegion)
+        # Use use_yield=True because cmt2.if regions require cmt2.yield, not cmt2.return
         self._then_builder = BodyBuilder(
             self._parent._parent,
             then_block,
             self._parent._loc,
             self._parent._ctx,
+            use_yield=True,
         )
         with self._then_builder as b:
             yield b
@@ -229,11 +238,13 @@ class IfBuilder:
 
         # Create else block
         else_block = Block.create_at_start(self._op.elseRegion)
+        # Use use_yield=True because cmt2.if regions require cmt2.yield, not cmt2.return
         self._else_builder = BodyBuilder(
             self._parent._parent,
             else_block,
             self._parent._loc,
             self._parent._ctx,
+            use_yield=True,
         )
         with self._else_builder as b:
             yield b
