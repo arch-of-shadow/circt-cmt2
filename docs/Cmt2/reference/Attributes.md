@@ -1,0 +1,347 @@
+# CMT2 Attributes Reference
+
+Complete reference for CMT2 timing and scheduling attributes.
+
+---
+
+## Timing Attributes
+
+### TimingIntervalAttr
+
+Half-open cycle interval `[start, end)`.
+
+```mlir
+#cmt2.timing<[0, 4]>   // Cycles 0, 1, 2, 3
+#cmt2.timing<[2, 5]>   // Cycles 2, 3, 4
+```
+
+**Usage:** Specifies when arguments are driven or results are captured.
+
+```mlir
+cmt2.call @mem @read(%addr) {
+    arg_timing = [#cmt2.timing<[0, 1]>],     // Drive addr at cycle 0
+    result_timing = [#cmt2.timing<[2, 3]>]   // Capture result at cycle 2
+} : ...
+```
+
+---
+
+### LatencyAttr
+
+Port latency in cycles.
+
+```mlir
+#cmt2.latency<2>   // Available at cycle 2
+#cmt2.latency<0>   // Available immediately
+```
+
+**Usage:** Specifies when a port is available/required.
+
+---
+
+### IntervalAttr
+
+Initiation interval for pipelining.
+
+```mlir
+#cmt2.interval<1>   // Can accept new input every cycle
+#cmt2.interval<2>   // Can accept new input every 2 cycles
+```
+
+**Usage:** On methods and static steps for pipelined execution.
+
+```mlir
+cmt2.bind.method @multiply static<8> : ... {
+    interval = #cmt2.interval<2>   // 8-cycle latency, II=2
+}
+
+cmt2.proc.static_step @pipelined<8> {
+    ...
+} {interval = #cmt2.interval<2>}
+```
+
+---
+
+### PortTimingAttr
+
+Port timing combining kind with optional latency.
+
+```mlir
+#cmt2.port<Data>           // Data port (no latency)
+#cmt2.port<Data, 2>        // Data port available at cycle 2
+#cmt2.port<Go>             // Go signal
+#cmt2.port<Done, 4>        // Done signal at cycle 4
+#cmt2.port<Stable>         // Stable signal
+```
+
+**Port Kinds:**
+| Kind | Description |
+|------|-------------|
+| `Data` | Regular data port |
+| `Go` | Start/enable signal |
+| `Done` | Completion signal |
+| `Stable` | Signal that remains stable |
+
+---
+
+## Array Attributes
+
+### TimingArrayAttr
+
+Array of timing intervals.
+
+```mlir
+arg_timing = [#cmt2.timing<[0, 1]>, #cmt2.timing<[0, 1]>]
+result_timing = [#cmt2.timing<[4, 5]>]
+```
+
+### PortTimingArrayAttr
+
+Array of port timing attributes.
+
+```mlir
+arg_port_timing = [#cmt2.port<Data, 0>, #cmt2.port<Data, 0>]
+result_port_timing = [#cmt2.port<Data, 4>]
+```
+
+### LatencyArrayAttr
+
+Array of latency attributes.
+
+```mlir
+latencies = [#cmt2.latency<2>, #cmt2.latency<3>]
+```
+
+---
+
+## Method Attributes
+
+### static_latency
+
+Total latency in cycles for static methods.
+
+```mlir
+cmt2.method @compute (...) -> (...) attributes {
+    static_latency = 4 : i64
+} { ... }
+```
+
+**PyCMT2:**
+```python
+with m.method("compute", ..., static_latency=4) as meth:
+    ...
+```
+
+### interval
+
+Initiation interval for pipelined methods.
+
+```mlir
+cmt2.method @pipelined (...) -> (...) attributes {
+    static_latency = 8 : i64,
+    interval = #cmt2.interval<2>
+} { ... }
+```
+
+**PyCMT2:**
+```python
+with m.method("pipelined", ..., static_latency=8, interval=2) as meth:
+    ...
+```
+
+---
+
+## Call Attributes
+
+### arg_timing
+
+Timing intervals for call arguments.
+
+```mlir
+cmt2.call @inst @method(%a, %b) {
+    arg_timing = [#cmt2.timing<[0, 1]>, #cmt2.timing<[0, 2]>]
+} : ...
+```
+
+Specifies when each argument is driven relative to the enclosing static step.
+
+### result_timing
+
+Timing intervals for call results.
+
+```mlir
+cmt2.call @inst @method(%a) {
+    result_timing = [#cmt2.timing<[3, 4]>]
+} : ...
+```
+
+Specifies when each result is captured relative to the enclosing static step.
+
+---
+
+## Bind Method Attributes
+
+### static\<N\> syntax
+
+Static latency on bound methods.
+
+```mlir
+cmt2.bind.method @multiply static<4> : (!firrtl.uint<32>, !firrtl.uint<32>) -> !firrtl.uint<64>[
+    enable = "mult_en",
+    ready = "mult_ready",
+    arguments = ["a", "b"],
+    results = ["product"]
+]
+```
+
+### arg_port_timing / result_port_timing
+
+Per-port timing for external method bindings.
+
+```mlir
+cmt2.bind.method @read static<2> : (!firrtl.uint<8>) -> !firrtl.uint<32>[
+    ...
+] {
+    arg_port_timing = [#cmt2.port<Data, 0>],
+    result_port_timing = [#cmt2.port<Data, 2>]
+}
+```
+
+---
+
+## Scheduling Attributes
+
+### sequenceBefore
+
+Method A must execute before method B.
+
+```mlir
+cmt2.module.extern.firrtl @Reg32 : ... {
+    ...
+} {sequenceBefore = [["read", "write"]]}
+```
+
+**PyCMT2:**
+```python
+reg.sequence_before("read", "write")
+```
+
+### conflict
+
+Methods cannot execute in same cycle.
+
+```mlir
+{conflict = [["enqueue", "dequeue"]]}
+```
+
+**PyCMT2:**
+```python
+fifo.conflict("enqueue", "dequeue")
+```
+
+### conflictFree
+
+Methods can execute in any order or concurrently.
+
+```mlir
+{conflictFree = [["is_empty", "is_full"]]}
+```
+
+**PyCMT2:**
+```python
+fifo.conflict_free("is_empty", "is_full")
+```
+
+---
+
+## Static Step Attributes
+
+### latency
+
+Inherent in the operation syntax.
+
+```mlir
+cmt2.proc.static_step @compute<4> { ... }
+//                           ^^^^ latency = 4
+```
+
+### interval
+
+Optional initiation interval.
+
+```mlir
+cmt2.proc.static_step @pipelined<8> {
+    ...
+} {interval = #cmt2.interval<2>}
+```
+
+---
+
+## FSM Attributes (Generated)
+
+These attributes are generated by compilation passes:
+
+### fsm_states
+
+Number of FSM states.
+
+```mlir
+{fsm_states = 4 : i64}
+```
+
+### fsm_bitwidth
+
+FSM register bit width.
+
+```mlir
+{fsm_bitwidth = 2 : i64}  // Binary: log2(4) = 2
+{fsm_bitwidth = 4 : i64}  // One-hot: 4 bits for 4 states
+```
+
+### fsm_encoding
+
+FSM encoding scheme.
+
+```mlir
+{fsm_encoding = "binary"}
+{fsm_encoding = "one_hot"}
+```
+
+### fsm_done_expr / fsm_next_expr / fsm_init_expr
+
+FSM expressions for hardware generation.
+
+```mlir
+{
+    fsm_done_expr = "fsm >= 3",
+    fsm_next_expr = "fsm + 1",
+    fsm_init_expr = "0"
+}
+```
+
+### static_compiled / wrapper_generated
+
+Marker attributes indicating compilation status.
+
+```mlir
+{static_compiled}
+{wrapper_generated}
+```
+
+---
+
+## Summary Table
+
+| Attribute | Type | Description |
+|-----------|------|-------------|
+| `#cmt2.timing<[s,e]>` | TimingIntervalAttr | Cycle interval [start, end) |
+| `#cmt2.latency<n>` | LatencyAttr | Port latency |
+| `#cmt2.interval<n>` | IntervalAttr | Initiation interval |
+| `#cmt2.port<kind, lat?>` | PortTimingAttr | Port kind with latency |
+| `static_latency` | I64Attr | Method total latency |
+| `interval` | IntervalAttr | Method/step II |
+| `arg_timing` | TimingArrayAttr | Call argument timing |
+| `result_timing` | TimingArrayAttr | Call result timing |
+| `sequenceBefore` | ArrayAttr | Ordering constraints |
+| `conflict` | ArrayAttr | Mutual exclusion |
+| `conflictFree` | ArrayAttr | No conflict |
