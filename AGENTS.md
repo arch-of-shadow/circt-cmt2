@@ -1,15 +1,20 @@
-# CLAUDE.md
+# AGENTS.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to OpenAI Codex (Codex CLI) when working with code in this repository.
 
 ## Before Starting Any Task
 
 **IMPORTANT**: When working on implementation tasks:
 1. **Read the docs first** - Start at `docs/Cmt2/_index.md` and the relevant `docs/Cmt2/features/*` page for the work area
-2. **Follow the skill workflow** - See `.claude/skills/mlir-ops-passes/SKILL.md` for the standard workflow when adding/modifying MLIR ops, attributes, or passes
+2. **Follow the skill workflow** - See `.codex/skills/mlir-ops-passes/SKILL.md` for the standard workflow when adding/modifying MLIR ops, attributes, or passes
 3. **Update tracking after completion** - Mark tasks as completed and document changes in the tracker
 
+## Repo Skills (Codex)
 
+Skills are stored under `.codex/skills/`:
+- `mlir-ops-passes` - Standard workflow for adding MLIR ops/attrs/passes: `.codex/skills/mlir-ops-passes/SKILL.md`
+- `cmt2-e2e-sim` - End-to-end simulation using PyCMT2: `.codex/skills/cmt2-e2e-sim/SKILL.md`
+- `codex` - Using `codex exec` for analysis/review tasks: `.codex/skills/codex/SKILL.md`
 
 ## Codex CLI for Code Analysis
 
@@ -62,7 +67,7 @@ codex exec resume --last "Continue the analysis"
 | `-m, --model` | Override model (e.g., `gpt-5-codex`) |
 | `-s, --sandbox` | `read-only`, `workspace-write`, `danger-full-access` |
 | `-a, --ask-for-approval` | `untrusted`, `on-failure`, `on-request`, `never` |
-| `--full-auto` | Low-friction mode (workspace-write + on-request) |
+| `--full-auto` | Low-friction mode (workspace-write + on-request approvals) |
 | `--search` | Enable web search tool |
 | `-C, --cd` | Set working directory |
 | `--json` | Output newline-delimited JSON events |
@@ -246,7 +251,7 @@ Located in `lib/Bindings/Python/`. Build with `-DCIRCT_BINDINGS_PYTHON_ENABLED=O
 
 ### Adding New Operations / Attributes / Passes
 
-**IMPORTANT**: See `.claude/skills/mlir-ops-passes/SKILL.md` for the complete workflow.
+**IMPORTANT**: See `.codex/skills/mlir-ops-passes/SKILL.md` for the complete workflow.
 
 Quick checklist:
 1. Edit TableGen definitions (`.td` files)
