@@ -175,6 +175,6 @@ The interface mechanism can be extended for:
 
 ## References
 
-- [Cmt2 ECMT2 Documentation](../../../docs/Dialects/Cmt2/ecmt2-EDSL.md)
+- [Cmt2 ECMT2 Documentation](../../../docs/Cmt2/guides/ECMT2-Guide.md)
 - [Hello Example](hello_example.cpp) - Basic interface usage
-- [Cmt2 Rationale](../../../docs/Dialects/Cmt2/RationaleCmt2.md) - Design philosophy
+- [Cmt2 Concepts](../../../docs/Cmt2/features/Concepts.md) - User-facing semantics
