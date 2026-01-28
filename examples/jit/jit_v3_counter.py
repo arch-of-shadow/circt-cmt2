@@ -3,12 +3,13 @@
 #  See https://llvm.org/LICENSE.txt for license information.
 #  SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-"""JIT v3 Counter Example - Zero-Boilerplate API.
+"""JIT v3 Counter Example - Clean API with clear guard/body separation.
 
-This demonstrates the new clean API with:
+This demonstrates the improved v3 API:
+- Clear guard/body separation with `with r.guard:` and `with r.body:`
+- No `def _:` boilerplate
 - Auto-inferred rule names
 - Attribute-based method calls (no strings!)
-- Minimal boilerplate
 
 Usage:
     PYTHONPATH=tools/circt/python_packages/circt_core:../python \
@@ -26,9 +27,9 @@ import cmt2.jit_v3 as jit
 
 @jit.elaborate
 def counter_v3(width: int = 32, use_enable: bool = True):
-    """Counter using JIT v3 zero-boilerplate API.
+    """Counter using JIT v3 clean API.
     
-    Compare to v1 and v2 - this is much cleaner!
+    Clear guard/body separation without boilerplate!
     """
     circuit = Circuit("CounterV3")
     
@@ -45,28 +46,33 @@ def counter_v3(width: int = 32, use_enable: bool = True):
         
         # Rule name inferred from function: "increment"
         @jit.rule(m)
-        def increment(guard, body):
-            # Guard region
-            if use_enable:
-                guard.equals(enable, body.const(1, 1))
-            else:
-                guard.always()
+        def increment(r):
+            with r.guard:
+                if use_enable:
+                    r.equals(enable, r.const(1, 1))
+                else:
+                    r.always()
             
-            # Body region - CLEAN ATTRIBUTE ACCESS!
-            # Instead of: b.call(count, "read") and b.call(count, "write", value)
-            count.next = count.read + 1  # count.next automatically calls write()
+            with r.body:
+                count.next = count.read + 1  # Clean attribute access!
         
         # Another rule - name inferred as "decrement"
         @jit.rule(m)
-        def decrement(guard, body):
-            guard.equals(body.call(count, "isZero"), body.const(0, 1))  # Can still use explicit
-            count.next = count.read - 1
+        def decrement(r):
+            with r.guard:
+                r.equals(count.read, r.const(0, width))  # Stop at 0
+            
+            with r.body:
+                count.next = count.read - 1
         
         # Value method - name inferred as "get_count"
         @jit.value(m, returns=[UInt(width)])
-        def get_count(guard, body):
-            guard.always()
-            body.returns(count.read)  # Attribute access!
+        def get_count(r):
+            with r.guard:
+                r.always()
+            
+            with r.body:
+                r.returns(count.read)  # Attribute access!
     
     return circuit
 
@@ -85,25 +91,35 @@ def fifo_v3(data_width: int = 32, depth: int = 8):
         # Create FIFO
         fifo = m.instance(FIFO.create(circuit, UInt(data_width), depth), "fifo", clk=clk, rst=rst)
         
+        # Inputs
+        data_in = m.input("data_in", UInt(data_width))
+        
         # Enqueue rule
         @jit.rule(m)
-        def do_enqueue(guard, body):
-            # Use fifo.notFull() - attribute access!
-            guard.equals(fifo.notFull, body.const(1, 1))
-            data_in = m.input("data_in", UInt(data_width))
-            fifo.enq(data_in)  # Direct method call!
+        def do_enqueue(r):
+            with r.guard:
+                r.equals(fifo.notFull, r.const(1, 1))  # Attribute access!
+            
+            with r.body:
+                fifo.enq(data_in)  # Direct method call!
         
         # Dequeue rule
         @jit.rule(m)
-        def do_dequeue(guard, body):
-            guard.equals(fifo.notEmpty, body.const(1, 1))
-            fifo.deq()  # Direct method call - no strings!
+        def do_dequeue(r):
+            with r.guard:
+                r.equals(fifo.notEmpty, r.const(1, 1))
+            
+            with r.body:
+                fifo.deq()  # Direct method call - no strings!
         
-        # Status method
-        @jit.value(m, name="get_count", returns=[UInt(32)])  # Explicit name override
-        def status(guard, body):
-            guard.always()
-            body.returns(fifo.count)  # Attribute access to count method
+        # Status method with explicit name override
+        @jit.value(m, name="get_count", returns=[UInt(32)])
+        def status(r):
+            with r.guard:
+                r.always()
+            
+            with r.body:
+                r.returns(fifo.count)  # Attribute access to count
     
     return circuit
 
@@ -111,11 +127,18 @@ def fifo_v3(data_width: int = 32, depth: int = 8):
 def main():
     """Test JIT v3 examples."""
     print("=" * 60)
-    print("JIT v3 Zero-Boilerplate Examples")
+    print("JIT v3 Clean API Examples")
     print("=" * 60)
+    print("\nKey improvements:")
+    print("  ✓ Clear guard/body separation with with r.guard / with r.body")
+    print("  ✓ No 'def _:' boilerplate")
+    print("  ✓ No string method names")
+    print("  ✓ Auto-inferred rule names")
+    print("  ✓ Attribute access: count.read, count.next =")
     
     # Test counter
-    print("\n1. Counter Example")
+    print("\n" + "-" * 40)
+    print("1. Counter Example")
     print("-" * 40)
     circuit = counter_v3(width=16, use_enable=True)
     print(f"Circuit: {circuit.name}")
@@ -125,7 +148,8 @@ def main():
     print(mlir[:1500])
     
     # Test FIFO
-    print("\n\n2. FIFO Example")
+    print("\n" + "-" * 40)
+    print("2. FIFO Example")
     print("-" * 40)
     circuit = fifo_v3(data_width=32, depth=8)
     print(f"Circuit: {circuit.name}")
@@ -134,12 +158,6 @@ def main():
     print("\n" + "=" * 60)
     print("JIT v3 Examples Complete!")
     print("=" * 60)
-    print("\nKey improvements:")
-    print("  ✓ No 'def _' boilerplate")
-    print("  ✓ No string method names")
-    print("  ✓ Auto-inferred rule names")
-    print("  ✓ Attribute access: count.read, count.write(), count.next =")
-    print("  ✓ Direct method calls: fifo.enq(), fifo.deq()")
 
 
 if __name__ == "__main__":

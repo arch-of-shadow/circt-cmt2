@@ -1,16 +1,62 @@
-# CMT2 JIT v3 - Zero-Boilerplate API
+# JIT v3: Clean API with Clear Guard/Body Separation
 
-## Overview
+JIT v3 provides a Pythonic API for hardware design that balances clarity and conciseness.
 
-JIT v3 is the **recommended** API for CMT2 hardware design. It provides:
+## Design Principles
 
-- ✅ **Zero duplication** - Uses native PyCMT2 Circuit
-- ✅ **Zero boilerplate** - No `def _` tokens
-- ✅ **No strings** - Attribute-based method calls
-- ✅ **Auto-inferred names** - From function definitions
-- ✅ **Clean syntax** - Pythonic hardware design
+1. **Clear guard/body separation**: Use `with r.guard:` and `with r.body:`
+2. **No boilerplate**: No `def _:` nesting required
+3. **Auto-inferred names**: Rule/method names from function definitions
+4. **No string methods**: Attribute-based access (`count.read` not `b.call(count, "read")`)
 
-## Quick Start
+## API Overview
+
+### Module Context
+
+```python
+with jit.module(circuit, "Counter") as m:
+    clk = m.clock()
+    rst = m.reset()
+    count = m.instance(Reg.create(circuit, width), "count", clk=clk, rst=rst)
+```
+
+### Rules
+
+```python
+@jit.rule(m)  # Name: "increment" (auto-inferred)
+def increment(r):
+    with r.guard:
+        r.always()
+    
+    with r.body:
+        count.next = count.read + 1
+```
+
+### Value Methods
+
+```python
+@jit.value(m, returns=[UInt(32)])  # Name: "get_count"
+def get_count(r):
+    with r.guard:
+        r.always()
+    
+    with r.body:
+        r.returns(count.read)
+```
+
+### Action Methods
+
+```python
+@jit.method(m, args=[("data", UInt(32))])  # Name: "write"
+def write(r, data):
+    with r.guard:
+        r.always()
+    
+    with r.body:
+        reg.write(data)
+```
+
+## Complete Example
 
 ```python
 import cmt2.jit_v3 as jit
@@ -26,190 +72,96 @@ def counter(width: int = 32):
         rst = m.reset()
         count = m.instance(Reg.create(circuit, width), "count", clk=clk, rst=rst)
         
-        # Rule name auto-inferred as "increment"
         @jit.rule(m)
-        def increment(guard, body):
-            guard.always()
-            count.next = count.read + 1  # Clean attribute access!
+        def increment(r):
+            with r.guard:
+                r.always()
+            
+            with r.body:
+                count.next = count.read + 1
+        
+        @jit.value(m, returns=[UInt(width)])
+        def get_count(r):
+            with r.guard:
+                r.always()
+            
+            with r.body:
+                r.returns(count.read)
     
     return circuit
-
-# Run it
-circuit = counter(width=16)
-print(circuit.emit_mlir())
 ```
 
-## Key Features
+## Comparison with v2
 
-### 1. Auto-Inferred Names
-
+### v2 (Old)
 ```python
-@jit.rule(m)  # Name is "increment" (from function name)
-def increment(guard, body):
-    ...
-
-@jit.rule(m, name="custom")  # Explicit override
-def my_rule(guard, body):
-    ...
+@jit.rule(m, "increment")  # String name
+def _(rule):               # def _ boilerplate
+    @rule.guard
+    def _(g):              # def _ boilerplate
+        g.always()
+    @rule.body
+    def _(b):              # def _ boilerplate
+        val = b.call(count, "read")  # String!
+        b.call(count, "write", val + 1)  # String!
 ```
 
-### 2. Attribute-Based Method Calls
+### v3 (New)
+```python
+@jit.rule(m)  # Name inferred
+def increment(r):
+    with r.guard:
+        r.always()
+    
+    with r.body:
+        count.next = count.read + 1  # Attribute access
+```
+
+## Method Reference System
+
+Instances are automatically wrapped with `SignalRef` to enable attribute access:
 
 ```python
-# Old way (strings)
-b.call(count, "read")
-b.call(count, "write", value)
-b.call(fifo, "enq", data)
+count = m.instance(Reg.create(circuit, width), "count", ...)
 
-# New way (attributes)
+# These all work:
 count.read           # Read method
 count.write(value)   # Write method
 count.next = value   # Shortcut for write
-fifo.enq(data)       # Direct method call
-fifo.deq()           # Direct method call
-fifo.notFull         # Status method
 ```
 
-### 3. Clean Rule Definition
+## Name Inference
+
+Names are automatically inferred from function definitions:
 
 ```python
 @jit.rule(m)
-def increment(guard, body):
-    guard.always()
-    count.next = count.read + 1
+def increment(r): ...  # Name: "increment"
+
+@jit.rule(m, name="custom_name")  # Override
+def my_rule(r): ...  # Name: "custom_name"
 ```
 
-Instead of:
-```python
-@jit.rule(m, "increment")
-def _(rule):
-    @rule.guard
-    def _(g): g.always()
-    @rule.body
-    def _(b):
-        val = b.call(count, "read")
-        b.call(count, "write", b.add(val, b.const(1, 32)))
-```
+## Available Operations
 
-## API Reference
+### Guard Operations (inside `with r.guard:`)
+- `r.always()` - Guard always fires
+- `r.equals(a, b)` - Guard: a == b
+- `r.const(value, width)` - Create constant
 
-### Core Decorators
+### Body Operations (inside `with r.body:`)
+- `count.next = value` - Write to register
+- `count.read` - Read from register
+- `r.returns(value)` - Return value from method
+- `r.const(value, width)` - Create constant
 
-- `@jit.elaborate` - Circuit elaboration
-- `@jit.simulate` - Simulation runner
-- `@jit.rule(module)` - Rule definition (auto-named)
-- `@jit.method(module, args, returns)` - Action method
-- `@jit.value(module, returns)` - Value method
+## Why This Design?
 
-### Module Context
+The v3 API addresses the key issues:
 
-- `with jit.module(circuit, name) as m` - Module definition
-
-### Instance Creation
-
-- `m.instance(module, name, **kwargs)` - Creates instance wrapped with SignalRef
-
-### Method Access
-
-All instances support attribute-based method access:
-
-- `instance.read` - Read method reference
-- `instance.write(value)` - Write method call
-- `instance.next = value` - Write shortcut
-- `instance.enq(data)` - Enqueue (for FIFOs)
-- `instance.deq()` - Dequeue (for FIFOs)
-- `instance.notFull` - Status check
-- `instance.notEmpty` - Status check
-
-## Examples
-
-### Counter with Enable
-
-```python
-@jit.elaborate
-def counter(width: int = 32):
-    circuit = Circuit("Counter")
-    
-    with jit.module(circuit, "Counter") as m:
-        clk = m.clock()
-        rst = m.reset()
-        count = m.instance(Reg.create(circuit, width), "count", clk=clk, rst=rst)
-        enable = m.input("enable", UInt(1))
-        
-        @jit.rule(m)
-        def increment(guard, body):
-            guard.equals(enable, body.const(1, 1))
-            count.next = count.read + 1
-        
-        @jit.value(m, returns=[UInt(width)])
-        def get_count(guard, body):
-            guard.always()
-            body.returns(count.read)
-    
-    return circuit
-```
-
-### FIFO
-
-```python
-@jit.elaborate
-def fifo(data_width: int = 32, depth: int = 8):
-    from circt.pycmt2.stl import FIFO
-    
-    circuit = Circuit("FIFO")
-    
-    with jit.module(circuit, "FIFO") as m:
-        clk = m.clock()
-        rst = m.reset()
-        fifo = m.instance(FIFO.create(circuit, UInt(data_width), depth), "fifo", clk=clk, rst=rst)
-        
-        @jit.rule(m)
-        def do_enqueue(guard, body):
-            guard.equals(fifo.notFull, body.const(1, 1))
-            data_in = m.input("data_in", UInt(data_width))
-            fifo.enq(data_in)
-        
-        @jit.rule(m)
-        def do_dequeue(guard, body):
-            guard.equals(fifo.notEmpty, body.const(1, 1))
-            fifo.deq()
-        
-        @jit.value(m, returns=[UInt(32)])
-        def get_count(guard, body):
-            guard.always()
-            body.returns(fifo.count)
-    
-    return circuit
-```
-
-## Comparison with Previous Versions
-
-| Aspect | JIT v1 | JIT v2 | JIT v3 |
-|--------|--------|--------|--------|
-| Duplication | High | Zero | Zero |
-| Boilerplate | Very High | Medium | Minimal |
-| Strings | Required | Required | ❌ None |
-| Names | Manual | Manual | Auto-inferred |
-| Read | `b.call(c, "read")` | `b.call(c, "read")` | `c.read` |
-| Write | `b.call(c, "write", v)` | `b.call(c, "write", v)` | `c.next = v` |
-
-## Migration
-
-### From v1/v2 to v3
-
-1. Replace `CircuitBuilder` with native `Circuit`
-2. Replace nested `with` or `@module` with `with jit.module()`
-3. Remove explicit rule names (auto-inferred)
-4. Replace `b.call(obj, "method")` with `obj.method()`
-5. Use `obj.next = value` for writes
-
-## Files
-
-- `__init__.py` - Module exports
-- `_method_ref.py` - Method reference system for attribute access
-- `_ast_decorators.py` - AST-based decorators with auto-inference
-- `_module.py` - Module context manager with SignalRef wrapping
-
-## Status
-
-✅ **STABLE** - Recommended for new designs
+1. **v2 had too much boilerplate**: 3 levels of `def _:` nesting
+2. **v3-mixed was unclear**: Guard/body operations mixed together
+3. **v3-clean (this) balances both**:
+   - Clear separation with `with r.guard:` / `with r.body:`
+   - No `def _:` boilerplate
+   - Intuitive and Pythonic

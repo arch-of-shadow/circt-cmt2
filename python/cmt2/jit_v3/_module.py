@@ -2,112 +2,105 @@
 #  See https://llvm.org/LICENSE.txt for license information.
 #  SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-"""Module context manager for clean syntax.
+"""Module context manager for JIT v3.
 
-Provides a context manager for module definition that enables
-automatic wrapping of instances with SignalRef.
+Provides a clean context manager for building modules with automatic
+instance wrapping for attribute-based method access.
+
+Example:
+    with jit.module(circuit, "Counter") as m:
+        clk = m.clock()
+        count = m.instance(Reg.create(circuit, width), "count", clk=clk)
 """
 
 from __future__ import annotations
 
-from typing import Any, Iterator
-from contextlib import contextmanager
+from typing import Any
 
 from ._method_ref import wrap_instance
 
 
 class ModuleContext:
-    """Context for building a module with automatic SignalRef wrapping.
+    """Context manager for building a module.
     
-    This wraps a PyCMT2 ModuleBuilder and automatically wraps instances
-    with SignalRef when created.
+    Wraps PyCMT2's module builder and automatically wraps instances
+    with SignalRef for attribute-based method access.
     
     Example:
-        with jit.module(circuit, "Counter") as m:
-            count = m.instance(Reg.create(circuit, 32), "count", ...)
-            # count is automatically wrapped as SignalRef
-            count.next = count.read + 1  # Clean syntax!
+        with ModuleContext(circuit, "Counter") as m:
+            clk = m.clock()
+            count = m.instance(Reg.create(circuit, width), "count", clk=clk)
+            # count is automatically wrapped - can use count.read, count.write()
     """
     
     def __init__(self, circuit: Any, name: str):
-        """Initialize module context.
-        
-        Args:
-            circuit: PyCMT2 Circuit
-            name: Module name
-        """
         self._circuit = circuit
         self._name = name
-        self._module_builder = None
+        self._module_builder: Any = None
     
     def __enter__(self) -> "ModuleContext":
-        """Enter the module context.
-        
-        Returns:
-            Self for attribute access
-        """
-        self._context = self._circuit.module(self._name)
-        self._module_builder = self._context.__enter__()
+        self._cm = self._circuit.module(self._name)
+        self._module_builder = self._cm.__enter__()
         return self
     
-    def __exit__(self, exc_type, exc_val, exc_tb) -> bool:
-        """Exit the module context."""
-        return self._context.__exit__(exc_type, exc_val, exc_tb)
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        return self._cm.__exit__(exc_type, exc_val, exc_tb)
     
-    def __getattr__(self, name: str) -> Any:
-        """Get attribute from underlying module builder."""
-        return getattr(self._module_builder, name)
+    def clock(self) -> Any:
+        """Create a clock input."""
+        return self._module_builder.clock()
     
-    def instance(self, module: Any, name: str, **kwargs) -> Any:
-        """Create an instance and wrap it with SignalRef.
+    def reset(self) -> Any:
+        """Create a reset input."""
+        return self._module_builder.reset()
+    
+    def input(self, name: str, type_: Any) -> Any:
+        """Create an input port."""
+        return self._module_builder.input(name, type_)
+    
+    def output(self, name: str, type_: Any) -> Any:
+        """Create an output port."""
+        return self._module_builder.output(name, type_)
+    
+    def instance(self, module_def: Any, name: str, **connections: Any) -> Any:
+        """Create a module instance with automatic SignalRef wrapping.
+        
+        The returned instance is wrapped with SignalRef to enable
+        attribute-based method access like:
+            count.read, count.write(value), count.next = value
         
         Args:
-            module: Module to instantiate
+            module_def: Module definition to instantiate
             name: Instance name
-            **kwargs: Additional arguments (clk, rst, etc.)
+            **connections: Port connections
             
         Returns:
-            SignalRef wrapping the instance
+            Wrapped instance with SignalRef
         """
-        raw_instance = self._module_builder.instance(module, name, **kwargs)
-        return wrap_instance(raw_instance)
+        inst = self._module_builder.instance(module_def, name, **connections)
+        return wrap_instance(inst)
     
-    def clock(self, name: str = "clk") -> Any:
-        """Create a clock port."""
-        return self._module_builder.clock(name)
-    
-    def reset(self, name: str = "rst") -> Any:
-        """Create a reset port."""
-        return self._module_builder.reset(name)
-    
-    def input(self, name: str, dtype: Any) -> Any:
-        """Create an input port."""
-        return self._module_builder.input(name, dtype)
-    
-    def output(self, name: str, dtype: Any) -> Any:
-        """Create an output port."""
-        return self._module_builder.output(name, dtype)
+    @property
+    def builder(self) -> Any:
+        """Access the underlying PyCMT2 module builder."""
+        return self._module_builder
 
 
-@contextmanager
-def module(circuit: Any, name: str) -> Iterator[ModuleContext]:
-    """Context manager for module definition.
+def module(circuit: Any, name: str) -> ModuleContext:
+    """Create a module context manager.
+    
+    This is a factory function that creates a ModuleContext.
     
     Example:
         with jit.module(circuit, "Counter") as m:
             clk = m.clock()
-            rst = m.reset()
-            count = m.instance(Reg.create(circuit, 32), "count", clk=clk, rst=rst)
+            count = m.instance(Reg.create(circuit, width), "count", clk=clk)
     
     Args:
-        circuit: PyCMT2 Circuit
+        circuit: PyCMT2 Circuit object
         name: Module name
         
-    Yields:
-        ModuleContext for building the module
+    Returns:
+        ModuleContext instance
     """
-    ctx = ModuleContext(circuit, name)
-    try:
-        yield ctx.__enter__()
-    finally:
-        ctx.__exit__(None, None, None)
+    return ModuleContext(circuit, name)
