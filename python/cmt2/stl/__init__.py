@@ -2,92 +2,53 @@
 #  See https://llvm.org/LICENSE.txt for license information.
 #  SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-"""CMT2 Standard Template Library (STL).
+"""Cmt2 STL (PyCMT2 wrapper).
 
-This module provides standard hardware components with clock domain
-and reset support, including registers, wires, FIFOs, and memories.
+This module intentionally does *not* re-implement an STL. It re-exports PyCMT2's
+STL factories so `cmt2` stays stacked on `circt.pycmt2` without feature
+duplication.
 
-Example:
-    from cmt2 import ClockDomain
-    from cmt2.stl import Reg, RegArray
-    from cmt2.types import UInt
-    
-    # Create clock domain
-    clk_core = ClockDomain("clk_core", frequency=250.0)
-    
-    # Create register with clock domain
-    reg = Reg(
-        UInt(32),
-        init=0,
-        clock_domain=clk_core,
-        reset_type="async_low"
-    )
-    
-    # Create register array
-    regfile = RegArray(UInt(32), depth=8, clock_domain=clk_core)
+Use:
+  - `from cmt2.stl import Reg, FIFO, Memory`
+  - or directly `from circt.pycmt2.stl import ...`
 """
 
-from cmt2.stl._reg import (
-    Reg,
-    RegConfig,
-    RegArray,
-    RegError,
-    create_reg_bank,
-    check_clock_domain_match,
-)
+from __future__ import annotations
 
-from cmt2.stl._memory import (
-    Memory,
-    SRAM,
-    ROM,
-    MemoryError,
-    create_single_port_sram,
-    create_dual_port_sram,
-    create_rom,
-)
+__all__: list[str] = []
 
-__all__ = [
-    # Register components
-    "Reg",
-    "RegConfig",
-    "RegArray",
-    "RegError",
-    
-    # Memory components
-    "Memory",
-    "SRAM",
-    "ROM",
-    "MemoryError",
-    
-    # Memory factory functions
-    "create_single_port_sram",
-    "create_dual_port_sram",
-    "create_rom",
-    
-    # Register utility functions
-    "create_reg_bank",
-    "check_clock_domain_match",
-]
-
-# Try to re-export from native pycmt2 if available
 try:
-    from circt.pycmt2 import (
+    from circt.pycmt2.stl import (  # type: ignore
+        Reg,
         Wire,
         FIFO,
         FIFO1Push,
         FIFO1Pull,
         FIFO2I,
         ShiftReg,
+        Memory,
+        get_stl_rtl_files,
+        add_stl_rtl_to_workspace,
+        clear_stl_registry,
     )
-    
-    __all__.extend([
-        "Wire",
-        "FIFO",
-        "FIFO1Push",
-        "FIFO1Pull",
-        "FIFO2I",
-        "ShiftReg",
-    ])
-except ImportError:
-    # circt.pycmt2 may not be available during development
-    pass
+
+    __all__.extend(
+        [
+            "Reg",
+            "Wire",
+            "FIFO",
+            "FIFO1Push",
+            "FIFO1Pull",
+            "FIFO2I",
+            "ShiftReg",
+            "Memory",
+            "get_stl_rtl_files",
+            "add_stl_rtl_to_workspace",
+            "clear_stl_registry",
+        ]
+    )
+except ImportError as e:  # pragma: no cover
+    raise ImportError(
+        "cmt2.stl requires CIRCT Python bindings (circt.pycmt2). "
+        "Set PYTHONPATH to include circt_core."
+    ) from e
