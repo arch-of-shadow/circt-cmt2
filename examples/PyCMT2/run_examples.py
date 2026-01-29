@@ -23,10 +23,26 @@ import subprocess
 import sys
 
 
-def _default_pythonpath(script_dir: str) -> str | None:
-    build_dir = os.path.dirname(os.path.dirname(script_dir))
-    candidate = os.path.join(build_dir, "build/tools/circt/python_packages/circt_core")
+def _repo_root(script_dir: str) -> str:
+    # script_dir = <repo>/examples/PyCMT2
+    return os.path.dirname(os.path.dirname(os.path.dirname(script_dir)))
+
+
+def _default_circt_core(repo_root: str) -> str | None:
+    candidate = os.path.join(repo_root, "build/tools/circt/python_packages/circt_core")
     return candidate if os.path.isdir(candidate) else None
+
+
+def _default_repo_python(repo_root: str) -> str:
+    return os.path.join(repo_root, "python")
+
+
+def _ensure_pythonpath_contains(path: str) -> None:
+    cur = os.environ.get("PYTHONPATH", "")
+    parts = [p for p in cur.split(os.pathsep) if p]
+    if path not in parts:
+        parts.append(path)
+        os.environ["PYTHONPATH"] = os.pathsep.join(parts)
 
 
 EXAMPLES = [
@@ -80,9 +96,13 @@ def main() -> int:
 
     script_dir = os.path.dirname(os.path.abspath(__file__))
 
-    default_py_path = _default_pythonpath(script_dir)
-    if default_py_path and "PYTHONPATH" not in os.environ:
-        os.environ["PYTHONPATH"] = default_py_path
+    repo_root = _repo_root(script_dir)
+    circt_core = _default_circt_core(repo_root)
+    repo_python = _default_repo_python(repo_root)
+
+    if circt_core:
+        _ensure_pythonpath_contains(circt_core)
+    _ensure_pythonpath_contains(repo_python)
 
     if args.list:
         for ex in EXAMPLES:
