@@ -425,7 +425,12 @@ class MethodBuilder:
         # Use Python source location for better error messages
         mlir_loc = self._python_loc.to_mlir_location(ctx.mlir_context)
 
-        with InsertionPoint(self._module._op.body):
+        container_body = self._module._op.body
+        # ModuleOp exposes `.body` as a Block; InterfaceOp exposes it as a Region.
+        if hasattr(container_body, "blocks"):
+            container_body = container_body.blocks[0]
+
+        with InsertionPoint(container_body):
             # Build function type
             arg_mlir_types = [ty.to_firrtl_type(ctx.mlir_context) for _, ty in self._arg_types]
             ret_mlir_types = [ty.to_firrtl_type(ctx.mlir_context) for ty in self._return_types]
@@ -554,7 +559,11 @@ class ValueBuilder:
         # Use Python source location for better error messages
         mlir_loc = self._python_loc.to_mlir_location(ctx.mlir_context)
 
-        with InsertionPoint(self._module._op.body):
+        container_body = self._module._op.body
+        if hasattr(container_body, "blocks"):
+            container_body = container_body.blocks[0]
+
+        with InsertionPoint(container_body):
             # Build function type
             ret_mlir_types = [ty.to_firrtl_type(ctx.mlir_context) for ty in self._return_types]
             func_type = FunctionType.get([], ret_mlir_types)

@@ -507,7 +507,7 @@ class RegionBuilder:
         """
         from circt.ir import InsertionPoint, FlatSymbolRefAttr, StringAttr
         from circt.dialects import cmt2
-        from .refs import MethodRef, ValueRef, Instance
+        from .refs import MethodRef, ValueRef, Instance, InterfaceDecl
         from .external_module import ExternalModuleBuilder
 
         with InsertionPoint(self._block):
@@ -515,12 +515,19 @@ class RegionBuilder:
             if target is None:
                 callee = FlatSymbolRefAttr.get("this")
                 instance_module = None
+                interface = None
             elif isinstance(target, Instance):
                 callee = FlatSymbolRefAttr.get(target.name)
                 instance_module = target._module
+                interface = None
+            elif isinstance(target, InterfaceDecl):
+                callee = FlatSymbolRefAttr.get(target.name)
+                instance_module = None
+                interface = target.interface
             else:
                 callee = FlatSymbolRefAttr.get(target.name)
                 instance_module = getattr(target, "_ext_module", None)
+                interface = None
 
             # Determine method/value symbol
             if isinstance(method_or_value, (MethodRef, ValueRef)):
@@ -543,6 +550,19 @@ class RegionBuilder:
                 cmt2_return_types = method_builder._return_types
                 if hasattr(method_builder, "_arg_types"):
                     cmt2_arg_types = method_builder._arg_types
+                    # MethodBuilder stores args as [(name, type), ...].
+                    if cmt2_arg_types and isinstance(cmt2_arg_types[0], tuple):
+                        cmt2_arg_types = [ty for _, ty in cmt2_arg_types]
+            elif interface is not None:
+                func_builder = interface.get_function(method_name)
+                if func_builder is None:
+                    raise KeyError(
+                        f"Interface '{interface.name}' has no function '{method_name}'"
+                    )
+                cmt2_return_types = getattr(func_builder, "_return_types", [])
+                cmt2_arg_types = getattr(func_builder, "_arg_types", [])
+                if cmt2_arg_types and isinstance(cmt2_arg_types[0], tuple):
+                    cmt2_arg_types = [ty for _, ty in cmt2_arg_types]
             elif isinstance(instance_module, ExternalModuleBuilder):
                 # Look up types from external module - try value first, then method
                 cmt2_return_types = instance_module.get_value_return_types(method_name)

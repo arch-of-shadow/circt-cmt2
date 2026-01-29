@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Iterator
 
 from .types import Cmt2Type, UInt, ClockType, ResetType, Clock, Reset
 from .signals import Signal
-from .refs import MethodRef, ValueRef, StepRef, Instance, RuleRef
+from .refs import MethodRef, ValueRef, StepRef, Instance, RuleRef, InterfaceDecl
 
 if TYPE_CHECKING:
     from .circuit import Circuit
@@ -57,6 +57,8 @@ class ModuleBuilder:
         self._proc_rules: dict[str, ProcRuleBuilder] = {}
         self._proc_methods: dict[str, ProcMethodBuilder] = {}
         self._steps: dict[str, StepBuilder] = {}
+        self._interface_decls: dict[str, InterfaceDecl] = {}
+        self._interface_defs: dict[str, object] = {}
 
         # Scheduling directives
         self._sequence_before: list[tuple[MethodRef | ValueRef, MethodRef | ValueRef]] = []
@@ -238,9 +240,100 @@ class ModuleBuilder:
                     loc=self._circuit._ctx.location,
                 )
 
+            if interface_bindings:
+                self._apply_interface_bindings(inst_op, interface_bindings)
+
             inst = Instance(name, module, port_connections, inst_op)
             self._instances[name] = inst
             return inst
+
+    def _apply_interface_bindings(self, inst_op, interface_bindings: dict) -> None:
+        """Apply `interface_binds` attribute to an InstanceOp.
+
+        `interface_bindings` maps interface def/decl in the current module to an
+        interface decl in the referenced module. Entries are serialized as:
+          [ [ @ifaceDefOrDecl, @ifaceDecl ], ... ]
+        """
+        from circt.ir import ArrayAttr, FlatSymbolRefAttr
+
+        ctx = self._circuit._ctx.mlir_context
+        binds = []
+        for def_or_decl, decl in interface_bindings.items():
+            def_name = getattr(def_or_decl, "name", None) or getattr(def_or_decl, "_name", None) or def_or_decl
+            decl_name = getattr(decl, "name", None) or getattr(decl, "_name", None) or decl
+            if not isinstance(def_name, str) or not isinstance(decl_name, str):
+                raise TypeError("interface_bindings expects keys/values to be str-like or have `.name`")
+            binds.append(
+                ArrayAttr.get(
+                    [
+                        FlatSymbolRefAttr.get(def_name, context=ctx),
+                        FlatSymbolRefAttr.get(decl_name, context=ctx),
+                    ],
+                    context=ctx,
+                )
+            )
+        inst_op.attributes["interface_binds"] = ArrayAttr.get(binds, context=ctx)
+
+    # Interfaces
+
+    def interface_decl(self, name: str, interface: str | object) -> InterfaceDecl:
+        """Declare an interface instance in this module.
+
+        Args:
+            name: Symbol name of the interface declaration.
+            interface: Interface name (string) or InterfaceBuilder object.
+        """
+        from circt.ir import InsertionPoint, StringAttr, FlatSymbolRefAttr
+        from circt.dialects import cmt2
+
+        iface_name = getattr(interface, "name", None) if not isinstance(interface, str) else interface
+        if not isinstance(iface_name, str):
+            raise TypeError("interface must be an interface name (str) or InterfaceBuilder")
+
+        iface_builder = self._circuit._interfaces.get(iface_name)
+        if iface_builder is None:
+            raise KeyError(f"Circuit has no interface named '{iface_name}'")
+
+        with InsertionPoint(self._op.body):
+            op = cmt2.InterfaceDeclOp(
+                interface=FlatSymbolRefAttr.get(iface_name, context=self._circuit._ctx.mlir_context),
+                sym_name=StringAttr.get(name),
+                loc=self._circuit._ctx.location,
+            )
+
+        decl = InterfaceDecl(name, iface_builder, self, op)
+        self._interface_decls[name] = decl
+        return decl
+
+    def interface_def(self, name: str, interface: str | object):
+        """Define an interface instance in this module (`cmt2.interface.def`).
+
+        Returns:
+            An InterfaceDefBuilder with a `.bind(...)` method.
+        """
+        from circt.ir import InsertionPoint, StringAttr, FlatSymbolRefAttr, ArrayAttr
+        from circt.dialects import cmt2
+        from .interface import InterfaceDefBuilder
+
+        iface_name = getattr(interface, "name", None) if not isinstance(interface, str) else interface
+        if not isinstance(iface_name, str):
+            raise TypeError("interface must be an interface name (str) or InterfaceBuilder")
+
+        iface_builder = self._circuit._interfaces.get(iface_name)
+        if iface_builder is None:
+            raise KeyError(f"Circuit has no interface named '{iface_name}'")
+
+        with InsertionPoint(self._op.body):
+            op = cmt2.InterfaceDefOp(
+                interface=FlatSymbolRefAttr.get(iface_name, context=self._circuit._ctx.mlir_context),
+                sym_name=StringAttr.get(name),
+                methods=ArrayAttr.get([], context=self._circuit._ctx.mlir_context),
+                loc=self._circuit._ctx.location,
+            )
+
+        builder = InterfaceDefBuilder(self, name, op, iface_builder)
+        self._interface_defs[name] = builder
+        return builder
 
     # Function-like operations
 

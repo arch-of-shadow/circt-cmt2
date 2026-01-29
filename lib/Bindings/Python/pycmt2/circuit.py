@@ -56,7 +56,9 @@ class Context:
         import circt
         circt.register_dialects(self._mlir_ctx)
 
-        self._loc = Location.unknown(self._mlir_ctx)
+        from .location import get_default_mlir_location
+
+        self._loc = get_default_mlir_location(self._mlir_ctx)
 
     @property
     def mlir_context(self):
@@ -220,8 +222,12 @@ class Circuit:
         Yields:
             An InterfaceBuilder for defining the interface.
         """
-        # TODO: Implement InterfaceBuilder
-        raise NotImplementedError("Interfaces not yet implemented")
+        from .interface import InterfaceBuilder
+
+        builder = InterfaceBuilder(self, name)
+        yield builder
+        builder._finalize()
+        self._interfaces[builder.name] = builder
 
     def include_library_module(
         self, library_name: str, params: dict[str, int] | None = None

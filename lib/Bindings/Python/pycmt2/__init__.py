@@ -51,7 +51,9 @@ from .circuit import Circuit
 
 from .module import ModuleBuilder
 
-from .refs import MethodRef, ValueRef, StepRef, RuleRef, Instance
+from .refs import MethodRef, ValueRef, StepRef, RuleRef, Instance, InterfaceDecl
+
+from .interface import InterfaceBuilder, InterfaceDefBuilder
 
 from .simulation import SimulationWorkspace
 
@@ -137,6 +139,8 @@ __all__ = [
     # Builders
     "Circuit",
     "ModuleBuilder",
+    "InterfaceBuilder",
+    "InterfaceDefBuilder",
     # Dataflow
     "DataflowBuilder",
     "TaskBuilder",
@@ -165,6 +169,7 @@ __all__ = [
     "StepRef",
     "RuleRef",
     "Instance",
+    "InterfaceDecl",
     # Simulation
     "SimulationWorkspace",
     # Testbench
