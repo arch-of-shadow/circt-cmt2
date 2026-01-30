@@ -10,14 +10,25 @@ instance wrapping for attribute-based method access.
 Example:
     with jit.module(circuit, "Counter") as m:
         clk = m.clock()
-        count = m.instance(Reg.create(circuit, width), "count", clk=clk)
+        count = m.instance(Reg.create(circuit, width), clk=clk)
 """
 
 from __future__ import annotations
 
 from typing import Any
 
-from ._method_ref import wrap_instance, wrap_interface
+from ._method_ref import BuilderContext, wrap_instance, wrap_interface
+
+
+def _infer_assignment_name(*, depth: int) -> str | None:
+    try:
+        from circt.pycmt2.circuit import _get_assignment_target
+    except Exception:
+        _get_assignment_target = None
+
+    if _get_assignment_target is None:
+        return None
+    return _get_assignment_target(depth=depth)
 
 
 class _ProcRuleAdapter:
@@ -34,14 +45,70 @@ class _ProcRuleAdapter:
 
     @property
     def guard(self):
-        return self._rule.guard()
+        return _BuilderContextCM(self._rule.guard())
+
+    def control(self):
+        return _BuilderContextCM(self._rule.control())
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._rule, name)
 
 
+class _BuilderContextCM:
+    """Wrap a PyCMT2 builder context manager with JIT builder context."""
+
+    def __init__(self, cm: Any):
+        self._cm = cm
+        self._builder_ctx: BuilderContext | None = None
+
+    def __enter__(self) -> Any:
+        builder = self._cm.__enter__()
+        self._builder_ctx = BuilderContext(builder)
+        self._builder_ctx.__enter__()
+        return builder
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if self._builder_ctx is not None:
+            try:
+                self._builder_ctx.__exit__(exc_type, exc_val, exc_tb)
+            finally:
+                self._builder_ctx = None
+        return self._cm.__exit__(exc_type, exc_val, exc_tb)
+
+
+class _NamedBuilderContextCM:
+    """Like `_BuilderContextCM`, but infers the symbol name on `__enter__`.
+
+    This avoids relying on PyCMT2's internal naming JIT (which assumes direct
+    use of PyCMT2 builders, without the extra wrapper stack frames).
+    """
+
+    def __init__(self, cm_factory: Any, *, alias: str | None = None):
+        self._cm_factory = cm_factory
+        self._alias = alias
+        self._cm: Any | None = None
+        self._builder_ctx: BuilderContext | None = None
+
+    def __enter__(self) -> Any:
+        name = self._alias or _infer_assignment_name(depth=3)
+        self._cm = self._cm_factory(name)
+        builder = self._cm.__enter__()
+        self._builder_ctx = BuilderContext(builder)
+        self._builder_ctx.__enter__()
+        return builder
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        assert self._cm is not None
+        if self._builder_ctx is not None:
+            try:
+                self._builder_ctx.__exit__(exc_type, exc_val, exc_tb)
+            finally:
+                self._builder_ctx = None
+        return self._cm.__exit__(exc_type, exc_val, exc_tb)
+
+
 class _ProcRuleCM:
-    def __init__(self, module_builder: Any, name: str, *args: Any, **kwargs: Any):
+    def __init__(self, module_builder: Any, name: str | None, *args: Any, **kwargs: Any):
         self._module_builder = module_builder
         self._name = name
         self._args = args
@@ -49,7 +116,8 @@ class _ProcRuleCM:
         self._cm = None
 
     def __enter__(self) -> _ProcRuleAdapter:
-        self._cm = self._module_builder.proc_rule(self._name, *self._args, **self._kwargs)
+        name = self._name or _infer_assignment_name(depth=3)
+        self._cm = self._module_builder.proc_rule(name, *self._args, **self._kwargs)
         rule = self._cm.__enter__()
         return _ProcRuleAdapter(rule)
 
@@ -103,8 +171,10 @@ class ModuleContext:
     def instance(
         self,
         module_def: Any,
-        name: str,
+        name: str | None = None,
         interface_bindings: dict[str, Any] | None = None,
+        *,
+        alias: str | None = None,
         **connections: Any,
     ) -> Any:
         """Create a module instance with automatic SignalRef wrapping.
@@ -115,29 +185,88 @@ class ModuleContext:
         
         Args:
             module_def: Module definition to instantiate
-            name: Instance name
+            name: Legacy positional name (avoid; use inference/alias).
             **connections: Port connections
             
         Returns:
             Wrapped instance with SignalRef
         """
+        if name is not None:
+            raise TypeError(
+                "JIT instance naming is inferred from the assignment target. "
+                "Use `alias=...` only when you need an explicit name."
+            )
+
+        # One extra frame vs PyCMT2: user -> ModuleContext.instance -> _infer_assignment_name.
+        inst_name = alias or _infer_assignment_name(depth=3)
+        if not inst_name:
+            raise TypeError("Cannot infer instance name; use `alias=...`")
+
         inst = self._module_builder.instance(
-            module_def, name, interface_bindings=interface_bindings, **connections
+            module_def, inst_name, interface_bindings=interface_bindings, **connections
         )
         return wrap_instance(inst)
 
-    def interface_decl(self, name: str, interface: Any) -> Any:
+    def interface_decl(self, interface: Any, *, alias: str | None = None) -> Any:
         """Declare an interface instance in this module."""
-        decl = self._module_builder.interface_decl(name, interface)
+        if isinstance(interface, str):
+            raise TypeError("JIT interface decls must reference an InterfaceBuilder, not a string name")
+
+        decl_name = alias or _infer_assignment_name(depth=3)
+        if not decl_name:
+            raise TypeError("Cannot infer interface decl name; use `alias=...`")
+
+        decl = self._module_builder.interface_decl(decl_name, interface)
         return wrap_interface(decl)
 
-    def interface_def(self, name: str, interface: Any) -> Any:
+    def interface_def(self, interface: Any, *, alias: str | None = None) -> Any:
         """Define an interface instance in this module."""
-        return self._module_builder.interface_def(name, interface)
+        if isinstance(interface, str):
+            raise TypeError("JIT interface defs must reference an InterfaceBuilder, not a string name")
 
-    def proc_rule(self, name: str, *args: Any, **kwargs: Any) -> _ProcRuleCM:
+        def_name = alias or _infer_assignment_name(depth=3)
+        if not def_name:
+            raise TypeError("Cannot infer interface def name; use `alias=...`")
+
+        return self._module_builder.interface_def(def_name, interface)
+
+    def proc_rule(self, name: str | None = None, *args: Any, alias: str | None = None, **kwargs: Any) -> _ProcRuleCM:
         """Define a procedural rule with JIT-style guard syntax."""
-        return _ProcRuleCM(self._module_builder, name, *args, **kwargs)
+        if name is not None:
+            raise TypeError(
+                "JIT proc_rule naming is inferred from the `as <name>` target. "
+                "Use `alias=...` only when you need an explicit name."
+            )
+        return _ProcRuleCM(self._module_builder, alias, *args, **kwargs)
+
+    def step(self, name: str | None = None, *args: Any, alias: str | None = None, **kwargs: Any) -> Any:
+        """Define a procedural step with JIT builder context (no strings)."""
+        if name is not None:
+            raise TypeError(
+                "JIT step naming is inferred from the `as <name>` target. "
+                "Use `alias=...` only when you need an explicit name."
+            )
+        return _NamedBuilderContextCM(lambda n: self._module_builder.step(n, *args, **kwargs), alias=alias)
+
+    def static_step(
+        self,
+        latency: int,
+        name: str | None = None,
+        *args: Any,
+        interval: int | None = None,
+        alias: str | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        """Define a static-latency step with JIT builder context (no strings)."""
+        if name is not None:
+            raise TypeError(
+                "JIT static_step naming is inferred from the `as <name>` target. "
+                "Use `alias=...` only when you need an explicit name."
+            )
+        return _NamedBuilderContextCM(
+            lambda n: self._module_builder.static_step(latency, n, *args, interval=interval, **kwargs),
+            alias=alias,
+        )
 
     def __getattr__(self, name: str) -> Any:
         """Delegate unknown attributes to the underlying PyCMT2 ModuleBuilder."""
@@ -148,6 +277,18 @@ class ModuleContext:
     @property
     def builder(self) -> Any:
         """Access the underlying PyCMT2 module builder."""
+        return self._module_builder
+
+    @property
+    def module_def(self) -> Any:
+        """Return a module definition handle suitable for `m.instance(...)`.
+
+        For in-circuit modules created via `with jit.module(circuit, "...")`,
+        PyCMT2 expects the corresponding `ModuleBuilder` object when
+        instantiating. Exposing it here avoids reaching into `circuit._modules`.
+        """
+        if self._module_builder is None:
+            raise RuntimeError("ModuleContext.module_def is only available inside/after module elaboration")
         return self._module_builder
 
 

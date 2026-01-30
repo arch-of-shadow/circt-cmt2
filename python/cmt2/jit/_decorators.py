@@ -24,12 +24,51 @@ from __future__ import annotations
 
 import functools
 import inspect
+from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Any, Callable, TypeVar
 
 from ._context import RuleContext, MethodContext, ValueContext
 from ._typing import ArgProxy, parse_typed_signature
 
 F = TypeVar("F", bound=Callable[..., Any])
+
+def _infer_assignment_name(*, depth: int) -> str | None:
+    try:
+        from circt.pycmt2.circuit import _get_assignment_target
+    except Exception:
+        _get_assignment_target = None
+
+    if _get_assignment_target is None:
+        return None
+    return _get_assignment_target(depth=depth)
+
+
+@dataclass(frozen=True)
+class Elaborated:
+    """Result of `@jit.elaborate`.
+
+    JIT is stacked on PyCMT2 and elaboration fundamentally produces a PyCMT2
+    `Circuit`. Some examples also need to export *typed handles* (e.g. an
+    `InterfaceDecl` object) for testbench usage without string lookups; those
+    can be carried in `handles`.
+    """
+
+    circuit: Any
+    handles: Any | None = None
+
+    def __iter__(self):
+        yield self.circuit
+        yield self.handles
+
+
+def handles(**kwargs: Any) -> Any:
+    """Create a handle bundle for `Elaborated(handles=...)`.
+
+    This avoids stringly-typed lookups in examples by using attribute access:
+      `h.writer`, `h.reader0`, ...
+    """
+    return SimpleNamespace(**kwargs)
 
 
 def _get_function_name(func: Callable) -> str:
@@ -42,15 +81,15 @@ def _unwrap_module_builder(module_or_ctx: Any) -> Any:
 
 
 class _RuleDef:
-    def __init__(self, module_builder: Any, name: str | None = None):
+    def __init__(self, module_builder: Any, *, alias: str | None = None):
         self._builder = _unwrap_module_builder(module_builder)
-        self._name = name
+        self._alias = alias
         self._cm = None
         self._rule = None
         self._ctx: RuleContext | None = None
 
     def __call__(self, func: F) -> F:
-        rule_name = self._name or _get_function_name(func)
+        rule_name = self._alias or _get_function_name(func)
         with self._builder.rule(rule_name) as rule:
             ctx = RuleContext(rule)
             with ctx:
@@ -62,7 +101,13 @@ class _RuleDef:
         return func
 
     def __enter__(self) -> RuleContext:
-        self._cm = self._builder.rule(self._name)
+        # For context-manager form, infer the symbol name from the `as <name>`
+        # target (or require `alias=...`). Do not rely on PyCMT2's internal
+        # naming JIT here, since this wrapper adds extra stack frames.
+        name = self._alias or _infer_assignment_name(depth=3)
+        if not name:
+            raise TypeError("Cannot infer rule name; use `alias=...`")
+        self._cm = self._builder.rule(name)
         self._rule = self._cm.__enter__()
         self._ctx = RuleContext(self._rule)
         self._ctx.__enter__()
@@ -74,7 +119,7 @@ class _RuleDef:
         return self._cm.__exit__(exc_type, exc_val, exc_tb)
 
 
-def rule(module_builder: Any, name: str | None = None) -> _RuleDef:
+def rule(module_builder: Any, name: str | None = None, *, alias: str | None = None) -> _RuleDef:
     """Define a rule (decorator or context manager).
 
     Decorator form:
@@ -85,30 +130,37 @@ def rule(module_builder: Any, name: str | None = None) -> _RuleDef:
             with r.body:
                 ...
 
-    Context-manager form (easier for porting PyCMT2 examples):
-        with jit.rule(m, "increment") as rule:
-            with rule.guard as g:
+    Context-manager form:
+        with jit.rule(m) as increment:
+            with increment.guard as g:
                 g.always()
-            with rule.body as b:
+            with increment.body as b:
                 ...
     """
-    return _RuleDef(module_builder, name=name)
+    if name is not None:
+        raise TypeError(
+            "JIT rule naming is inferred from the `as <name>` target (or the "
+            "decorated function name). Use `alias=...` only when you need an "
+            "explicit name (e.g. inside loops)."
+        )
+    return _RuleDef(module_builder, alias=alias)
 
 
 class _MethodDef:
     def __init__(
         self,
         module_builder: Any,
-        name: str | None = None,
+        *,
+        alias: str | None = None,
     ):
         self._builder = _unwrap_module_builder(module_builder)
-        self._name = name
+        self._alias = alias
         self._cm = None
         self._method = None
         self._ctx: MethodContext | None = None
 
     def __call__(self, func: F) -> F:
-        method_name = self._name or _get_function_name(func)
+        method_name = self._alias or _get_function_name(func)
         frame = inspect.currentframe()
         definition_locals = None
         if frame is not None and frame.f_back is not None:
@@ -138,21 +190,28 @@ class _MethodDef:
 def method(
     module_builder: Any,
     name: str | None = None,
+    *,
+    alias: str | None = None,
 ) -> _MethodDef:
     """Define an action method (decorator or context manager)."""
-    return _MethodDef(module_builder, name=name)
+    if name is not None:
+        raise TypeError(
+            "JIT method naming is inferred from the decorated function name. "
+            "Use `alias=...` only when you need an explicit name (e.g. inside loops)."
+        )
+    return _MethodDef(module_builder, alias=alias)
 
 
 class _ValueDef:
-    def __init__(self, module_builder: Any, name: str | None = None):
+    def __init__(self, module_builder: Any, *, alias: str | None = None):
         self._builder = _unwrap_module_builder(module_builder)
-        self._name = name
+        self._alias = alias
         self._cm = None
         self._value = None
         self._ctx: ValueContext | None = None
 
     def __call__(self, func: F) -> F:
-        value_name = self._name or _get_function_name(func)
+        value_name = self._alias or _get_function_name(func)
         frame = inspect.currentframe()
         definition_locals = None
         if frame is not None and frame.f_back is not None:
@@ -180,9 +239,14 @@ class _ValueDef:
         )
 
 
-def value(module_builder: Any, name: str | None = None) -> _ValueDef:
+def value(module_builder: Any, name: str | None = None, *, alias: str | None = None) -> _ValueDef:
     """Define a value method (decorator or context manager)."""
-    return _ValueDef(module_builder, name=name)
+    if name is not None:
+        raise TypeError(
+            "JIT value naming is inferred from the decorated function name. "
+            "Use `alias=...` only when you need an explicit name (e.g. inside loops)."
+        )
+    return _ValueDef(module_builder, alias=alias)
 
 
 def elaborate(func: F) -> F:
@@ -210,15 +274,26 @@ def elaborate(func: F) -> F:
             with default_python_location(depth=2):
                 result = func(*args, **kwargs)
 
+        if isinstance(result, tuple) and len(result) == 2:
+            result = Elaborated(result[0], result[1])
+
         try:
             from circt.pycmt2 import Circuit as PyCmt2Circuit
         except Exception:
             PyCmt2Circuit = None
 
-        if PyCmt2Circuit is not None and not isinstance(result, PyCmt2Circuit):
-            raise TypeError(
-                "@jit.elaborate functions must return a `circt.pycmt2.Circuit`."
-            )
+        if PyCmt2Circuit is not None:
+            if isinstance(result, Elaborated):
+                if not isinstance(result.circuit, PyCmt2Circuit):
+                    raise TypeError(
+                        "@jit.elaborate must return a `circt.pycmt2.Circuit` "
+                        "(or `Elaborated(circuit=...)`)."
+                    )
+            elif not isinstance(result, PyCmt2Circuit):
+                raise TypeError(
+                    "@jit.elaborate must return a `circt.pycmt2.Circuit` "
+                    "(or `(Circuit, handles)` / `Elaborated`)."
+                )
 
         return result
     
@@ -227,6 +302,8 @@ def elaborate(func: F) -> F:
 
 __all__ = [
     "elaborate",
+    "Elaborated",
+    "handles",
     "rule",
     "method",
     "value",

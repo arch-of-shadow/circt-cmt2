@@ -135,6 +135,16 @@ class SignalRef:
         self._method_cache: dict[str, MethodRef] = {}
 
     @property
+    def instance(self) -> Any:
+        """Return the underlying PyCMT2 Instance.
+
+        This is useful in advanced contexts where you need to pass the raw
+        instance into low-level PyCMT2 APIs (e.g. condition-region builders
+        that call `RegionBuilder.call()` directly).
+        """
+        return self._instance
+
+    @property
     def _ext_module(self) -> Any:  # noqa: N802 (match PyCMT2 naming)
         """Expose module information for PyCMT2 builder lookups.
 
@@ -310,6 +320,15 @@ class InterfaceRef:
     def __init__(self, decl: Any):
         self._decl = decl
         self._method_cache: dict[str, MethodRef] = {}
+
+    @property
+    def decl(self) -> Any:
+        """Return the underlying PyCMT2 `InterfaceDecl`.
+
+        Use this when you need to pass the decl into low-level PyCMT2 APIs such
+        as instance interface bindings or the testbench interface helpers.
+        """
+        return self._decl
 
     @property
     def name(self) -> str:

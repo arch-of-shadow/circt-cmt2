@@ -22,7 +22,7 @@ Example:
         with jit.module(circuit, "Counter") as m:
             clk = m.clock()
             rst = m.reset()
-            count = m.instance(Reg.create(circuit, width), "count", clk=clk, rst=rst)
+            count = m.instance(Reg.create(circuit, width), clk=clk, rst=rst)
             
             @jit.rule(m)  # Name: "increment"
             def increment(r):
@@ -37,7 +37,7 @@ Example:
 
 from __future__ import annotations
 
-from ._decorators import elaborate, rule, method, value
+from ._decorators import Elaborated, elaborate, handles, method, rule, value
 from ._dataflow import dataflow, DataflowContext
 from ._module import module, ModuleContext
 from ._method_ref import SignalRef, MethodRef, InterfaceRef, wrap_instance, wrap_interface
@@ -46,6 +46,8 @@ from ._context import RuleContext, MethodContext, ValueContext
 __all__ = [
     # Decorators
     "elaborate",
+    "Elaborated",
+    "handles",
     "rule",
     "method", 
     "value",
