@@ -35,6 +35,8 @@ import os
 from pathlib import Path
 from typing import TYPE_CHECKING
 import re
+import shutil
+import subprocess
 
 if TYPE_CHECKING:
     from .circuit import Circuit
@@ -70,6 +72,9 @@ class SimulationWorkspace:
         top_module: str | None = None,
         debug_ports: bool = False,
         trace: bool | None = None,
+        *,
+        use_circt_opt: bool | None = None,
+        circt_opt: str | None = None,
     ):
         """Create a simulation workspace generator.
 
@@ -86,6 +91,15 @@ class SimulationWorkspace:
                 config in `waves/`. If False, disables VCD tracing for faster
                 Verilator builds. If None (default), respects environment
                 variable `PYCMT2_TRACE` (default: enabled).
+            use_circt_opt: If True, run the lowering pipeline via an external
+                `circt-opt` binary instead of the in-process Python pass
+                bindings. This is useful when Python bindings are unavailable
+                or out of date relative to the compiler.
+                If None (default), respects environment variable
+                `PYCMT2_USE_CIRCT_OPT` (default: disabled).
+            circt_opt: Optional explicit path to `circt-opt`. If not provided,
+                uses `PYCMT2_CIRCT_OPT`, then searches `PATH`, then falls back
+                to `./build/bin/circt-opt` when present.
         """
         self.circuit = circuit
         self.output_dir = Path(output_dir)
@@ -97,6 +111,112 @@ class SimulationWorkspace:
             if trace is not None
             else os.environ.get("PYCMT2_TRACE", "1").lower() not in ("0", "false", "no", "off")
         )
+        self._use_circt_opt = (
+            use_circt_opt
+            if use_circt_opt is not None
+            else os.environ.get("PYCMT2_USE_CIRCT_OPT", "0").lower() in ("1", "true", "yes", "on")
+        )
+        self._circt_opt = self._resolve_circt_opt(circt_opt)
+
+    @staticmethod
+    def _resolve_circt_opt(explicit: str | None) -> str | None:
+        if explicit:
+            return explicit
+
+        env = os.environ.get("PYCMT2_CIRCT_OPT")
+        if env:
+            return env
+
+        found = shutil.which("circt-opt")
+        if found:
+            return found
+
+        local = Path.cwd() / "build" / "bin" / "circt-opt"
+        if local.exists():
+            return str(local)
+
+        return None
+
+    def _emit_verilog_via_circt_opt(self) -> str:
+        """Lower and export Verilog via an external `circt-opt` binary."""
+        if not self._circt_opt:
+            raise RuntimeError(
+                "PYCMT2_USE_CIRCT_OPT is enabled but no `circt-opt` was found. "
+                "Set `PYCMT2_CIRCT_OPT` or pass `circt_opt=...`."
+            )
+
+        rtl_dir = self.output_dir / "rtl"
+        rtl_dir.mkdir(parents=True, exist_ok=True)
+
+        mlir_in = rtl_dir / f"{self._top_module}.input.mlir"
+        mlir_lowered = rtl_dir / f"{self._top_module}.lowered.mlir"
+
+        mlir_in.write_text(self.circuit.emit_mlir())
+
+        cmt2_passes = [
+            "cmt2-compile-invoke",
+            "cmt2-dataflow-lowering",
+            "cmt2-token-lowering",
+            "cmt2-token-rtl-gen",
+            "cmt2-tdcc",
+            "cmt2-proc-stmt-to-action",
+            "cmt2-proc-to-gaa",
+        ]
+        if self._debug_ports:
+            cmt2_passes.append("cmt2-add-rule-firing-port")
+
+        # Match the in-process pipeline in `Circuit.emit_verilog()` but run it
+        # out-of-process so it does not depend on Python bindings.
+        pipeline = (
+            "builtin.module("
+            f"cmt2.circuit({','.join(cmt2_passes)}),"
+            "lower-cmt2-to-firrtl,"
+            "firrtl.circuit(firrtl-infer-resets,firrtl-lower-types),"
+            "any(any(firrtl-expand-whens)),"
+            "lower-firrtl-to-hw,"
+            "lower-seq-to-sv"
+            ")"
+        )
+
+        lower_cmd = [
+            self._circt_opt,
+            str(mlir_in),
+            f"--pass-pipeline={pipeline}",
+            "-o",
+            str(mlir_lowered),
+        ]
+        lower = subprocess.run(
+            lower_cmd,
+            capture_output=True,
+            text=True,
+            errors="replace",
+        )
+        if lower.returncode != 0:
+            raise RuntimeError(
+                "circt-opt lowering failed.\n"
+                f"Command: {' '.join(lower_cmd)}\n"
+                f"stdout:\n{lower.stdout}\n"
+                f"stderr:\n{lower.stderr}"
+            )
+
+        # `circt-opt` always prints the final IR. `--export-verilog` additionally
+        # prints Verilog to stdout. Discard the IR output to keep the captured
+        # stdout as pure Verilog.
+        export_cmd = [self._circt_opt, str(mlir_lowered), "--export-verilog", "-o", os.devnull]
+        export = subprocess.run(
+            export_cmd,
+            capture_output=True,
+            text=True,
+            errors="replace",
+        )
+        if export.returncode != 0:
+            raise RuntimeError(
+                "circt-opt Verilog export failed.\n"
+                f"Command: {' '.join(export_cmd)}\n"
+                f"stdout:\n{export.stdout}\n"
+                f"stderr:\n{export.stderr}"
+            )
+        return export.stdout
 
     def add_external_rtl(self, filename: str, content: str) -> "SimulationWorkspace":
         """Add external RTL file to the workspace.
@@ -469,7 +589,10 @@ class SimulationWorkspace:
     def _generate_rtl(self):
         """Generate Verilog RTL files."""
         try:
-            verilog = self.circuit.emit_verilog(debug_ports=self._debug_ports)
+            if self._use_circt_opt:
+                verilog = self._emit_verilog_via_circt_opt()
+            else:
+                verilog = self.circuit.emit_verilog(debug_ports=self._debug_ports)
             self._last_emitted_verilog = verilog
             self._add_stl_rtl()
             self._add_external_rtl_files_from_circuit()
