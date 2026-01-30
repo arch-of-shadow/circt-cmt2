@@ -114,10 +114,14 @@ class InterfaceBuilder:
     """Builder for a circuit-level interface.
 
     Example:
-        with circuit.interface("Reader") as i:
-            with i.value("getData", returns=[UInt(32)]) as v:
-                with v.guard() as g: g.always()
-                with v.body() as b: ...
+        from circt.pycmt2.types import UInt
+
+        def getData() -> UInt[32]:
+            ...
+
+        # Name is inferred from `as Reader`.
+        with circuit.interface() as Reader:
+            Reader.value_sig(getData)
     """
 
     def __init__(self, circuit: "Circuit", name: str | None = None):
