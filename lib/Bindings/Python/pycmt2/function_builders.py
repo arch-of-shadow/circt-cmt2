@@ -483,7 +483,10 @@ class MethodBuilder:
         )
         with self._guard_builder as g:
             # Expose arguments in guard
-            for arg_name, sig in self._arg_signals:
+            for i, (arg_name, arg_ty) in enumerate(self._arg_types):
+                # Bind argument signals to the guard builder so operator overloads
+                # emit into the correct guard block.
+                sig = Signal(guard_block.arguments[i], arg_ty, g)
                 setattr(g, arg_name, sig)
             yield g
 

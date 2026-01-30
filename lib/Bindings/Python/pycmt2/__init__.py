@@ -43,6 +43,8 @@ from .types import (
     AsyncReset,
     Bool,
     SyncToken,
+    LS,
+    LI,
 )
 
 from .signals import Signal
@@ -134,6 +136,8 @@ __all__ = [
     "AsyncReset",
     "Bool",
     "SyncToken",
+    "LS",
+    "LI",
     # Signals
     "Signal",
     # Builders

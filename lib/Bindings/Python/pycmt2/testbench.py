@@ -409,7 +409,7 @@ class TestSequence:
     def call_interface(
         self,
         interface_decl: Any,
-        func: str,
+        func: Any,
         *args: Any,
         ready: int | str = 1,
         results: tuple[int | str, ...] | None = None,
@@ -443,11 +443,19 @@ class TestSequence:
             if prefix_attr is not None:
                 prefix = prefix_attr.value
 
-        fn = iface.get_function(func)
-        if fn is None:
-            raise KeyError(f"Interface '{iface.name}' has no function '{func}'")
+        func_name = (
+            getattr(func, "name", None)
+            or getattr(func, "__name__", None)
+            or func
+        )
+        if not isinstance(func_name, str):
+            raise TypeError("call_interface expects `func` to be str-like or function-like")
 
-        fn_prefix = f"{prefix}{func}_"
+        fn = iface.get_function(func_name)
+        if fn is None:
+            raise KeyError(f"Interface '{iface.name}' has no function '{func_name}'")
+
+        fn_prefix = f"{prefix}{func_name}_"
 
         # Ready is always an input port.
         self.drive(f"{fn_prefix}ready", ready)
@@ -461,7 +469,7 @@ class TestSequence:
         self.eval()
 
         # Methods have an enable output we can wait for.
-        if func in getattr(iface, "_methods", {}):
+        if func_name in getattr(iface, "_methods", {}):
             self.wait_condition(f"dut->{fn_prefix}enable", timeout=timeout)
 
         # Check outgoing args.

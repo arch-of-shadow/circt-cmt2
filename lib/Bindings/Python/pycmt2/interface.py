@@ -16,13 +16,98 @@ This module implements:
 from __future__ import annotations
 
 from contextlib import contextmanager
-from typing import TYPE_CHECKING, Any, Iterator
+import inspect
+from typing import TYPE_CHECKING, Any, Callable, Iterator, TypeVar, get_args, get_origin
 
 from .function_builders import MethodBuilder, ValueBuilder
 
 if TYPE_CHECKING:
     from .circuit import Circuit
     from .types import Cmt2Type
+
+F = TypeVar("F", bound=Callable[..., Any])
+
+
+def _cmt2_type_from_annotation(ann: Any) -> "Cmt2Type":
+    from .types import Cmt2Type, UInt
+
+    if isinstance(ann, Cmt2Type):
+        return ann
+    if ann is bool:
+        return UInt(1)
+    if isinstance(ann, type) and issubclass(ann, Cmt2Type):
+        return ann()
+    raise TypeError("Expected a PyCMT2 type annotation like `UInt[32]` or `Bool`.")
+
+
+def _cmt2_return_types_from_annotation(ann: Any) -> list["Cmt2Type"]:
+    if ann is None or ann is type(None):  # noqa: E721 (intentional)
+        return []
+    origin = get_origin(ann)
+    if origin is tuple:
+        args = list(get_args(ann))
+        if len(args) == 2 and args[1] is Ellipsis:
+            raise TypeError("Tuple return annotations must be fixed-length")
+        return [_cmt2_type_from_annotation(a) for a in args]
+    return [_cmt2_type_from_annotation(ann)]
+
+
+def _parse_interface_signature(
+    func: Callable[..., Any],
+    *,
+    definition_locals: dict[str, Any] | None = None,
+) -> tuple[list[tuple[str, "Cmt2Type"]], list["Cmt2Type"]]:
+    sig = inspect.signature(func)
+    params = list(sig.parameters.values())
+    for p in params:
+        if p.kind not in (
+            inspect.Parameter.POSITIONAL_ONLY,
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        ):
+            raise TypeError("Varargs/kwargs are not supported in interface signatures")
+
+    globalns = getattr(func, "__globals__", {}) or {}
+    localns: dict[str, Any] = {}
+    closure = inspect.getclosurevars(func)
+    localns.update(getattr(closure, "nonlocals", {}))
+    localns.update(getattr(closure, "locals", {}))
+    if definition_locals:
+        localns.update(definition_locals)
+    raw = getattr(func, "__annotations__", {}) or {}
+
+    def _eval_ann(ann: Any, *, where: str) -> Any:
+        if ann is inspect._empty:
+            return ann
+        if isinstance(ann, str):
+            try:
+                return eval(ann, globalns, localns)  # noqa: S307 (user-authored annotations)
+            except Exception as e:
+                raise TypeError(f"Failed to evaluate {where} annotation {ann!r}: {e}") from e
+        return ann
+
+    arg_types: list[tuple[str, "Cmt2Type"]] = []
+    for p in params:
+        ann = raw.get(p.name, p.annotation)
+        ann = _eval_ann(ann, where=f"argument '{p.name}'")
+        if ann is None or ann is inspect._empty:
+            raise TypeError(f"Missing type annotation for argument '{p.name}'")
+        arg_types.append((p.name, _cmt2_type_from_annotation(ann)))
+
+    ret_ann = raw.get("return", sig.return_annotation)
+    ret_ann = _eval_ann(ret_ann, where="return")
+    if ret_ann is inspect._empty:
+        raise TypeError("Missing return type annotation")
+    return arg_types, _cmt2_return_types_from_annotation(ret_ann)
+
+
+def _default_value_for_type(builder: Any, ty: "Cmt2Type") -> Any:
+    from .types import UInt, SInt
+
+    if isinstance(ty, UInt):
+        return builder.const(0, ty.width)
+    if isinstance(ty, SInt):
+        return builder.const(0, ty.width).as_sint()
+    raise TypeError(f"No default value strategy for interface return type {ty}")
 
 
 class InterfaceBuilder:
@@ -90,6 +175,65 @@ class InterfaceBuilder:
         builder._finalize()
         self._values[builder.name] = builder
 
+    def method_sig(self, func: F | None = None, *, name: str | None = None) -> F | Callable[[F], F]:
+        """Define an interface method signature from a typed Python function.
+
+        Interface methods are signatures (types) used for lowering and port
+        generation. This helper creates a trivial always-ready stub body so the
+        IR is structurally valid.
+        """
+
+        frame = inspect.currentframe()
+        definition_locals = None
+        if frame is not None and frame.f_back is not None:
+            definition_locals = dict(frame.f_back.f_locals)
+        del frame
+
+        def deco(f: F) -> F:
+            meth_name = name or f.__name__
+            arg_types, ret_types = _parse_interface_signature(f, definition_locals=definition_locals)
+            with self.method(meth_name, args=arg_types, returns=ret_types) as m:
+                with m.guard() as g:
+                    g.always()
+                with m.body() as b:
+                    if ret_types:
+                        b.returns(*[_default_value_for_type(b, t) for t in ret_types])
+                    else:
+                        b.returns()
+            return f
+
+        if func is not None:
+            return deco(func)
+        return deco
+
+    def value_sig(self, func: F | None = None, *, name: str | None = None) -> F | Callable[[F], F]:
+        """Define an interface value signature from a typed Python function."""
+
+        frame = inspect.currentframe()
+        definition_locals = None
+        if frame is not None and frame.f_back is not None:
+            definition_locals = dict(frame.f_back.f_locals)
+        del frame
+
+        def deco(f: F) -> F:
+            val_name = name or f.__name__
+            arg_types, ret_types = _parse_interface_signature(f, definition_locals=definition_locals)
+            if arg_types:
+                raise TypeError("Interface values cannot take arguments")
+            with self.value(val_name, returns=ret_types) as v:
+                with v.guard() as g:
+                    g.always()
+                with v.body() as b:
+                    if ret_types:
+                        b.returns(*[_default_value_for_type(b, t) for t in ret_types])
+                    else:
+                        b.returns()
+            return f
+
+        if func is not None:
+            return deco(func)
+        return deco
+
     def get_function(self, name: str) -> MethodBuilder | ValueBuilder | None:
         return self._methods.get(name) or self._values.get(name)
 
@@ -116,7 +260,7 @@ class InterfaceDefBuilder:
     def interface(self) -> InterfaceBuilder:
         return self._interface
 
-    def bind(self, target: Any, target_func: Any, interface_func: str) -> "InterfaceDefBuilder":
+    def bind(self, target: Any, target_func: Any, interface_func: Any) -> "InterfaceDefBuilder":
         """Bind an interface function to a target instance/decl function.
 
         Args:
@@ -133,17 +277,28 @@ class InterfaceDefBuilder:
         if not isinstance(target_name, str):
             raise TypeError(f"Expected target name to be str-like, got {type(target).__name__}")
 
-        func_name = getattr(target_func, "name", None) or target_func
+        func_name = getattr(target_func, "name", None) or getattr(target_func, "__name__", None) or target_func
         if not isinstance(func_name, str):
             raise TypeError(
                 f"Expected target_func to be MethodRef/ValueRef or str, got {type(target_func).__name__}"
             )
-        if interface_func not in self._interface._methods and interface_func not in self._interface._values:
-            raise KeyError(
-                f"Interface '{self._interface.name}' has no function '{interface_func}'"
+
+        iface_name = (
+            getattr(interface_func, "name", None)
+            or getattr(interface_func, "__name__", None)
+            or interface_func
+        )
+        if not isinstance(iface_name, str):
+            raise TypeError(
+                f"Expected interface_func to be a function-like or str, got {type(interface_func).__name__}"
             )
 
-        self._mappings.append((target_name, func_name, interface_func))
+        if iface_name not in self._interface._methods and iface_name not in self._interface._values:
+            raise KeyError(
+                f"Interface '{self._interface.name}' has no function '{iface_name}'"
+            )
+
+        self._mappings.append((target_name, func_name, iface_name))
         self._flush()
         return self
 

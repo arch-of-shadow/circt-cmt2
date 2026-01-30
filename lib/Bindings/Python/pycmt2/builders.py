@@ -116,6 +116,14 @@ class RegionBuilder:
         """Convert an int to a Signal if needed."""
         if isinstance(val, Signal):
             return val
+        # Allow "signal-like" wrappers (e.g. JIT argument proxies) that expose
+        # the same `value`/`type` interface as Signal.
+        if hasattr(val, "value") and hasattr(val, "type"):
+            try:
+                if isinstance(getattr(val, "type"), Cmt2Type):
+                    return val  # type: ignore[return-value]
+            except Exception:
+                pass
         if width is None:
             raise ValueError("Cannot infer width for integer constant")
         return self.const(val, width)

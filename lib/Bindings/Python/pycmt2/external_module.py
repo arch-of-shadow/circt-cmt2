@@ -36,8 +36,9 @@ Example:
 
 from __future__ import annotations
 
+import inspect
 from pathlib import Path
-from typing import TYPE_CHECKING, Iterator
+from typing import TYPE_CHECKING, Any, Callable, Iterator, TypeVar, get_args, get_origin
 
 from .types import Cmt2Type, UInt, ClockType, ResetType
 from .location import get_python_location
@@ -45,6 +46,78 @@ from .refs import Instance, MethodRef, ValueRef
 
 if TYPE_CHECKING:
     from .circuit import Circuit
+
+F = TypeVar("F", bound=Callable[..., Any])
+
+
+def _cmt2_type_from_annotation(ann: Any) -> Cmt2Type:
+    if isinstance(ann, Cmt2Type):
+        return ann
+    if ann is bool:
+        return UInt(1)
+    if isinstance(ann, type) and issubclass(ann, Cmt2Type):
+        return ann()
+    raise TypeError("Expected a PyCMT2 type annotation like `UInt[32]` or `Bool`.")
+
+
+def _cmt2_return_types_from_annotation(ann: Any) -> list[Cmt2Type]:
+    if ann is None or ann is type(None):  # noqa: E721 (intentional)
+        return []
+    origin = get_origin(ann)
+    if origin is tuple:
+        args = list(get_args(ann))
+        if len(args) == 2 and args[1] is Ellipsis:
+            raise TypeError("Tuple return annotations must be fixed-length")
+        return [_cmt2_type_from_annotation(a) for a in args]
+    return [_cmt2_type_from_annotation(ann)]
+
+
+def _parse_typed_signature_noctx(
+    func: Callable[..., Any],
+    *,
+    definition_locals: dict[str, Any] | None = None,
+) -> tuple[list[tuple[str, Cmt2Type]], list[Cmt2Type]]:
+    sig = inspect.signature(func)
+    params = list(sig.parameters.values())
+    for p in params:
+        if p.kind not in (
+            inspect.Parameter.POSITIONAL_ONLY,
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        ):
+            raise TypeError("Varargs/kwargs are not supported in external method signatures")
+
+    globalns = getattr(func, "__globals__", {}) or {}
+    localns: dict[str, Any] = {}
+    closure = inspect.getclosurevars(func)
+    localns.update(getattr(closure, "nonlocals", {}))
+    localns.update(getattr(closure, "locals", {}))
+    if definition_locals:
+        localns.update(definition_locals)
+    raw = getattr(func, "__annotations__", {}) or {}
+
+    def _eval_ann(ann: Any, *, where: str) -> Any:
+        if ann is inspect._empty:
+            return ann
+        if isinstance(ann, str):
+            try:
+                return eval(ann, globalns, localns)  # noqa: S307 (user-authored annotations)
+            except Exception as e:
+                raise TypeError(f"Failed to evaluate {where} annotation {ann!r}: {e}") from e
+        return ann
+
+    arg_types: list[tuple[str, Cmt2Type]] = []
+    for p in params:
+        ann = raw.get(p.name, p.annotation)
+        ann = _eval_ann(ann, where=f"argument '{p.name}'")
+        if ann is None or ann is inspect._empty:
+            raise TypeError(f"Missing type annotation for argument '{p.name}'")
+        arg_types.append((p.name, _cmt2_type_from_annotation(ann)))
+
+    ret_ann = raw.get("return", sig.return_annotation)
+    ret_ann = _eval_ann(ret_ann, where="return")
+    if ret_ann is inspect._empty:
+        raise TypeError("Missing return type annotation")
+    return arg_types, _cmt2_return_types_from_annotation(ret_ann)
 
 
 class ExternalModuleBuilder:
@@ -228,7 +301,77 @@ class ExternalModuleBuilder:
         })
         return self
 
-    def sequence_before(self, before: str, after: str) -> ExternalModuleBuilder:
+    def method_sig(
+        self,
+        func: F | None = None,
+        *,
+        name: str | None = None,
+        enable_name: str | None = None,
+        ready_name: str | None = None,
+        static_latency: int | None = None,
+        interval: int | None = None,
+    ) -> F | Callable[[F], F]:
+        """Declare an action method signature from a typed Python function."""
+
+        frame = inspect.currentframe()
+        definition_locals = None
+        if frame is not None and frame.f_back is not None:
+            definition_locals = dict(frame.f_back.f_locals)
+        del frame
+
+        def deco(f: F) -> F:
+            meth_name = name or f.__name__
+            arg_types, ret_types = _parse_typed_signature_noctx(f, definition_locals=definition_locals)
+            ret_pairs = [(f"res{i}", ty) for i, ty in enumerate(ret_types)]
+            self.method(
+                meth_name,
+                enable_name=enable_name,
+                ready_name=ready_name,
+                args=arg_types,
+                returns=ret_pairs,
+                static_latency=static_latency,
+                interval=interval,
+            )
+            return f
+
+        if func is not None:
+            return deco(func)
+        return deco
+
+    def value_sig(
+        self,
+        func: F | None = None,
+        *,
+        name: str | None = None,
+        ready_name: str | None = None,
+        static_latency: int | None = None,
+    ) -> F | Callable[[F], F]:
+        """Declare a value signature from a typed Python function."""
+
+        frame = inspect.currentframe()
+        definition_locals = None
+        if frame is not None and frame.f_back is not None:
+            definition_locals = dict(frame.f_back.f_locals)
+        del frame
+
+        def deco(f: F) -> F:
+            val_name = name or f.__name__
+            arg_types, ret_types = _parse_typed_signature_noctx(f, definition_locals=definition_locals)
+            ret_pairs = [(f"res{i}", ty) for i, ty in enumerate(ret_types)]
+            self.value(
+                val_name,
+                ready_name=ready_name,
+                args=arg_types,
+                returns=ret_pairs,
+                static_latency=static_latency,
+            )
+            return f
+
+        if func is not None:
+            return deco(func)
+        return deco
+
+    def sequence_before(self, before: Any, after: Any) -> ExternalModuleBuilder:
         """Declare that method 'before' must sequence before 'after'.
 
         Args:
@@ -238,10 +381,14 @@ class ExternalModuleBuilder:
         Returns:
             self for chaining.
         """
-        self._sequence_before.append((before, after))
+        before_name = getattr(before, "name", None) or getattr(before, "__name__", None) or before
+        after_name = getattr(after, "name", None) or getattr(after, "__name__", None) or after
+        if not isinstance(before_name, str) or not isinstance(after_name, str):
+            raise TypeError("sequence_before expects str-like or function-like inputs")
+        self._sequence_before.append((before_name, after_name))
         return self
 
-    def conflict(self, method1: str, method2: str) -> ExternalModuleBuilder:
+    def conflict(self, method1: Any, method2: Any) -> ExternalModuleBuilder:
         """Declare that two methods conflict (cannot fire together).
 
         Args:
@@ -251,10 +398,14 @@ class ExternalModuleBuilder:
         Returns:
             self for chaining.
         """
-        self._conflict.append((method1, method2))
+        m1 = getattr(method1, "name", None) or getattr(method1, "__name__", None) or method1
+        m2 = getattr(method2, "name", None) or getattr(method2, "__name__", None) or method2
+        if not isinstance(m1, str) or not isinstance(m2, str):
+            raise TypeError("conflict expects str-like or function-like inputs")
+        self._conflict.append((m1, m2))
         return self
 
-    def conflict_free(self, method1: str, method2: str) -> ExternalModuleBuilder:
+    def conflict_free(self, method1: Any, method2: Any) -> ExternalModuleBuilder:
         """Declare that two methods are conflict-free.
 
         Args:
@@ -264,7 +415,11 @@ class ExternalModuleBuilder:
         Returns:
             self for chaining.
         """
-        self._conflict_free.append((method1, method2))
+        m1 = getattr(method1, "name", None) or getattr(method1, "__name__", None) or method1
+        m2 = getattr(method2, "name", None) or getattr(method2, "__name__", None) or method2
+        if not isinstance(m1, str) or not isinstance(m2, str):
+            raise TypeError("conflict_free expects str-like or function-like inputs")
+        self._conflict_free.append((m1, m2))
         return self
 
     def _finalize(self):
