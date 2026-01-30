@@ -61,21 +61,19 @@ def create_while_loop_circuit():
         # Done flag register
         done_reg = counter.instance(reg1_mod, "done", clk=clk, rst=rst)
 
-        # Value to read counter
-        with jit.value(counter, "count", returns=[UInt(width)]) as count_val:
-            with count_val.guard as g:
-                g.always()
-            with count_val.body as body:
-                val = body.call(cnt, "read")
-                body.returns(val)
+        @jit.value(counter)
+        def count(count_val) -> UInt[width]:
+            with count_val.guard:
+                count_val.always()
+            with count_val.body:
+                count_val.returns(cnt.read)
 
-        # Value to check if done
-        with jit.value(counter, "is_done", returns=[UInt(1)]) as done_val:
-            with done_val.guard as g:
-                g.always()
-            with done_val.body as body:
-                d = body.call(done_reg, "read")
-                body.returns(d)
+        @jit.value(counter)
+        def is_done(done_val) -> UInt[1]:
+            with done_val.guard:
+                done_val.always()
+            with done_val.body:
+                done_val.returns(done_reg.read)
 
         # Step to increment counter
         with counter.step("increment") as inc_step:
@@ -115,7 +113,7 @@ def create_while_loop_circuit():
                     seq.enable(done_step.ref())
 
         # Precedence
-        counter.precedence(count_val.ref(), done_val.ref(), rule.ref())
+        counter.precedence(count.ref(), is_done.ref(), rule.ref())
 
     return circuit
 

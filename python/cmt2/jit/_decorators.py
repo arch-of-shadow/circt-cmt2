@@ -27,6 +27,7 @@ import inspect
 from typing import Any, Callable, TypeVar
 
 from ._context import RuleContext, MethodContext, ValueContext
+from ._typing import ArgProxy, parse_typed_signature
 
 F = TypeVar("F", bound=Callable[..., Any])
 
@@ -56,6 +57,8 @@ class _RuleDef:
                 func(ctx)
             setattr(func, "_cmt2_ref", rule.ref())
             setattr(func, "_cmt2_name", rule_name)
+            # Convenience for scheduling APIs: `fn.ref()` mirrors PyCMT2 builders.
+            setattr(func, "ref", lambda: getattr(func, "_cmt2_ref"))
         return func
 
     def __enter__(self) -> RuleContext:
@@ -97,97 +100,89 @@ class _MethodDef:
         self,
         module_builder: Any,
         name: str | None = None,
-        args: list | None = None,
-        returns: list | None = None,
     ):
         self._builder = _unwrap_module_builder(module_builder)
         self._name = name
-        self._args = args or []
-        self._returns = returns or []
         self._cm = None
         self._method = None
         self._ctx: MethodContext | None = None
 
     def __call__(self, func: F) -> F:
         method_name = self._name or _get_function_name(func)
-        with self._builder.method(method_name, args=self._args, returns=self._returns) as method:
-            ctx = MethodContext(method, args=self._args)
+        frame = inspect.currentframe()
+        definition_locals = None
+        if frame is not None and frame.f_back is not None:
+            definition_locals = dict(frame.f_back.f_locals)
+        del frame
+
+        arg_types, return_types = parse_typed_signature(
+            func, require_return=True, definition_locals=definition_locals
+        )
+        with self._builder.method(method_name, args=arg_types, returns=return_types) as method:
+            ctx = MethodContext(method, args=arg_types)
             with ctx:
-                sig = inspect.signature(func)
-                if len(sig.parameters) != 1:
-                    raise TypeError(
-                        f"@jit.method expects a function of the form `def {method_name}(r): ...`.\n"
-                        "Access method arguments inside guard/body as `r.<argname>`.\n"
-                        f"Declared args: {[name for name, _ in self._args]}"
-                    )
-                func(ctx)
+                proxies = [ArgProxy(name) for name, _ in arg_types]
+                func(ctx, *proxies)
             setattr(func, "_cmt2_ref", method.ref())
             setattr(func, "_cmt2_name", method_name)
+            setattr(func, "ref", lambda: getattr(func, "_cmt2_ref"))
         return func
 
     def __enter__(self) -> MethodContext:
-        self._cm = self._builder.method(self._name, args=self._args, returns=self._returns)
-        self._method = self._cm.__enter__()
-        self._ctx = MethodContext(self._method, args=self._args)
-        self._ctx.__enter__()
-        return self._ctx
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        assert self._cm is not None and self._ctx is not None
-        self._ctx.__exit__(exc_type, exc_val, exc_tb)
-        return self._cm.__exit__(exc_type, exc_val, exc_tb)
+        raise TypeError(
+            "Context-manager form of @jit.method is not supported. "
+            "Use the decorator form with typed Python annotations."
+        )
 
 
 def method(
     module_builder: Any,
     name: str | None = None,
-    args: list | None = None,
-    returns: list | None = None,
 ) -> _MethodDef:
     """Define an action method (decorator or context manager)."""
-    return _MethodDef(module_builder, name=name, args=args, returns=returns)
+    return _MethodDef(module_builder, name=name)
 
 
 class _ValueDef:
-    def __init__(self, module_builder: Any, name: str | None = None, returns: list | None = None):
+    def __init__(self, module_builder: Any, name: str | None = None):
         self._builder = _unwrap_module_builder(module_builder)
         self._name = name
-        self._returns = returns or []
         self._cm = None
         self._value = None
         self._ctx: ValueContext | None = None
 
     def __call__(self, func: F) -> F:
         value_name = self._name or _get_function_name(func)
-        with self._builder.value(value_name, returns=self._returns) as value:
+        frame = inspect.currentframe()
+        definition_locals = None
+        if frame is not None and frame.f_back is not None:
+            definition_locals = dict(frame.f_back.f_locals)
+        del frame
+
+        arg_types, return_types = parse_typed_signature(
+            func, require_return=True, definition_locals=definition_locals
+        )
+        if arg_types:
+            raise TypeError("@jit.value functions cannot take arguments")
+        with self._builder.value(value_name, returns=return_types) as value:
             ctx = ValueContext(value)
             with ctx:
-                sig = inspect.signature(func)
-                if len(sig.parameters) != 1:
-                    raise TypeError(
-                        f"@jit.value expects a function of the form `def {value_name}(r): ...`."
-                    )
                 func(ctx)
             setattr(func, "_cmt2_ref", value.ref())
             setattr(func, "_cmt2_name", value_name)
+            setattr(func, "ref", lambda: getattr(func, "_cmt2_ref"))
         return func
 
     def __enter__(self) -> ValueContext:
-        self._cm = self._builder.value(self._name, returns=self._returns)
-        self._value = self._cm.__enter__()
-        self._ctx = ValueContext(self._value)
-        self._ctx.__enter__()
-        return self._ctx
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        assert self._cm is not None and self._ctx is not None
-        self._ctx.__exit__(exc_type, exc_val, exc_tb)
-        return self._cm.__exit__(exc_type, exc_val, exc_tb)
+        raise TypeError(
+            "Context-manager form of @jit.value is not supported. "
+            "Use the decorator form with a typed return annotation."
+        )
 
 
-def value(module_builder: Any, name: str | None = None, returns: list | None = None) -> _ValueDef:
+def value(module_builder: Any, name: str | None = None) -> _ValueDef:
     """Define a value method (decorator or context manager)."""
-    return _ValueDef(module_builder, name=name, returns=returns)
+    return _ValueDef(module_builder, name=name)
 
 
 def elaborate(func: F) -> F:

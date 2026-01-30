@@ -159,7 +159,7 @@ class SignalRef:
         Returns:
             MethodRef if it's a known method, else the actual attribute
         """
-        if name in _PROPERTY_METHODS:
+        if name in _PROPERTY_METHODS and not self._method_has_args(name):
             builder = _get_current_builder()
             if builder is None:
                 raise RuntimeError(
@@ -183,6 +183,40 @@ class SignalRef:
                 )
             return builder.call(self._instance, name)
 
+        # Treat external-module values with no args as property-like reads.
+        ext = getattr(self._instance, "_ext_module", None)
+        if ext is not None and getattr(ext, "get_value_arg_types", None) is not None:
+            pending_values = getattr(ext, "_pending_values", None)
+            has_value = isinstance(pending_values, list) and any(
+                getattr(v, "get", None) is not None and v.get("name") == name for v in pending_values
+            )
+            if has_value:
+                v_args = ext.get_value_arg_types(name)
+                if len(v_args) == 0:
+                    builder = _get_current_builder()
+                    if builder is None:
+                        raise RuntimeError(
+                            f"Cannot read '{name}' outside of guard/body context. "
+                            "Use within `with r.guard:` / `with r.body:`."
+                        )
+                    return builder.call(self._instance, name)
+
+                # Value exists and takes args: treat as callable.
+                if name not in self._method_cache:
+                    self._method_cache[name] = MethodRef(self._instance, name, _py_ref=None)
+                return self._method_cache[name]
+
+        # Treat external-module methods as callables, even if not in the common set.
+        if ext is not None and getattr(ext, "get_method_arg_types", None) is not None:
+            pending_methods = getattr(ext, "_pending_methods", None)
+            has_method = isinstance(pending_methods, list) and any(
+                getattr(m, "get", None) is not None and m.get("name") == name for m in pending_methods
+            )
+            if has_method:
+                if name not in self._method_cache:
+                    self._method_cache[name] = MethodRef(self._instance, name, _py_ref=None)
+                return self._method_cache[name]
+
         if name in self._get_method_names():
             if name in self._method_cache:
                 return self._method_cache[name]
@@ -195,6 +229,32 @@ class SignalRef:
         
         # Otherwise return the actual attribute
         return getattr(self._instance, name)
+
+    def _method_has_args(self, name: str) -> bool:
+        """Best-effort check: does `name` require arguments?"""
+        ext = getattr(self._instance, "_ext_module", None)
+        if ext is not None:
+            try:
+                if getattr(ext, "get_value_arg_types", None) is not None:
+                    if ext.get_value_arg_types(name):
+                        return True
+                if getattr(ext, "get_method_arg_types", None) is not None:
+                    if ext.get_method_arg_types(name):
+                        return True
+            except Exception:
+                pass
+
+        inst_module = getattr(self._instance, "_module", None)
+        if inst_module is not None:
+            try:
+                if hasattr(inst_module, "_methods") and name in inst_module._methods:
+                    meth_builder = inst_module._methods[name]
+                    arg_types = getattr(meth_builder, "_arg_types", [])
+                    return bool(arg_types)
+            except Exception:
+                pass
+
+        return False
     
     def __setattr__(self, name: str, value: Any) -> None:
         """Set attribute - enables `signal.next = value` syntax.

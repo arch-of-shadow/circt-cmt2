@@ -203,8 +203,8 @@ class ValueContext:
     """Context for building a value method with clear guard/body separation.
     
     Example:
-        @jit.value(m, returns=[UInt(32)])
-        def get_count(r):
+        @jit.value(m)
+        def get_count(r) -> UInt[32]:
             with r.guard:
                 r.always()
             
@@ -332,13 +332,13 @@ class MethodContext:
     """Context for building an action method with clear guard/body separation.
     
     Example:
-        @jit.method(m, args=[("data", UInt(32))])
-        def write(r):
+        @jit.method(m)
+        def write(r, data: UInt[32]) -> None:
             with r.guard:
                 r.always()
             
             with r.body:
-                reg.write(r.data)
+                reg.write(data)
     """
     
     def __init__(self, method: Any, args: list | None = None):

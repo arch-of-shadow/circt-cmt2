@@ -38,6 +38,7 @@ Example:
 from __future__ import annotations
 
 from ._decorators import elaborate, rule, method, value
+from ._dataflow import dataflow, DataflowContext
 from ._module import module, ModuleContext
 from ._method_ref import SignalRef, MethodRef, InterfaceRef, wrap_instance, wrap_interface
 from ._context import RuleContext, MethodContext, ValueContext
@@ -48,9 +49,12 @@ __all__ = [
     "rule",
     "method", 
     "value",
+    "dataflow",
     # Module
     "module",
     "ModuleContext",
+    # Dataflow
+    "DataflowContext",
     # Method references
     "SignalRef",
     "MethodRef",

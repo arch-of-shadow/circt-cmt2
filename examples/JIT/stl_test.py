@@ -52,18 +52,16 @@ def test_reg_and_wire():
             with rule.guard as g:
                 g.always()
             with rule.body as body:
-                val = body.call(counter, "read")
-                new_val = body.add(val, body.const(1, 32))
-                body.call(counter, "write", body.truncate(new_val, 32))
-                body.call(temp, "write", body.bits(val, 15, 0))
+                counter.next = counter.read + 1
+                temp.write(body.bits(counter.read, 15, 0))
 
         # Value to read counter
-        with jit.value(m, "count", returns=[UInt(32)]) as val:
-            with val.guard as g:
-                g.always()
-            with val.body as body:
-                result = body.call(counter, "read")
-                body.returns(result)
+        @jit.value(m)
+        def count(val) -> UInt[32]:
+            with val.guard:
+                val.always()
+            with val.body:
+                val.returns(counter.read)
 
     # Emit MLIR
     mlir = circuit.emit_mlir()
@@ -106,12 +104,12 @@ def test_wire_default():
                         then_b.call(flag, "write", then_b.const(0, 8))
 
         # Value to read
-        with jit.value(m, "get_flag", returns=[UInt(8)]) as val:
-            with val.guard as g:
-                g.always()
-            with val.body as body:
-                result = body.call(flag, "read")
-                body.returns(result)
+        @jit.value(m)
+        def get_flag(val) -> UInt[8]:
+            with val.guard:
+                val.always()
+            with val.body:
+                val.returns(flag.read)
 
     mlir = circuit.emit_mlir()
     print("MLIR generated successfully")
@@ -140,22 +138,20 @@ def test_fifo1_push():
         fifo = m.instance(fifo_mod, "output_fifo", clk=clk, rst=rst)
 
         # Method to enqueue data
-        with jit.method(m, "produce", args=[("data", UInt(32))]) as meth:
-            with meth.guard as g:
-                # Can enqueue when not full or when deq happens
-                not_full = g.call(fifo, "full")
-                not_full_inverted = g.not_(not_full)
-                g.returns(not_full_inverted)
-            with meth.body as body:
-                body.call(fifo, "enq", body.arg("data"))
+        @jit.method(m)
+        def produce(meth, data: UInt[32]) -> None:
+            with meth.guard:
+                meth.returns(meth.not_(fifo.full))
+            with meth.body:
+                fifo.enq(data)
 
         # Value to check if full
-        with jit.value(m, "is_full", returns=[UInt(1)]) as val:
-            with val.guard as g:
-                g.always()
-            with val.body as body:
-                result = body.call(fifo, "full")
-                body.returns(result)
+        @jit.value(m)
+        def is_full(val) -> UInt[1]:
+            with val.guard:
+                val.always()
+            with val.body:
+                val.returns(fifo.full)
 
     mlir = circuit.emit_mlir()
     print("MLIR generated successfully")
@@ -188,20 +184,21 @@ def test_fifo1_pull():
         fifo = m.instance(fifo_mod, "input_fifo", clk=clk, rst=rst)
 
         # Method to dequeue data
-        with jit.method(m, "consume", returns=[UInt(16)]) as meth:
-            with meth.guard as g:
-                g.always()  # Guard in deq value handles availability
-            with meth.body as body:
-                data = body.call(fifo, "deq")
-                body.returns(data)
+        @jit.method(m)
+        def consume(meth) -> UInt[16]:
+            with meth.guard:
+                meth.always()
+            with meth.body:
+                # FIFO1Pull exposes `deq` as a value (property-like in JIT).
+                meth.returns(fifo.deq)
 
         # Value to check if full
-        with jit.value(m, "is_full", returns=[UInt(1)]) as val:
-            with val.guard as g:
-                g.always()
-            with val.body as body:
-                result = body.call(fifo, "full")
-                body.returns(result)
+        @jit.value(m)
+        def is_full(val) -> UInt[1]:
+            with val.guard:
+                val.always()
+            with val.body:
+                val.returns(fifo.full)
 
     mlir = circuit.emit_mlir()
     print("MLIR generated successfully")
@@ -228,30 +225,28 @@ def test_fifo2i():
         fifo = m.instance(fifo_mod, "buffer", clk=clk, rst=rst)
 
         # Method to enqueue
-        with jit.method(m, "push", args=[("data", UInt(64))]) as meth:
-            with meth.guard as g:
-                # Can push when not full
-                is_full = g.call(fifo, "full")
-                can_push = g.not_(is_full)
-                g.returns(can_push)
-            with meth.body as body:
-                body.call(fifo, "enq", body.arg("data"))
+        @jit.method(m)
+        def push(meth, data: UInt[64]) -> None:
+            with meth.guard:
+                meth.returns(meth.not_(fifo.full))
+            with meth.body:
+                fifo.enq(data)
 
         # Method to dequeue
-        with jit.method(m, "pop", returns=[UInt(64)]) as meth:
-            with meth.guard as g:
-                g.always()  # Guard in deq handles availability
-            with meth.body as body:
-                data = body.call(fifo, "deq")
-                body.returns(data)
+        @jit.method(m)
+        def pop(meth) -> UInt[64]:
+            with meth.guard:
+                meth.always()
+            with meth.body:
+                meth.returns(fifo.deq())
 
         # Value to check if full
-        with jit.value(m, "is_full", returns=[UInt(1)]) as val:
-            with val.guard as g:
-                g.always()
-            with val.body as body:
-                result = body.call(fifo, "full")
-                body.returns(result)
+        @jit.value(m)
+        def is_full(val) -> UInt[1]:
+            with val.guard:
+                val.always()
+            with val.body:
+                val.returns(fifo.full)
 
     mlir = circuit.emit_mlir()
     print("MLIR generated successfully")
@@ -282,26 +277,28 @@ def test_memory_sync():
         result_reg = m.instance(reg_mod, "result", clk=clk, rst=rst)
 
         # Method to initiate read
-        with jit.method(m, "read_start", args=[("addr", UInt(8))]) as meth:
-            with meth.guard as g:
-                g.always()
-            with meth.body as body:
-                body.call(mem, "rd0", body.arg("addr"))
+        @jit.method(m)
+        def read_start(meth, addr: UInt[8]) -> None:
+            with meth.guard:
+                meth.always()
+            with meth.body:
+                mem.rd0(addr)
 
         # Value to get read result
-        with jit.value(m, "read_result", returns=[UInt(32)]) as val:
-            with val.guard as g:
-                g.always()
-            with val.body as body:
-                data = body.call(mem, "rd1")
-                body.returns(data)
+        @jit.value(m)
+        def read_result(val) -> UInt[32]:
+            with val.guard:
+                val.always()
+            with val.body:
+                val.returns(mem.rd1)
 
         # Method to write
-        with jit.method(m, "write_data", args=[("addr", UInt(8)), ("data", UInt(32))]) as meth:
-            with meth.guard as g:
-                g.always()
-            with meth.body as body:
-                body.call(mem, "write", body.arg("data"), body.arg("addr"))
+        @jit.method(m)
+        def write_data(meth, addr: UInt[8], data: UInt[32]) -> None:
+            with meth.guard:
+                meth.always()
+            with meth.body:
+                mem.write(data, addr)
 
     mlir = circuit.emit_mlir()
     print("MLIR generated successfully")
@@ -331,19 +328,20 @@ def test_memory_async():
         mem = m.instance(mem_mod, "lut", clk=clk, rst=rst)
 
         # Method to read (combinational)
-        with jit.method(m, "lookup", args=[("addr", UInt(6))], returns=[UInt(16)]) as meth:
-            with meth.guard as g:
-                g.always()
-            with meth.body as body:
-                data = body.call(mem, "read", body.arg("addr"))
-                body.returns(data)
+        @jit.method(m)
+        def lookup(meth, addr: UInt[6]) -> UInt[16]:
+            with meth.guard:
+                meth.always()
+            with meth.body:
+                meth.returns(mem.read(addr))
 
         # Method to write
-        with jit.method(m, "store", args=[("addr", UInt(6)), ("data", UInt(16))]) as meth:
-            with meth.guard as g:
-                g.always()
-            with meth.body as body:
-                body.call(mem, "write", body.arg("data"), body.arg("addr"))
+        @jit.method(m)
+        def store(meth, addr: UInt[6], data: UInt[16]) -> None:
+            with meth.guard:
+                meth.always()
+            with meth.body:
+                mem.write(data, addr)
 
     mlir = circuit.emit_mlir()
     print("MLIR generated successfully")
@@ -401,17 +399,19 @@ def test_precedence():
         rst = m.reset()
         reg = m.instance(reg_mod, "reg", clk=clk, rst=rst)
 
-        with jit.value(m, "read_val", returns=[UInt(32)]) as read_val:
-            with read_val.guard as g:
-                g.always()
-            with read_val.body as body:
-                body.returns(body.call(reg, "read"))
+        @jit.value(m)
+        def read_val(val) -> UInt[32]:
+            with val.guard:
+                val.always()
+            with val.body:
+                val.returns(reg.read)
 
-        with jit.method(m, "write_meth", args=[("data", UInt(32))]) as write_meth:
-            with write_meth.guard as g:
-                g.always()
-            with write_meth.body as body:
-                body.call(reg, "write", body.arg("data"))
+        @jit.method(m)
+        def write_meth(meth, data: UInt[32]) -> None:
+            with meth.guard:
+                meth.always()
+            with meth.body:
+                reg.write(data)
 
         with jit.rule(m, "update") as rule:
             with rule.guard as g:
@@ -421,7 +421,7 @@ def test_precedence():
                 body.call(reg, "write", body.add(val, body.const(1, 32)))
 
         # Set precedence: read_val < write_meth < update
-        m.precedence(read_val.ref(), write_meth.ref(), rule.ref())
+        m.precedence(read_val._cmt2_ref, write_meth._cmt2_ref, rule.ref())
 
     mlir = circuit.emit_mlir()
     print("MLIR generated successfully")
