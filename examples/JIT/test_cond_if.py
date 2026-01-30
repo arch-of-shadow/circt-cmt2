@@ -216,29 +216,26 @@ def create_simulatable_circuit():
                         with if_.else_() as else_:
                             else_.enable(set_step.ref())
 
-        # Value: get_counter
-        with jit.value(mod, "get_counter", returns=[UInt(32)]) as val:
-            with val.guard as g:
-                g.always()
-            with val.body as body:
-                cnt = body.call(counter, "read")
-                body.returns(cnt)
+        @jit.value(mod)
+        def get_counter(val) -> UInt[32]:
+            with val.guard:
+                val.always()
+            with val.body:
+                val.returns(counter.read)
 
-        # Value: get_result
-        with jit.value(mod, "get_result", returns=[UInt(32)]) as val:
-            with val.guard as g:
-                g.always()
-            with val.body as body:
-                res = body.call(result, "read")
-                body.returns(res)
+        @jit.value(mod)
+        def get_result(val) -> UInt[32]:
+            with val.guard:
+                val.always()
+            with val.body:
+                val.returns(result.read)
 
-        # Value: is_done
-        with jit.value(mod, "is_done", returns=[UInt(1)]) as val:
-            with val.guard as g:
-                g.always()
-            with val.body as body:
-                d = body.call(done, "read")
-                body.returns(d)
+        @jit.value(mod)
+        def is_done(val) -> UInt[1]:
+            with val.guard:
+                val.always()
+            with val.body:
+                val.returns(done.read)
 
     return circuit
 

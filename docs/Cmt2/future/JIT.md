@@ -65,8 +65,8 @@ def counter(width: int = 32):
             with r.body:
                 count.next = count.read + 1
 
-        @jit.value(m, returns=[UInt(width)])
-        def get_count(r):
+        @jit.value(m)
+        def get_count(r) -> UInt[width]:
             with r.guard:
                 r.always()
 
@@ -103,14 +103,31 @@ JIT exposes method arguments as attributes on the context *inside* `guard`/`body
 (matching PyCMT2’s builder behavior).
 
 ```python
-@jit.method(m, args=[("data", UInt(32))])
-def write(r):
+@jit.method(m)
+def write(r, data: UInt[32]) -> None:
     with r.guard:
         r.always()
 
     with r.body:
-        count.write(r.data)
+        count.write(data)
 ```
+
+### Typed signatures (no `args=[("x", ...)]`)
+
+JIT never asks you to define argument/return types via string/tuple lists.
+Instead it uses Python annotations:
+
+```python
+@jit.method(m)
+def add1(r, x: UInt[32]) -> UInt[32]:
+    with r.guard:
+        r.always()
+    with r.body:
+        r.returns(x + 1)
+```
+
+Dynamic-width annotations like `UInt[width]` are supported (the annotation is
+evaluated in the definer’s frame during elaboration).
 
 ## Scheduling hooks (still PyCMT2)
 
@@ -118,6 +135,7 @@ JIT attaches the underlying PyCMT2 reference object to decorated callables:
 
 - `fn._cmt2_ref`: a `RuleRef` / `MethodRef` / `ValueRef`
 - `fn._cmt2_name`: the inferred/explicit name
+- `fn.ref()`: convenience alias returning `fn._cmt2_ref`
 
 This enables using PyCMT2 scheduling APIs (e.g. precedence) without JIT
 re-implementing anything:
@@ -130,6 +148,21 @@ def a(r): ...
 def b(r): ...
 
 m.builder.precedence(a._cmt2_ref, b._cmt2_ref)
+```
+
+## Dataflow pipelines
+
+Use `@jit.dataflow` to define typed dataflow pipelines without `args=[...]`:
+
+```python
+@jit.dataflow(m, interval=1)
+def pipe(df, x: UInt[16]) -> UInt[16]:
+    b = df._df
+    with b.task("stage0") as t0:
+        tok = t0.create_token(x, UInt[16])
+        t0.yield_tokens(tok)
+    with b.task("out", tokens_in=[tok]) as t1:
+        t1.return_values(t1.token_data(tok))
 ```
 
 ## STL usage (no duplication)
@@ -183,6 +216,7 @@ assert ok, out
 - Use `seq.eval()` to re-evaluate combinational outputs after `seq.drive(...)`
   when you need to sample signals within the same cycle.
 - For interface decls, `seq.call_interface(tb.interface_decl("writer"), "store", ...)`
+  (or `seq.call_interface(tb.interface_decl("writer"), store, ...)`)
   models an *outgoing* call from the DUT (the DUT drives `*_enable/*_arg*`, the
   testbench drives `*_ready/*_res*`).
 

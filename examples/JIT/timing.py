@@ -49,14 +49,27 @@ def main():
     with circuit.external_module("Reg32") as reg_mod:
         reg_mod.clock("clk")
         reg_mod.reset("rst")
-        reg_mod.value("read", returns=[("out", UInt(32))])
-        reg_mod.method("write", args=[("data", UInt(32))])
-        reg_mod.sequence_before("read", "write")
+
+        @reg_mod.value_sig
+        def read() -> UInt[32]:
+            ...
+
+        @reg_mod.method_sig
+        def write(data: UInt[32]) -> None:
+            ...
+
+        reg_mod.sequence_before(read, write)
 
     # Define external ALU (combinational - no latency)
     with circuit.external_module("ALU") as alu_mod:
-        alu_mod.value("add", args=[("a", UInt(32)), ("b", UInt(32))], returns=[("out", UInt(32))])
-        alu_mod.value("sub", args=[("a", UInt(32)), ("b", UInt(32))], returns=[("out", UInt(32))])
+
+        @alu_mod.value_sig
+        def add(a: UInt[32], b: UInt[32]) -> UInt[32]:
+            ...
+
+        @alu_mod.value_sig
+        def sub(a: UInt[32], b: UInt[32]) -> UInt[32]:
+            ...
 
     # Create a module that uses static scheduling
     with jit.module(circuit, "StaticScheduler") as sched:
@@ -86,23 +99,23 @@ def main():
 
             # Add 10 to it using ALU (cycle 1)
             ten = step.const(10, 32)
-            new_val = step.call(alu, "add", acc_val[0], ten)
+            new_val = step.call(alu, "add", acc_val, ten)
 
             # Write back to accumulator (cycle 2)
-            step.call(acc_reg, "write", new_val[0])
+            step.call(acc_reg, "write", new_val)
 
             # Increment counter (cycle 3)
             count_val = step.call(count_reg, "read")
             one = step.const(1, 32)
-            new_count = step.call(alu, "add", count_val[0], one)
-            step.call(count_reg, "write", new_count[0])
+            new_count = step.call(alu, "add", count_val, one)
+            step.call(count_reg, "write", new_count)
 
         # Another static step: compute sum of two registers
         with sched.static_step(3, "compute_sum") as step2:
             a = step2.call(acc_reg, "read")
             b = step2.call(count_reg, "read")
-            sum_val = step2.call(alu, "add", a[0], b[0])
-            step2.call(acc_reg, "write", sum_val[0])
+            sum_val = step2.call(alu, "add", a, b)
+            step2.call(acc_reg, "write", sum_val)
 
         # Proc Rule to run the first step (uses multi-cycle control)
         with sched.proc_rule("run_increment") as rule:
@@ -111,21 +124,19 @@ def main():
             with rule.control() as ctrl:
                 ctrl.enable(step.ref())
 
-        # Value to read the accumulator
-        with jit.value(sched, "get_accumulator", returns=[UInt(32)]) as val:
-            with val.guard as g:
-                g.always()
-            with val.body as body:
-                result = body.call(acc_reg, "read")
-                body.returns(result[0])
+        @jit.value(sched)
+        def get_accumulator(val) -> UInt[32]:
+            with val.guard:
+                val.always()
+            with val.body:
+                val.returns(acc_reg.read)
 
-        # Value to read the counter
-        with jit.value(sched, "get_count", returns=[UInt(32)]) as val:
-            with val.guard as g:
-                g.always()
-            with val.body as body:
-                result = body.call(count_reg, "read")
-                body.returns(result[0])
+        @jit.value(sched)
+        def get_count(val) -> UInt[32]:
+            with val.guard:
+                val.always()
+            with val.body:
+                val.returns(count_reg.read)
 
     # Print the generated MLIR
     print("\nGenerated MLIR with static steps:")
@@ -323,26 +334,26 @@ def create_simulatable_timing_circuit():
         # =====================================================================
         # Value methods to read state
         # =====================================================================
-        with jit.value(m, "get_acc", returns=[UInt(32)]) as val:
-            with val.guard as g:
-                g.always()
-            with val.body as b:
-                v = b.call(acc, "read")
-                b.returns(v)
+        @jit.value(m)
+        def get_acc(val) -> UInt[32]:
+            with val.guard:
+                val.always()
+            with val.body:
+                val.returns(acc.read)
 
-        with jit.value(m, "get_counter", returns=[UInt(32)]) as val:
-            with val.guard as g:
-                g.always()
-            with val.body as b:
-                v = b.call(counter, "read")
-                b.returns(v)
+        @jit.value(m)
+        def get_counter(val) -> UInt[32]:
+            with val.guard:
+                val.always()
+            with val.body:
+                val.returns(counter.read)
 
-        with jit.value(m, "get_aux", returns=[UInt(32)]) as val:
-            with val.guard as g:
-                g.always()
-            with val.body as b:
-                v = b.call(aux, "read")
-                b.returns(v)
+        @jit.value(m)
+        def get_aux(val) -> UInt[32]:
+            with val.guard:
+                val.always()
+            with val.body:
+                val.returns(aux.read)
 
     return circuit
 

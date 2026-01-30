@@ -42,7 +42,7 @@ def create_basic_counter():
         # Ports
         clk = m.clock()
         rst = m.reset()
-        enable = m.input("enable", UInt(1))
+        enable = m.input("enable", UInt[1])
 
         # Increment rule - always fires (demonstrates rule structure)
         # Note: Using g.always() because CMT2 rules are IsolatedFromAbove
@@ -56,11 +56,12 @@ def create_basic_counter():
                 pass
 
         # Read value method - always ready
-        with jit.value(m, "read", returns=[UInt(32)]) as val:
-            with val.guard as g:
-                g.always()
-            with val.body as b:
-                b.returns(b.const(0, 32))
+        @jit.value(m)
+        def read(val) -> UInt[32]:
+            with val.guard:
+                val.always()
+            with val.body:
+                val.returns(val.const(0, 32))
 
     return circuit
 
@@ -89,17 +90,15 @@ def create_simulatable_counter():
             with rule.guard as g:
                 g.always()
             with rule.body as b:
-                val = b.call(count, "read")
-                next_val = b.add(val, b.const(1, 32))
-                b.call(count, "write", next_val)
+                count.next = count.read + 1
 
         # Value method to expose the count value as a port
-        with jit.value(m, "get_count", returns=[UInt(32)]) as val:
-            with val.guard as g:
-                g.always()
-            with val.body as b:
-                cnt = b.call(count, "read")
-                b.returns(cnt)
+        @jit.value(m)
+        def get_count(val) -> UInt[32]:
+            with val.guard:
+                val.always()
+            with val.body:
+                val.returns(count.read)
 
     return circuit
 

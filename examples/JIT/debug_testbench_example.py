@@ -64,75 +64,46 @@ def create_state_machine_circuit():
         # Target value register
         target = m.instance(reg32, "target", clk=clk, rst=rst)
 
-        # =========================================================================
-        # Method: start - Begin counting to target
-        # =========================================================================
-        with jit.method(m, "start", args=[("target_val", UInt(32))]) as meth:
-            with meth.guard as g:
-                # Can only start from IDLE state
-                current_state = g.call(state, "read")
-                is_idle = g.eq(current_state, g.const(0, 8))
-                g.returns(is_idle)
-            with meth.body as body:
-                target_val = body.arg("target_val")
-                body.call(target, "write", target_val)
-                body.call(counter, "write", body.const(0, 32))
-                body.call(state, "write", body.const(1, 8))  # -> RUNNING
+        @jit.method(m)
+        def start(meth, target_val: UInt[32]) -> None:
+            with meth.guard:
+                meth.returns(meth.eq(state.read, meth.const(0, 8)))
+            with meth.body:
+                target.write(target_val)
+                counter.write(meth.const(0, 32))
+                state.write(meth.const(1, 8))  # -> RUNNING
 
-        # =========================================================================
-        # Rule: increment - Count up while running (fires when cnt < target)
-        # =========================================================================
-        with jit.rule(m, "increment") as rule:
-            with rule.guard as g:
-                current_state = g.call(state, "read")
-                is_running = g.eq(current_state, g.const(1, 8))
+        @jit.rule(m)
+        def increment(rule):
+            with rule.guard:
+                is_running = rule.eq(state.read, rule.const(1, 8))
+                not_done = rule.lt(counter.read, target.read)
+                rule.returns(rule.and_(is_running, not_done))
+            with rule.body:
+                counter.write(counter.read + rule.const(1, 32))
 
-                cnt = g.call(counter, "read")
-                tgt = g.call(target, "read")
-                not_done = g.lt(cnt, tgt)
+        @jit.rule(m)
+        def finish(rule):
+            with rule.guard:
+                is_running = rule.eq(state.read, rule.const(1, 8))
+                reached = rule.eq(counter.read, target.read)
+                rule.returns(rule.and_(is_running, reached))
+            with rule.body:
+                state.write(rule.const(2, 8))  # -> DONE
 
-                g.returns(g.and_(is_running, not_done))
-            with rule.body as body:
-                cnt = body.call(counter, "read")
-                new_cnt = body.add(cnt, body.const(1, 32))
-                body.call(counter, "write", new_cnt)
+        @jit.value(m)
+        def get_count(val) -> UInt[32]:
+            with val.guard:
+                val.always()
+            with val.body:
+                val.returns(counter.read)
 
-        # =========================================================================
-        # Rule: finish - Transition to DONE when target reached
-        # =========================================================================
-        with jit.rule(m, "finish") as rule:
-            with rule.guard as g:
-                current_state = g.call(state, "read")
-                is_running = g.eq(current_state, g.const(1, 8))
-
-                cnt = g.call(counter, "read")
-                tgt = g.call(target, "read")
-                reached = g.eq(cnt, tgt)
-
-                g.returns(g.and_(is_running, reached))
-            with rule.body as body:
-                body.call(state, "write", body.const(2, 8))  # -> DONE
-
-        # =========================================================================
-        # Value: get_count - Read current counter value
-        # =========================================================================
-        with jit.value(m, "get_count", returns=[UInt(32)]) as val:
-            with val.guard as g:
-                g.always()
-            with val.body as body:
-                cnt = body.call(counter, "read")
-                body.returns(cnt)
-
-        # =========================================================================
-        # Value: is_done - Check if state machine is done
-        # =========================================================================
-        with jit.value(m, "is_done", returns=[UInt(8)]) as val:
-            with val.guard as g:
-                g.always()
-            with val.body as body:
-                current_state = body.call(state, "read")
-                done = body.eq(current_state, body.const(2, 8))
-                body.returns(done)
+        @jit.value(m)
+        def is_done(val) -> UInt[1]:
+            with val.guard:
+                val.always()
+            with val.body:
+                val.returns(val.eq(state.read, val.const(2, 8)))
 
     return circuit
 

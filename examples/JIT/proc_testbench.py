@@ -78,43 +78,32 @@ def create_proc_testable_circuit():
         # The actual multi-cycle computation is done by the compute_multiply proc_rule
         # Note: atomic method() is always single-cycle. For multi-cycle methods,
         # use proc_method() instead.
-        with jit.method(mult_mod, 
-            "multiply",
-            args=[("a", UInt(32)), ("b", UInt(32))],
-            returns=[UInt(32)],
-        ) as meth:
-            with meth.guard as g:
-                # Can accept new inputs when not busy
-                is_busy = g.call(busy, "read")
-                g.returns(g.not_(is_busy))
+        @jit.method(mult_mod)
+        def multiply(meth, a: UInt[32], b: UInt[32]) -> UInt[32]:
+            with meth.guard:
+                meth.returns(meth.not_(busy.read))
 
-            with meth.body as body:
-                # Store operands and compute result over 4 cycles
-                # The actual computation is done in a proc_rule
-                a_val = body.arg("a")
-                b_val = body.arg("b")
-                body.call(op_a, "write", a_val)
-                body.call(op_b, "write", b_val)
-                body.call(busy, "write", body.const(1, 1))
-                # Return current result (will be valid after 4 cycles)
-                result = body.call(result_reg, "read")
-                body.returns(result)
+            with meth.body:
+                op_a.write(a)
+                op_b.write(b)
+                busy.write(meth.const(1, 1))
+                meth.returns(result_reg.read)
 
         # Value to read result
-        with jit.value(mult_mod, "get_result", returns=[UInt(32)]) as val:
-            with val.guard as g:
-                g.returns(g.const(1, 1))  # Always ready
-            with val.body as body:
-                result = body.call(result_reg, "read")
-                body.returns(result)
+        @jit.value(mult_mod)
+        def get_result(val) -> UInt[32]:
+            with val.guard:
+                val.always()
+            with val.body:
+                val.returns(result_reg.read)
 
         # Value to check busy status
-        with jit.value(mult_mod, "is_busy", returns=[UInt(1)]) as val:
-            with val.guard as g:
-                g.returns(g.const(1, 1))  # Always ready
-            with val.body as body:
-                is_busy = body.call(busy, "read")
-                body.returns(is_busy)
+        @jit.value(mult_mod)
+        def is_busy(val) -> UInt[1]:
+            with val.guard:
+                val.always()
+            with val.body:
+                val.returns(busy.read)
 
         # Internal proc_rule to perform the actual multiplication
         # This uses a 4-cycle static step to match the declared latency
@@ -574,72 +563,68 @@ def create_proc_testable_circuit():
         # Interface Methods (for external stimulus)
         # =====================================================================
 
-        # Method: load - Load values into registers
-        with jit.method(m, "load", args=[("a", UInt(32)), ("b", UInt(32))]) as meth:
-            with meth.guard as g:
-                busy = g.call(reg_busy, "read")
-                not_busy = g.not_(busy)
-                g.returns(not_busy)
-            with meth.body as body:
-                a_in = body.arg("a")
-                b_in = body.arg("b")
-                body.call(reg_a, "write", a_in)
-                body.call(reg_b, "write", b_in)
+        @jit.method(m)
+        def load(meth, a: UInt[32], b: UInt[32]) -> None:
+            with meth.guard:
+                meth.returns(meth.not_(reg_busy.read))
+            with meth.body:
+                reg_a.write(a)
+                reg_b.write(b)
 
-        # Method: reset_state - Reset all state
-        with jit.method(m, "reset_state") as meth:
-            with meth.guard as g:
-                g.always()
-            with meth.body as body:
-                body.call(reg_a, "write", body.const(0, 32))
-                body.call(reg_b, "write", body.const(0, 32))
-                body.call(reg_result, "write", body.const(0, 32))
-                body.call(reg_counter, "write", body.const(0, 8))
-                body.call(reg_done, "write", body.const(0, 1))
-                body.call(reg_busy, "write", body.const(0, 1))
-                body.call(reg_op_select, "write", body.const(0, 8))
+        @jit.method(m)
+        def reset_state(meth) -> None:
+            with meth.guard:
+                meth.always()
+            with meth.body:
+                reg_a.write(meth.const(0, 32))
+                reg_b.write(meth.const(0, 32))
+                reg_result.write(meth.const(0, 32))
+                reg_counter.write(meth.const(0, 8))
+                reg_done.write(meth.const(0, 1))
+                reg_busy.write(meth.const(0, 1))
+                reg_op_select.write(meth.const(0, 8))
 
         # Method: select_op - Select which operation to run
         # 0=none, 1=seq_add_sub, 2=par_load, 3=cond_compute, 4=loop_increment,
         # 5=mixed_compute, 6=invoke_test, 7=static_sequence, 8=dynamic_sequence, 9=nested_test
-        with jit.method(m, "select_op", args=[("op", UInt(8))]) as meth:
-            with meth.guard as g:
-                g.always()
-            with meth.body as body:
-                op_in = body.arg("op")
-                body.call(reg_op_select, "write", op_in)
+        @jit.method(m)
+        def select_op(meth, op: UInt[8]) -> None:
+            with meth.guard:
+                meth.always()
+            with meth.body:
+                reg_op_select.write(op)
 
         # =====================================================================
         # Value Methods (for output observation)
         # =====================================================================
 
-        with jit.value(m, "get_result", returns=[UInt(32)]) as val:
-            with val.guard as g:
-                g.always()
-            with val.body as body:
-                result = body.call(reg_result, "read")
-                body.returns(result)
+        @jit.value(m)
+        def get_result(val) -> UInt[32]:
+            with val.guard:
+                val.always()
+            with val.body:
+                val.returns(reg_result.read)
 
-        with jit.value(m, "get_counter", returns=[UInt(8)]) as val:
-            with val.guard as g:
-                g.always()
-            with val.body as body:
-                count = body.call(reg_counter, "read")
-                body.returns(count)
+        @jit.value(m)
+        def get_counter(val) -> UInt[8]:
+            with val.guard:
+                val.always()
+            with val.body:
+                val.returns(reg_counter.read)
 
-        with jit.value(m, "is_done", returns=[UInt(1)]) as val:
-            with val.guard as g:
-                g.always()
-            with val.body as body:
-                done = body.call(reg_done, "read")
-                body.returns(done)
+        @jit.value(m)
+        def is_done(val) -> UInt[1]:
+            with val.guard:
+                val.always()
+            with val.body:
+                val.returns(reg_done.read)
 
-        with jit.value(m, "is_busy", returns=[UInt(1)]) as val:
-            with val.guard as g:
-                g.always()
-            with val.body as body:
-                busy = body.call(reg_busy, "read")
-                body.returns(busy)
+        @jit.value(m)
+        def is_busy(val) -> UInt[1]:
+            with val.guard:
+                val.always()
+            with val.body:
+                val.returns(reg_busy.read)
 
     return circuit
 

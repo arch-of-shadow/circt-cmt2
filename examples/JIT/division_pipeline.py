@@ -107,20 +107,18 @@ def create_division_pipeline_explicit():
         rst = mod.reset()
 
         # Create dataflow pipeline with explicit task definitions
-        with mod.dataflow(
-            "div_pipe",
-            args=[("dividend", UInt(32)), ("divisor", UInt(32))],
-            returns=[UInt(32)],
-            interval=1,
-        ) as df:
+        @jit.dataflow(mod, name="div_pipe", interval=1)
+        def div_pipe(df, dividend: UInt[32], divisor: UInt[32]) -> UInt[32]:
+            dfb = df._df
+
             # Stage 0: Initialize
-            with df.task("init") as task:
+            with dfb.task("init") as task:
                 # Create initial token with dividend
-                tok0 = task.create_token(df.dividend, UInt(32))
+                tok0 = task.create_token(dividend, UInt(32))
                 task.yield_tokens(tok0)
 
             # Stage 1: First iteration
-            with df.task("iter1", tokens_in=[tok0], timing=(1, 2)) as task:
+            with dfb.task("iter1", tokens_in=[tok0], timing=(1, 2)) as task:
                 data = task.token_data(tok0)
                 shifted = task.shl(data, 1)
                 result = task.bits(shifted, 31, 0)
@@ -128,7 +126,7 @@ def create_division_pipeline_explicit():
                 task.yield_tokens(tok1)
 
             # Stage 2: Second iteration
-            with df.task("iter2", tokens_in=[tok1], timing=(2, 3)) as task:
+            with dfb.task("iter2", tokens_in=[tok1], timing=(2, 3)) as task:
                 data = task.token_data(tok1)
                 shifted = task.shl(data, 1)
                 result = task.bits(shifted, 31, 0)
@@ -136,7 +134,7 @@ def create_division_pipeline_explicit():
                 task.yield_tokens(tok2)
 
             # Stage 3: Final output
-            with df.task("output", tokens_in=[tok2], timing=(3, 4)) as task:
+            with dfb.task("output", tokens_in=[tok2], timing=(3, 4)) as task:
                 quotient = task.token_data(tok2)
                 task.return_values(quotient)
 
@@ -159,36 +157,31 @@ def create_simulatable_shift_pipeline():
         clk = mod.clock()
         rst = mod.reset()
 
-        with mod.dataflow(
-            "mul_pipe",
-            args=[("input", UInt(16))],
-            returns=[UInt(16)],
-            interval=1,
-        ) as df:
+        @jit.dataflow(mod, name="mul_pipe", interval=1)
+        def mul_pipe(df, input: UInt[16]) -> UInt[16]:
+            dfb = df._df
+
             # Stage 0: Input
-            with df.task("init", timing=(0, 1),
-                        tokens_out=[SyncToken(UInt(16))]) as task:
-                tok0 = task.create_token(df.input, UInt(16))
+            with dfb.task("init", timing=(0, 1), tokens_out=[SyncToken(UInt(16))]) as task:
+                tok0 = task.create_token(input, UInt(16))
                 task.yield_tokens(tok0)
 
             # Stage 1: Multiply by 2
-            with df.task("mul2", tokens_in=[tok0], timing=(1, 2),
-                        tokens_out=[SyncToken(UInt(16))]) as task:
+            with dfb.task("mul2", tokens_in=[tok0], timing=(1, 2), tokens_out=[SyncToken(UInt(16))]) as task:
                 data = task.token_data(tok0)
                 result = task.mul(data, task.const(2, 16))
                 tok1 = task.create_token(task.bits(result, 15, 0), UInt(16))
                 task.yield_tokens(tok1)
 
             # Stage 2: Multiply by 2 again (total: x * 4)
-            with df.task("mul2_2", tokens_in=[tok1], timing=(2, 3),
-                        tokens_out=[SyncToken(UInt(16))]) as task:
+            with dfb.task("mul2_2", tokens_in=[tok1], timing=(2, 3), tokens_out=[SyncToken(UInt(16))]) as task:
                 data = task.token_data(tok1)
                 result = task.mul(data, task.const(2, 16))
                 tok2 = task.create_token(task.bits(result, 15, 0), UInt(16))
                 task.yield_tokens(tok2)
 
             # Stage 3: Output
-            with df.task("output", tokens_in=[tok2], timing=(3, 4)) as task:
+            with dfb.task("output", tokens_in=[tok2], timing=(3, 4)) as task:
                 result = task.token_data(tok2)
                 task.return_values(result)
 

@@ -156,33 +156,27 @@ def create_comprehensive_example():
         with mag_mod.static_step(1, "clear_busy_step") as step:
             step.call(busy_flag, "write", step.const(0, 1))
 
-        # Method: start calculation
-        with jit.method(mag_mod, "start", args=[("data", UInt(16))]) as meth:
-            with meth.guard as g:
-                is_busy = g.call(busy_flag, "read")
-                not_busy = g.eq(is_busy, g.const(0, 1))
-                g.returns(not_busy)
-            with meth.body as b:
-                data = b.arg("data")
-                b.call(input_reg, "write", data)
-                b.call(busy_flag, "write", b.const(1, 1))
+        @jit.method(mag_mod)
+        def start(meth, data: UInt[16]) -> None:
+            with meth.guard:
+                meth.returns(meth.eq(busy_flag.read, meth.const(0, 1)))
+            with meth.body:
+                input_reg.write(data)
+                busy_flag.write(meth.const(1, 1))
 
-        # Value: get result
-        with jit.value(mag_mod, "result", returns=[UInt(16)]) as val:
-            with val.guard as g:
-                g.always()
-            with val.body as b:
-                result = b.call(result_reg, "read")
-                b.returns(result)
+        @jit.value(mag_mod)
+        def result(val) -> UInt[16]:
+            with val.guard:
+                val.always()
+            with val.body:
+                val.returns(result_reg.read)
 
-        # Value: check if done (not busy)
-        with jit.value(mag_mod, "done", returns=[UInt(1)]) as val:
-            with val.guard as g:
-                g.always()
-            with val.body as b:
-                is_busy = b.call(busy_flag, "read")
-                is_done = b.eq(is_busy, b.const(0, 1))
-                b.returns(is_done)
+        @jit.value(mag_mod)
+        def done(val) -> UInt[1]:
+            with val.guard:
+                val.always()
+            with val.body:
+                val.returns(val.eq(busy_flag.read, val.const(0, 1)))
 
         # Proc rule: trigger calculation when busy
         with mag_mod.proc_rule("run_calc") as rule:
@@ -267,39 +261,30 @@ def create_comprehensive_example():
                     # Clear running after loop completes
                     seq.enable(acc_mod._steps["clear_running"].ref())
 
-        # Method: start accumulation
-        with jit.method(acc_mod, "start", args=[("iterations", UInt(16)), ("inc_value", UInt(16))]) as meth:
-            with meth.guard as g:
-                is_running = g.call(running, "read")
-                not_running = g.eq(is_running, g.const(0, 1))
-                g.returns(not_running)
-            with meth.body as b:
-                iters = b.arg("iterations")
-                inc_val = b.arg("inc_value")
+        @jit.method(acc_mod)
+        def start(meth, iterations: UInt[16], inc_value: UInt[16]) -> None:
+            with meth.guard:
+                meth.returns(meth.eq(running.read, meth.const(0, 1)))
+            with meth.body:
+                accumulator.write(meth.const(0, 32))
+                counter.write(meth.const(0, 16))
+                target.write(iterations)
+                increment.write(inc_value)
+                running.write(meth.const(1, 1))
 
-                # Initialize state
-                b.call(accumulator, "write", b.const(0, 32))
-                b.call(counter, "write", b.const(0, 16))
-                b.call(target, "write", iters)
-                b.call(increment, "write", inc_val)
-                b.call(running, "write", b.const(1, 1))
+        @jit.value(acc_mod)
+        def result(val) -> UInt[32]:
+            with val.guard:
+                val.always()
+            with val.body:
+                val.returns(accumulator.read)
 
-        # Value: get result
-        with jit.value(acc_mod, "result", returns=[UInt(32)]) as val:
-            with val.guard as g:
-                g.always()
-            with val.body as b:
-                result = b.call(accumulator, "read")
-                b.returns(result)
-
-        # Value: check if done
-        with jit.value(acc_mod, "done", returns=[UInt(1)]) as val:
-            with val.guard as g:
-                g.always()
-            with val.body as b:
-                is_running = b.call(running, "read")
-                is_done = b.eq(is_running, b.const(0, 1))
-                b.returns(is_done)
+        @jit.value(acc_mod)
+        def done(val) -> UInt[1]:
+            with val.guard:
+                val.always()
+            with val.body:
+                val.returns(val.eq(running.read, val.const(0, 1)))
 
     # =========================================================================
     # Part 4: Main Processing Module with All Features
@@ -345,11 +330,12 @@ def create_comprehensive_example():
         # Method: Enqueue data to FIFO
         # ---------------------------------------------------------------------
 
-        with jit.method(main_mod, "enqueue", args=[("data", UInt(16))]) as meth:
-            with meth.guard as g:
-                g.always()
-            with meth.body as b:
-                b.call(input_fifo, "enq", b.arg("data"))
+        @jit.method(main_mod)
+        def enqueue(meth, data: UInt[16]) -> None:
+            with meth.guard:
+                meth.always()
+            with meth.body:
+                input_fifo.enq(data)
 
         # ---------------------------------------------------------------------
         # Step definitions
@@ -537,35 +523,33 @@ def create_comprehensive_example():
         # Value methods for external access
         # ---------------------------------------------------------------------
 
-        with jit.value(main_mod, "get_result", returns=[UInt(32)]) as val:
-            with val.guard as g:
-                g.always()
-            with val.body as b:
-                result = b.call(result_reg, "read")
-                b.returns(result)
+        @jit.value(main_mod)
+        def get_result(val) -> UInt[32]:
+            with val.guard:
+                val.always()
+            with val.body:
+                val.returns(result_reg.read)
 
-        with jit.value(main_mod, "is_valid", returns=[UInt(1)]) as val:
-            with val.guard as g:
-                g.always()
-            with val.body as b:
-                valid = b.call(valid_reg, "read")
-                b.returns(valid)
+        @jit.value(main_mod)
+        def is_valid(val) -> UInt[1]:
+            with val.guard:
+                val.always()
+            with val.body:
+                val.returns(valid_reg.read)
 
-        with jit.value(main_mod, "is_busy", returns=[UInt(1)]) as val:
-            with val.guard as g:
-                g.always()
-            with val.body as b:
-                stage = b.call(pipeline_stage, "read")
-                is_busy = b.neq(stage, b.const(0, 16))
-                b.returns(is_busy)
+        @jit.value(main_mod)
+        def is_busy(val) -> UInt[1]:
+            with val.guard:
+                val.always()
+            with val.body:
+                val.returns(val.neq(pipeline_stage.read, val.const(0, 16)))
 
-        # Method for acknowledging result
-        with jit.method(main_mod, "acknowledge") as meth:
-            with meth.guard as g:
-                valid = g.call(valid_reg, "read")
-                g.returns(valid)
-            with meth.body as b:
-                b.call(valid_reg, "write", b.const(0, 1))
+        @jit.method(main_mod)
+        def acknowledge(meth) -> None:
+            with meth.guard:
+                meth.returns(valid_reg.read)
+            with meth.body:
+                valid_reg.write(meth.const(0, 1))
 
     return circuit
 

@@ -11,9 +11,9 @@ directly. There is no separate `cmt2.types`.
 ```python
 from circt.pycmt2 import UInt, SInt, Bool, ClockType, ResetType, AsyncResetType
 
-UInt(32)         # unsigned 32-bit integer
-SInt(16)         # signed 16-bit integer
-Bool()           # 1-bit boolean (UInt(1) semantics)
+UInt[32]         # unsigned 32-bit integer
+SInt[16]         # signed 16-bit integer
+Bool            # 1-bit boolean (UInt(1) semantics)
 ClockType()      # clock
 ResetType()      # synchronous reset
 AsyncResetType() # asynchronous reset
@@ -22,26 +22,34 @@ AsyncResetType() # asynchronous reset
 ## Aggregate types
 
 ```python
-from circt.pycmt2 import Bundle, Vector, UInt
+from circt.pycmt2 import Bundle, Vector, UInt, Bool
 
-Vector(UInt(8), 4)  # 4-element vector of UInt<8>
+Vector[UInt[8], 4]  # 4-element vector of UInt<8>
 
 Bundle((
-    ("valid", UInt(1), False),
-    ("data",  UInt(32), False),
-    ("ready", UInt(1), True),   # flip
+    ("valid", Bool, False),
+    ("data",  UInt[32], False),
+    ("ready", Bool, True),   # flip
 ))
 ```
 
 ## Dataflow token type
 
 ```python
-from circt.pycmt2 import SyncToken, UInt
+from circt.pycmt2 import SyncToken, UInt, LI
 
 SyncToken()                     # void token
-SyncToken(UInt(32))             # token carrying UInt<32>
-SyncToken(UInt(32), mode="li")  # latency-insensitive token
+SyncToken[UInt[32]]             # token carrying UInt<32>
+SyncToken[UInt[32], LI]         # latency-insensitive token
 ```
+
+### Token mode markers
+
+Prefer marker constants over string modes:
+
+- `LI` / `LS` for token modes
+- `SyncToken[UInt[32], LI]` instead of `SyncToken(UInt(32), mode="li")`
+- `task.create_token(x, UInt[32], mode=LI)` instead of `mode="li"`
 
 ## How JIT uses types
 
@@ -55,10 +63,10 @@ from circt.pycmt2 import Circuit, UInt
 def top():
     c = Circuit("Top")
     with jit.module(c, "Top") as m:
-        x = m.input("x", UInt(32))
+        x = m.input("x", UInt[32])
 
-        @jit.value(m, returns=[UInt(32)])
-        def id_(r):
+        @jit.value(m)
+        def id_(r) -> UInt[32]:
             with r.guard:
                 r.always()
             with r.body:
@@ -71,8 +79,8 @@ Interfaces use the same types for method/value signatures:
 
 ```python
 with circuit.interface("Writer") as i:
-    with i.method("store", args=[("data", UInt(32))], returns=[]) as m:
-        ...
+    @i.method_sig
+    def store(data: UInt[32]) -> None: ...
 ```
 
 ## Width/sign behavior

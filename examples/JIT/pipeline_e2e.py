@@ -107,19 +107,17 @@ def create_forkjoin_circuit():
         clk = mod.clock()
         rst = mod.reset()
 
-        # Create using explicit dataflow builders for fork-join
-        with mod.dataflow(
-            "diamond",
-            args=[("input", UInt(16))],
-            returns=[UInt(16)],
-        ) as df:
+        @jit.dataflow(mod, name="diamond")
+        def diamond(df, input: UInt[16]) -> UInt[16]:
+            dfb = df._df
+
             # Source: capture input
-            with df.task("source", tokens_out=[SyncToken(UInt(16))]) as task:
-                tok_src = task.create_token(df.input, UInt(16))
+            with dfb.task("source", tokens_out=[SyncToken(UInt(16))]) as task:
+                tok_src = task.create_token(input, UInt(16))
                 task.yield_tokens(tok_src)
 
             # Branch A: add 10
-            with df.task(
+            with dfb.task(
                 "add_10",
                 tokens_in=[tok_src],
                 tokens_out=[SyncToken(UInt(16))],
@@ -131,7 +129,7 @@ def create_forkjoin_circuit():
                 task.yield_tokens(tok_a)
 
             # Branch B: add 20 (fork - same source token)
-            with df.task(
+            with dfb.task(
                 "add_20",
                 tokens_in=[tok_src],
                 tokens_out=[SyncToken(UInt(16))],
@@ -143,7 +141,7 @@ def create_forkjoin_circuit():
                 task.yield_tokens(tok_b)
 
             # Join: sum both results
-            with df.task("sum", tokens_in=[tok_a, tok_b], timing=(2, 3)) as task:
+            with dfb.task("sum", tokens_in=[tok_a, tok_b], timing=(2, 3)) as task:
                 val_a = task.token_data(tok_a)
                 val_b = task.token_data(tok_b)
                 sum_result = task.add(val_a, val_b)

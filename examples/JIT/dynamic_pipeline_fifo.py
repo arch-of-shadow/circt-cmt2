@@ -185,9 +185,9 @@ def create_pipeline_circuit():
             with stage1_rule.guard as g:
                 g.always()
             with stage1_rule.body as b:
-                val = b.call(fifo_a, "deq")
-                doubled = b.mul(val, b.const(2, 32))
-                b.call(fifo_b, "enq", b.bits(doubled, 31, 0))
+                val = fifo_a.deq()
+                doubled = val * 2
+                fifo_b.enq(b.bits(doubled, 31, 0))
 
         # =================================================================
         # Rule: sink_consume
@@ -197,10 +197,8 @@ def create_pipeline_circuit():
             with sink_rule.guard as g:
                 g.always()
             with sink_rule.body as b:
-                val = b.call(fifo_b, "deq")
-                current = b.call(sink_result, "read")
-                new_result = b.add(current, val)
-                b.call(sink_result, "write", b.bits(new_result, 31, 0))
+                val = fifo_b.deq()
+                sink_result.write(b.bits(sink_result.read + val, 31, 0))
 
         # =================================================================
         # Rule: mark_done
@@ -222,25 +220,19 @@ def create_pipeline_circuit():
             with done_rule.body as b:
                 b.call(done_flag, "write", b.const(1, 1))
 
-        # =================================================================
-        # Value: get_result - Read the accumulated result
-        # =================================================================
-        with jit.value(m, "get_result", returns=[UInt(32)]) as val:
-            with val.guard as g:
-                g.always()
-            with val.body as b:
-                result = b.call(sink_result, "read")
-                b.returns(result)
+        @jit.value(m)
+        def get_result(val) -> UInt[32]:
+            with val.guard:
+                val.always()
+            with val.body:
+                val.returns(sink_result.read)
 
-        # =================================================================
-        # Value: is_done - Check if pipeline is complete
-        # =================================================================
-        with jit.value(m, "is_done", returns=[UInt(1)]) as val:
-            with val.guard as g:
-                g.always()
-            with val.body as b:
-                done = b.call(done_flag, "read")
-                b.returns(done)
+        @jit.value(m)
+        def is_done(val) -> UInt[1]:
+            with val.guard:
+                val.always()
+            with val.body:
+                val.returns(done_flag.read)
 
         # Precedence: downstream drains before upstream fills
         # sink > stage1 > source > mark_done

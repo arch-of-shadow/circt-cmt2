@@ -50,8 +50,8 @@ def fifo_demo(width: int = 8, depth: int = 2) -> Circuit:
                 data = fifo.deq()
                 last.next = data
 
-        @jit.value(m, returns=[UInt(width)])
-        def get_last(r):
+        @jit.value(m)
+        def get_last(r) -> UInt[width]:
             with r.guard:
                 r.always()
 

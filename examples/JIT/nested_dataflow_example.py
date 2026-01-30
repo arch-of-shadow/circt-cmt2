@@ -85,16 +85,14 @@ def create_nested_dataflow_design():
         # 3. Postprocess: scale output
         # =====================================================================
 
-        with mod.dataflow(
-            "image_pipeline",
-            args=[("pixel_in", UInt(16)), ("kernel", UInt(8))],
-            returns=[UInt(32)],
-            interval=1,
-        ) as df:
+        @jit.dataflow(mod, name="image_pipeline", interval=1)
+        def image_pipeline(df, pixel_in: UInt[16], kernel: UInt[8]) -> UInt[32]:
+            dfb = df._df
+
             # -----------------------------------------------------------------
             # Stage 1: Preprocess - normalize input pixel
             # -----------------------------------------------------------------
-            with df.task(
+            with dfb.task(
                 "preprocess",
                 timing=(0, 1),
                 tokens_out=[SyncToken(UInt(16)), SyncToken(UInt(8))]
@@ -102,8 +100,7 @@ def create_nested_dataflow_design():
                 """
                 Preprocess: Normalize pixel value and pass through kernel.
                 """
-                pixel = df.pixel_in
-                kernel = df.kernel
+                pixel = pixel_in
 
                 # Simple normalization: shift right by 2 (divide by 4)
                 normalized = task.shr(pixel, task.const(2, 3))
@@ -119,7 +116,7 @@ def create_nested_dataflow_design():
             # This task contains a nested dataflow for convolution operations.
             # The nested dataflow demonstrates hierarchical decomposition.
             # -----------------------------------------------------------------
-            with df.task(
+            with dfb.task(
                 "convolve_stage",
                 tokens_in=[tok_pixel, tok_kernel],
                 timing=(1, 5),  # 4-cycle latency for convolution
@@ -134,23 +131,19 @@ def create_nested_dataflow_design():
                 pixel = task.token_data(tok_pixel)
                 kernel = task.token_data(tok_kernel)
 
-                # Create nested dataflow for convolution
-                with task.dataflow(
-                    "convolution",
-                    args=[("data", UInt(16)), ("weight", UInt(8))],
-                    returns=[UInt(32)],
-                    interval=1,
-                ) as inner:
+                @jit.dataflow(task, name="convolution", interval=1)
+                def convolution(inner, data: UInt[16], weight: UInt[8]) -> UInt[32]:
+                    innerb = inner._df
+
                     # -----------------------------------------------------------
                     # Inner Task 1: Source - distribute data to parallel paths
                     # -----------------------------------------------------------
-                    with inner.task(
+                    with innerb.task(
                         "distribute",
                         timing=(0, 1),
                         tokens_out=[SyncToken(UInt(16)), SyncToken(UInt(16))]
                     ) as t:
                         """Distribute data to horizontal and vertical passes."""
-                        data = inner.data
                         tok_h = t.create_token(data, UInt(16))
                         tok_v = t.create_token(data, UInt(16))
                         t.yield_tokens(tok_h, tok_v)
@@ -158,7 +151,7 @@ def create_nested_dataflow_design():
                     # -----------------------------------------------------------
                     # Inner Task 2a: Horizontal pass
                     # -----------------------------------------------------------
-                    with inner.task(
+                    with innerb.task(
                         "h_pass",
                         tokens_in=[tok_h],
                         timing=(1, 2),
@@ -166,7 +159,6 @@ def create_nested_dataflow_design():
                     ) as t:
                         """Horizontal convolution: multiply by weight."""
                         data = t.token_data(tok_h)
-                        weight = inner.weight
                         # Extend to 24 bits for multiplication
                         data_24 = t.pad(data, 24)
                         weight_24 = t.pad(weight, 24)
@@ -178,7 +170,7 @@ def create_nested_dataflow_design():
                     # -----------------------------------------------------------
                     # Inner Task 2b: Vertical pass (parallel with h_pass)
                     # -----------------------------------------------------------
-                    with inner.task(
+                    with innerb.task(
                         "v_pass",
                         tokens_in=[tok_v],
                         timing=(1, 2),
@@ -186,7 +178,6 @@ def create_nested_dataflow_design():
                     ) as t:
                         """Vertical convolution: multiply by weight + bias."""
                         data = t.token_data(tok_v)
-                        weight = inner.weight
                         # Vertical pass with bias
                         data_24 = t.pad(data, 24)
                         weight_24 = t.pad(weight, 24)
@@ -200,7 +191,7 @@ def create_nested_dataflow_design():
                     # -----------------------------------------------------------
                     # Inner Task 3: Sum - combine h_pass and v_pass results
                     # -----------------------------------------------------------
-                    with inner.task(
+                    with innerb.task(
                         "sum",
                         tokens_in=[tok_h_out, tok_v_out],
                         timing=(2, 3),
@@ -230,7 +221,7 @@ def create_nested_dataflow_design():
             # -----------------------------------------------------------------
             # Stage 3: Postprocess - scale and output
             # -----------------------------------------------------------------
-            with df.task(
+            with dfb.task(
                 "postprocess",
                 tokens_in=[tok_conv],
                 timing=(5, 6),
@@ -250,35 +241,32 @@ def create_nested_dataflow_design():
         # This demonstrates a simpler nested structure for easier testing.
         # =====================================================================
 
-        with mod.dataflow(
-            "simple_nested",
-            args=[("x", UInt(16))],
-            returns=[UInt(32)],
-            interval=1,
-        ) as df:
+        @jit.dataflow(mod, name="simple_nested", interval=1)
+        def simple_nested(df, x: UInt[16]) -> UInt[32]:
+            dfb = df._df
+
             # Stage with nested dataflow
-            with df.task(
+            with dfb.task(
                 "outer_task",
                 timing=(0, 4),
                 tokens_out=[SyncToken(UInt(32))]
             ) as task:
-                input_val = df.x
+                input_val = x
 
                 # Nested dataflow inside the task
-                with task.dataflow(
-                    "inner",
-                    args=[("a", UInt(16))],
-                    returns=[UInt(32)],
-                ) as inner:
-                    with inner.task(
+                @jit.dataflow(task, name="inner")
+                def inner(inner, a: UInt[16]) -> UInt[32]:
+                    innerb = inner._df
+
+                    with innerb.task(
                         "inner_source",
                         timing=(0, 1),
                         tokens_out=[SyncToken(UInt(16))]
                     ) as t:
-                        tok = t.create_token(inner.a, UInt(16))
+                        tok = t.create_token(a, UInt(16))
                         t.yield_tokens(tok)
 
-                    with inner.task(
+                    with innerb.task(
                         "inner_compute",
                         tokens_in=[tok],
                         timing=(1, 2),
@@ -292,7 +280,7 @@ def create_nested_dataflow_design():
                         tok_out = t.create_token(result, UInt(32))
                         t.yield_tokens(tok_out)
 
-                    with inner.task(
+                    with innerb.task(
                         "inner_sink",
                         tokens_in=[tok_out],
                         timing=(2, 3),
@@ -308,7 +296,7 @@ def create_nested_dataflow_design():
                 task.yield_tokens(tok_result)
 
             # Output stage
-            with df.task(
+            with dfb.task(
                 "output",
                 tokens_in=[tok_result],
                 timing=(4, 5),
@@ -319,12 +307,12 @@ def create_nested_dataflow_design():
         # =====================================================================
         # Methods for testing
         # =====================================================================
-        with jit.value(mod, "get_result", returns=[UInt(32)]) as val:
-            with val.guard as g:
-                g.always()
-            with val.body as b:
-                result = b.call(result_reg, "read")
-                b.returns(result)
+        @jit.value(mod)
+        def get_result(val) -> UInt[32]:
+            with val.guard:
+                val.always()
+            with val.body:
+                val.returns(result_reg.read)
 
     return circuit
 

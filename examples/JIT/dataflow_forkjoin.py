@@ -107,32 +107,31 @@ def create_forkjoin_explicit():
         #            |
         #          output
 
-        with mod.dataflow(
-            "diamond",
-            args=[("x", UInt(16))],
-            returns=[UInt(16)],
-        ) as df:
+        @jit.dataflow(mod, name="diamond")
+        def diamond(df, x: UInt[16]) -> UInt[16]:
+            dfb = df._df
+
             # Source task: create token with input data
-            with df.task("source") as task:
-                tok_src = task.create_token(df.x, UInt(16))
+            with dfb.task("source") as task:
+                tok_src = task.create_token(x, UInt(16))
                 task.yield_tokens(tok_src)
 
             # Branch A: multiply by 2
-            with df.task("branch_a", tokens_in=[tok_src], timing=(1, 2)) as task:
+            with dfb.task("branch_a", tokens_in=[tok_src], timing=(1, 2)) as task:
                 data = task.token_data(tok_src)
                 result_a = task.mul(data, task.const(2, 16))
                 tok_a = task.create_token(task.bits(result_a, 15, 0), UInt(16))
                 task.yield_tokens(tok_a)
 
             # Branch B: add 10 (same tok_src - fork pattern)
-            with df.task("branch_b", tokens_in=[tok_src], timing=(1, 2)) as task:
+            with dfb.task("branch_b", tokens_in=[tok_src], timing=(1, 2)) as task:
                 data = task.token_data(tok_src)
                 result_b = task.add(data, task.const(10, 16))
                 tok_b = task.create_token(task.bits(result_b, 15, 0), UInt(16))
                 task.yield_tokens(tok_b)
 
             # Join task: wait for both branches and sum results
-            with df.task("join", tokens_in=[tok_a, tok_b], timing=(2, 3)) as task:
+            with dfb.task("join", tokens_in=[tok_a, tok_b], timing=(2, 3)) as task:
                 val_a = task.token_data(tok_a)
                 val_b = task.token_data(tok_b)
                 sum_val = task.add(val_a, val_b)
@@ -140,7 +139,7 @@ def create_forkjoin_explicit():
                 task.yield_tokens(tok_sum)
 
             # Output task: final result
-            with df.task("output", tokens_in=[tok_sum], timing=(3, 4)) as task:
+            with dfb.task("output", tokens_in=[tok_sum], timing=(3, 4)) as task:
                 result = task.token_data(tok_sum)
                 task.return_values(result)
 
@@ -162,37 +161,36 @@ def create_multiway_fork():
         clk = mod.clock()
         rst = mod.reset()
 
-        with mod.dataflow(
-            "three_way",
-            args=[("input", UInt(8))],
-            returns=[UInt(8)],
-        ) as df:
+        @jit.dataflow(mod, name="three_way")
+        def three_way(df, input: UInt[8]) -> UInt[8]:
+            dfb = df._df
+
             # Source
-            with df.task("source") as task:
-                tok = task.create_token(df.input, UInt(8))
+            with dfb.task("source") as task:
+                tok = task.create_token(input, UInt(8))
                 task.yield_tokens(tok)
 
             # Three parallel branches consuming the same token
-            with df.task("inc1", tokens_in=[tok]) as task:
+            with dfb.task("inc1", tokens_in=[tok]) as task:
                 data = task.token_data(tok)
                 result = task.add(data, task.const(1, 8))
                 tok1 = task.create_token(task.bits(result, 7, 0), UInt(8))
                 task.yield_tokens(tok1)
 
-            with df.task("inc2", tokens_in=[tok]) as task:
+            with dfb.task("inc2", tokens_in=[tok]) as task:
                 data = task.token_data(tok)
                 result = task.add(data, task.const(2, 8))
                 tok2 = task.create_token(task.bits(result, 7, 0), UInt(8))
                 task.yield_tokens(tok2)
 
-            with df.task("inc3", tokens_in=[tok]) as task:
+            with dfb.task("inc3", tokens_in=[tok]) as task:
                 data = task.token_data(tok)
                 result = task.add(data, task.const(3, 8))
                 tok3 = task.create_token(task.bits(result, 7, 0), UInt(8))
                 task.yield_tokens(tok3)
 
             # Join all three
-            with df.task("join_all", tokens_in=[tok1, tok2, tok3]) as task:
+            with dfb.task("join_all", tokens_in=[tok1, tok2, tok3]) as task:
                 v1 = task.token_data(tok1)
                 v2 = task.token_data(tok2)
                 v3 = task.token_data(tok3)
@@ -231,36 +229,37 @@ def create_simulatable_diamond():
         clk = mod.clock()
         rst = mod.reset()
 
-        with mod.dataflow(
-            "diamond",
-            args=[("x", UInt(16))],
-            returns=[UInt(16)],
-        ) as df:
+        @jit.dataflow(mod, name="diamond")
+        def diamond(df, x: UInt[16]) -> UInt[16]:
+            dfb = df._df
+
             # Source task: create token with input data
-            with df.task("source", timing=(0, 1),
-                        tokens_out=[SyncToken(UInt(16))]) as task:
-                tok_src = task.create_token(df.x, UInt(16))
+            with dfb.task("source", timing=(0, 1), tokens_out=[SyncToken(UInt(16))]) as task:
+                tok_src = task.create_token(x, UInt(16))
                 task.yield_tokens(tok_src)
 
             # Branch A: multiply by 2
-            with df.task("branch_a", tokens_in=[tok_src], timing=(1, 2),
-                        tokens_out=[SyncToken(UInt(16))]) as task:
+            with dfb.task(
+                "branch_a", tokens_in=[tok_src], timing=(1, 2), tokens_out=[SyncToken(UInt(16))]
+            ) as task:
                 data = task.token_data(tok_src)
                 result_a = task.mul(data, task.const(2, 16))
                 tok_a = task.create_token(task.bits(result_a, 15, 0), UInt(16))
                 task.yield_tokens(tok_a)
 
             # Branch B: add 10 (same tok_src - fork pattern)
-            with df.task("branch_b", tokens_in=[tok_src], timing=(1, 2),
-                        tokens_out=[SyncToken(UInt(16))]) as task:
+            with dfb.task(
+                "branch_b", tokens_in=[tok_src], timing=(1, 2), tokens_out=[SyncToken(UInt(16))]
+            ) as task:
                 data = task.token_data(tok_src)
                 result_b = task.add(data, task.const(10, 16))
                 tok_b = task.create_token(task.bits(result_b, 15, 0), UInt(16))
                 task.yield_tokens(tok_b)
 
             # Join task: wait for both branches and sum results
-            with df.task("join", tokens_in=[tok_a, tok_b], timing=(2, 3),
-                        tokens_out=[SyncToken(UInt(16))]) as task:
+            with dfb.task(
+                "join", tokens_in=[tok_a, tok_b], timing=(2, 3), tokens_out=[SyncToken(UInt(16))]
+            ) as task:
                 val_a = task.token_data(tok_a)
                 val_b = task.token_data(tok_b)
                 sum_val = task.add(val_a, val_b)
@@ -268,7 +267,7 @@ def create_simulatable_diamond():
                 task.yield_tokens(tok_sum)
 
             # Output task: final result
-            with df.task("output", tokens_in=[tok_sum], timing=(3, 4)) as task:
+            with dfb.task("output", tokens_in=[tok_sum], timing=(3, 4)) as task:
                 result = task.token_data(tok_sum)
                 task.return_values(result)
 

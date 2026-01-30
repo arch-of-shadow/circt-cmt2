@@ -23,8 +23,8 @@ Why LI tokens matter here:
 
 Dataflow Features Exercised:
 1. SyncToken operations:
-   - token.create with mode="li" (FIFO storage)
-   - token.create with mode="ls" (shift register)
+   - token.create with mode=LI (FIFO storage)
+   - token.create default LS (shift register)
    - token.data extraction
    - token.join for synchronization
 
@@ -72,7 +72,7 @@ build_dir = script_dir.parent.parent / "build"
 sys.path.insert(0, str(build_dir / "tools/circt/python_packages/circt_core"))
 
 from circt.pycmt2 import Circuit, UInt
-from circt.pycmt2.types import SyncToken
+from circt.pycmt2.types import SyncToken, LI
 from circt.pycmt2.stl import Reg, clear_stl_registry
 from circt.pycmt2.simulation import SimulationWorkspace
 from circt.pycmt2.testbench import Testbench
@@ -127,29 +127,23 @@ def create_packet_processor():
         # the slower encrypt path from stalling the entire pipeline.
         # =====================================================================
 
-        with mod.dataflow(
-            "packet_process",
-            args=[
-                ("header", UInt(16)),     # Packet header (length, type)
-                ("payload", UInt(32)),    # Packet payload data
-                ("ctrl_flags", UInt(8)),  # Control flags (bypass, priority)
-            ],
-            returns=[UInt(32)],  # Processed result
-            interval=1,
-        ) as df:
+        @jit.dataflow(mod, name="packet_process", interval=1)
+        def packet_process(df, header: UInt[16], payload: UInt[32], ctrl_flags: UInt[8]) -> UInt[32]:
+            dfb = df._df
+
             # -----------------------------------------------------------------
             # Task 1: Header Parser
             # Parses header and creates tokens for parallel processing paths.
             # Uses LS for control (low latency) and LI for data (buffered).
             # -----------------------------------------------------------------
-            with df.task(
+            with dfb.task(
                 "parse",
                 timing=(0, 1),
                 tokens_out=[
-                    SyncToken(UInt(16)),              # LS: header info
-                    SyncToken(UInt(32), mode="li"),   # LI: payload for checksum
-                    SyncToken(UInt(32), mode="li"),   # LI: payload for encrypt
-                    SyncToken(UInt(8)),               # LS: control flags
+                    SyncToken[UInt[16]],             # LS: header info
+                    SyncToken[UInt[32], LI],         # LI: payload for checksum
+                    SyncToken[UInt[32], LI],         # LI: payload for encrypt
+                    SyncToken[UInt[8]],              # LS: control flags
                 ]
             ) as task:
                 """
@@ -159,19 +153,17 @@ def create_packet_processor():
                 - Ctrl flags -> LS token (for status tracking)
                 """
                 # Extract header fields
-                header = df.header
-                payload = df.payload
-                ctrl = df.ctrl_flags
+                ctrl = ctrl_flags
 
                 # Create tokens for downstream tasks
                 # Header and control use LS (latency-sensitive, shift registers)
-                tok_header = task.create_token(header, UInt(16), mode="ls")
-                tok_ctrl = task.create_token(ctrl, UInt(8), mode="ls")
+                tok_header = task.create_token(header, UInt[16])
+                tok_ctrl = task.create_token(ctrl, UInt[8])
 
                 # Payload uses LI (latency-insensitive, FIFOs)
                 # Fork pattern: same payload goes to checksum and encrypt
-                tok_payload_cksum = task.create_token(payload, UInt(32), mode="li")
-                tok_payload_encrypt = task.create_token(payload, UInt(32), mode="li")
+                tok_payload_cksum = task.create_token(payload, UInt[32], mode=LI)
+                tok_payload_encrypt = task.create_token(payload, UInt[32], mode=LI)
 
                 task.yield_tokens(tok_header, tok_payload_cksum, tok_payload_encrypt, tok_ctrl)
 
@@ -180,11 +172,11 @@ def create_packet_processor():
             # Computes simple additive checksum with iterative steps.
             # Variable latency - LI token buffers output.
             # -----------------------------------------------------------------
-            with df.task(
+            with dfb.task(
                 "checksum",
                 tokens_in=[tok_payload_cksum],
                 timing=(1, 4),  # 3-cycle latency
-                tokens_out=[SyncToken(UInt(16), mode="li")]
+                tokens_out=[SyncToken[UInt[16], LI]]
             ) as task:
                 """
                 Checksum Computation: XOR + rotate hash of payload.
@@ -202,7 +194,7 @@ def create_packet_processor():
                 cksum_final = task.bits(cksum, 15, 0)
 
                 # Create LI output token
-                tok_cksum = task.create_token(cksum_final, UInt(16), mode="li")
+                tok_cksum = task.create_token(cksum_final, UInt[16], mode=LI)
                 task.yield_tokens(tok_cksum)
 
             # -----------------------------------------------------------------
@@ -210,11 +202,11 @@ def create_packet_processor():
             # Simple XOR encryption with fixed key.
             # Higher latency than checksum - demonstrates FIFO buffering.
             # -----------------------------------------------------------------
-            with df.task(
+            with dfb.task(
                 "encrypt",
                 tokens_in=[tok_payload_encrypt],
                 timing=(1, 6),  # 5-cycle latency (slower than checksum)
-                tokens_out=[SyncToken(UInt(32), mode="li")]
+                tokens_out=[SyncToken[UInt[32], LI]]
             ) as task:
                 """
                 Encryption: XOR with fixed key, multiple rounds.
@@ -232,7 +224,7 @@ def create_packet_processor():
                 encrypted2 = task.xor_(encrypted, key2)
 
                 # Create LI output token
-                tok_encrypted = task.create_token(encrypted2, UInt(32), mode="li")
+                tok_encrypted = task.create_token(encrypted2, UInt[32], mode=LI)
                 task.yield_tokens(tok_encrypted)
 
             # -----------------------------------------------------------------
@@ -240,7 +232,7 @@ def create_packet_processor():
             # Passes control flags through quickly.
             # Uses LS tokens for predictable timing.
             # -----------------------------------------------------------------
-            with df.task(
+            with dfb.task(
                 "ctrl_path",
                 tokens_in=[tok_header, tok_ctrl],
                 timing=(1, 2),
@@ -262,7 +254,7 @@ def create_packet_processor():
                 combined = task.or_(header_32, ctrl_shifted)
                 combined_24 = task.bits(combined, 23, 0)
 
-                tok_combined = task.create_token(combined_24, UInt(24), mode="ls")
+                tok_combined = task.create_token(combined_24, UInt[24])
                 task.yield_tokens(tok_combined)
 
             # -----------------------------------------------------------------
@@ -271,7 +263,7 @@ def create_packet_processor():
             # Demonstrates join pattern with mixed token modes.
             # Stall controller handles synchronization.
             # -----------------------------------------------------------------
-            with df.task(
+            with dfb.task(
                 "aggregate",
                 tokens_in=[tok_cksum, tok_encrypted, tok_combined],
                 timing=(6, 8),  # After slowest path completes
@@ -304,14 +296,14 @@ def create_packet_processor():
                 # (simplified: always use normal path for now)
                 result = task.bits(result_normal, 31, 0)
 
-                tok_result = task.create_token(result, UInt(32))
+                tok_result = task.create_token(result, UInt[32])
                 task.yield_tokens(tok_result)
 
             # -----------------------------------------------------------------
             # Task 4: Output
             # Final stage: returns processed packet
             # -----------------------------------------------------------------
-            with df.task(
+            with dfb.task(
                 "output",
                 tokens_in=[tok_result],
                 timing=(8, 9),
@@ -325,32 +317,30 @@ def create_packet_processor():
         # Demonstrates continuous streaming with LI tokens for flow control
         # =====================================================================
 
-        with mod.dataflow(
-            "stream_process",
-            args=[("stream_data", UInt(32))],
-            returns=[UInt(32)],
-            interval=1,
-        ) as df:
+        @jit.dataflow(mod, name="stream_process", interval=1)
+        def stream_process(df, stream_data: UInt[32]) -> UInt[32]:
+            dfb = df._df
+
             # -----------------------------------------------------------------
             # Stage 1: Input buffering (LI)
             # -----------------------------------------------------------------
-            with df.task(
+            with dfb.task(
                 "buffer_in",
                 timing=(0, 1),
-                tokens_out=[SyncToken(UInt(32), mode="li")]
+                tokens_out=[SyncToken[UInt[32], LI]]
             ) as task:
                 """Input buffer: LI FIFO for flow control."""
-                tok_in = task.create_token(df.stream_data, UInt(32), mode="li")
+                tok_in = task.create_token(stream_data, UInt[32], mode=LI)
                 task.yield_tokens(tok_in)
 
             # -----------------------------------------------------------------
             # Stage 2: Transform (variable latency)
             # -----------------------------------------------------------------
-            with df.task(
+            with dfb.task(
                 "transform",
                 tokens_in=[tok_in],
                 timing=(1, 4),
-                tokens_out=[SyncToken(UInt(32), mode="li")]
+                tokens_out=[SyncToken[UInt[32], LI]]
             ) as task:
                 """Transform with variable latency."""
                 data = task.token_data(tok_in)
@@ -358,13 +348,13 @@ def create_packet_processor():
                 # transformed = data ^ 0x55555555
                 transformed = task.xor_(data, task.const(0x55555555, 32))
 
-                tok_trans = task.create_token(transformed, UInt(32), mode="li")
+                tok_trans = task.create_token(transformed, UInt[32], mode=LI)
                 task.yield_tokens(tok_trans)
 
             # -----------------------------------------------------------------
             # Stage 3: Output
             # -----------------------------------------------------------------
-            with df.task(
+            with dfb.task(
                 "stream_out",
                 tokens_in=[tok_trans],
                 timing=(4, 5),
@@ -375,27 +365,26 @@ def create_packet_processor():
         # =====================================================================
         # Methods for testing and status
         # =====================================================================
-        with jit.method(mod, "increment_count") as meth:
-            with meth.guard as g:
-                g.always()
-            with meth.body as b:
-                count = b.call(packet_count, "read")
-                new_count = b.add(count, b.const(1, 16))
-                b.call(packet_count, "write", new_count)
+        @jit.method(mod)
+        def increment_count(meth) -> None:
+            with meth.guard:
+                meth.always()
+            with meth.body:
+                packet_count.next = packet_count.read + 1
 
-        with jit.value(mod, "get_packet_count", returns=[UInt(16)]) as val:
-            with val.guard as g:
-                g.always()
-            with val.body as b:
-                count = b.call(packet_count, "read")
-                b.returns(count)
+        @jit.value(mod)
+        def get_packet_count(val) -> UInt[16]:
+            with val.guard:
+                val.always()
+            with val.body:
+                val.returns(packet_count.read)
 
-        with jit.value(mod, "get_status", returns=[UInt(8)]) as val:
-            with val.guard as g:
-                g.always()
-            with val.body as b:
-                status = b.call(status_reg, "read")
-                b.returns(status)
+        @jit.value(mod)
+        def get_status(val) -> UInt[8]:
+            with val.guard:
+                val.always()
+            with val.body:
+                val.returns(status_reg.read)
 
     return circuit
 

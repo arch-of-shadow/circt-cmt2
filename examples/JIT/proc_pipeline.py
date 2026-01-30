@@ -82,40 +82,33 @@ def create_pipeline(circuit: Circuit, width: int, num_stages: int, name: str = "
             fifo = pipeline.instance(fifo_mod, f"stage_{i}", clk=clk, rst=rst)
             fifos.append(fifo)
 
-        # Value: full() - check if first stage is full
-        with jit.value(pipeline, "full", returns=[UInt(1)]) as full_val:
-            with full_val.guard as g:
-                g.always()
-            with full_val.body as body:
-                is_full = body.call(fifos[0], "full")
-                body.returns(is_full)
+        @jit.value(pipeline)
+        def full(full_val) -> UInt[1]:
+            with full_val.guard:
+                full_val.always()
+            with full_val.body:
+                full_val.returns(fifos[0].full)
 
-        # Value: notEmpty() - check if last stage has data
-        with jit.value(pipeline, "notEmpty", returns=[UInt(1)]) as not_empty_val:
-            with not_empty_val.guard as g:
-                g.always()
-            with not_empty_val.body as body:
-                has_data = body.call(fifos[-1], "full")
-                body.returns(has_data)
+        @jit.value(pipeline)
+        def notEmpty(not_empty_val) -> UInt[1]:
+            with not_empty_val.guard:
+                not_empty_val.always()
+            with not_empty_val.body:
+                not_empty_val.returns(fifos[-1].full)
 
-        # Method: enq(data) - push to first FIFO
-        with jit.method(pipeline, "enq", args=[("data", UInt(width))]) as enq:
-            with enq.guard as g:
-                is_full = g.call(fifos[0], "full")
-                not_full = g.not_(is_full)
-                g.returns(not_full)
-            with enq.body as body:
-                data = body.arg("data")
-                body.call(fifos[0], "enq", data)
+        @jit.method(pipeline)
+        def enq(enq_ctx, data: UInt[width]) -> None:
+            with enq_ctx.guard:
+                enq_ctx.returns(enq_ctx.not_(fifos[0].full))
+            with enq_ctx.body:
+                fifos[0].enq(data)
 
-        # Method: deq() -> data - pop from last FIFO
-        with jit.method(pipeline, "deq", returns=[UInt(width)]) as deq:
-            with deq.guard as g:
-                has_data = g.call(fifos[-1], "full")
-                g.returns(has_data)
-            with deq.body as body:
-                data = body.call(fifos[-1], "deq")
-                body.returns(data)
+        @jit.method(pipeline)
+        def deq(deq_ctx) -> UInt[width]:
+            with deq_ctx.guard:
+                deq_ctx.returns(fifos[-1].full)
+            with deq_ctx.body:
+                deq_ctx.returns(fifos[-1].deq())
 
         # Transfer rules between stages
         transfer_rules = []
@@ -171,21 +164,19 @@ def create_test_harness(circuit: Circuit, pipeline_mod, width: int, num_stages: 
         # Pipeline instance
         pipe = harness.instance(pipeline_mod, "pipe", clk=clk, rst=rst)
 
-        # Value: done
-        with jit.value(harness, "done", returns=[UInt(1)]) as done_val:
-            with done_val.guard as g:
-                g.always()
-            with done_val.body as body:
-                d = body.call(done_reg, "read")
-                body.returns(d)
+        @jit.value(harness)
+        def done(done_val) -> UInt[1]:
+            with done_val.guard:
+                done_val.always()
+            with done_val.body:
+                done_val.returns(done_reg.read)
 
-        # Value: result - get the accumulated sum
-        with jit.value(harness, "result", returns=[UInt(width)]) as result_val:
-            with result_val.guard as g:
-                g.always()
-            with result_val.body as body:
-                s = body.call(out_sum, "read")
-                body.returns(s)
+        @jit.value(harness)
+        def result(result_val) -> UInt[width]:
+            with result_val.guard:
+                result_val.always()
+            with result_val.body:
+                result_val.returns(out_sum.read)
 
         # ==== STATIC STEPS (latency=1) for static_repeat ====
         # Using static_step means FSM advances immediately without waiting for done signal
@@ -285,7 +276,7 @@ def create_test_harness(circuit: Circuit, pipeline_mod, width: int, num_stages: 
                     # After both branches complete, mark done
                     seq.enable(done_step.ref())
 
-        harness.precedence(done_val.ref(), result_val.ref(), main.ref())
+        harness.precedence(done._cmt2_ref, result._cmt2_ref, main.ref())
 
     return harness
 

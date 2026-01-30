@@ -34,26 +34,26 @@ from circt.pycmt2.simulation import SimulationWorkspace
 from circt.pycmt2.testbench import Testbench
 
 
+def getData() -> UInt[32]:
+    ...
+
+
+def store(data: UInt[32]) -> None:
+    ...
+
+
 @jit.elaborate
 def build_circuit() -> Circuit:
     clear_stl_registry()
 
     c = Circuit("InterfaceHello")
 
-    # Circuit-level interface definitions (signatures).
+    # Circuit-level interface definitions (typed signatures).
     with c.interface("Reader") as i:
-        with i.value("getData", returns=[UInt(32)]) as v:
-            with v.guard() as g:
-                g.always()
-            with v.body() as b:
-                b.returns(b.const(0, 32))
+        i.value_sig(getData)
 
     with c.interface("Writer") as i:
-        with i.method("store", args=[("data", UInt(32))], returns=[]) as m:
-            with m.guard() as g:
-                g.always()
-            with m.body() as b:
-                b.returns()
+        i.method_sig(store)
 
     reg32 = Reg.create(c, 32, init=0)
 
@@ -65,8 +65,8 @@ def build_circuit() -> Circuit:
         r = m.instance(reg32, "r", clk=clk, rst=rst)
         reader = m.interface_decl("reader", "Reader")
 
-        @jit.method(m, "setMethod", args=[("v", UInt(32))], returns=[UInt(32)])
-        def set_method(ctx):
+        @jit.method(m)
+        def setMethod(ctx, v: UInt[32]) -> UInt[32]:
             with ctx.guard:
                 ctx.always()
 
@@ -74,7 +74,7 @@ def build_circuit() -> Circuit:
                 reader_data = reader.getData
                 current = r.read
 
-                sum1 = ctx.truncate(reader_data + ctx.v, 32)
+                sum1 = ctx.truncate(reader_data + v, 32)
                 sum2 = ctx.truncate(current + sum1, 32)
 
                 r.next = sum2
@@ -90,26 +90,28 @@ def build_circuit() -> Circuit:
         writer = m.interface_decl("writer", "Writer")
 
         read_x = m.interface_def("readX", "Reader")
-        read_x.bind(x, "read", "getData")
+        read_x.bind(x, x._instance.read, getData)
 
+        child_mod = c._modules["child"]
+        child_reader = child_mod._interface_decls["reader"]
         child = m.instance(
-            c._modules["child"],
+            child_mod,
             "c",
             clk=clk,
             rst=rst,
-            interface_bindings={"readX": "reader"},
+            interface_bindings={read_x: child_reader},
         )
 
-        @jit.method(m, "callChild", args=[("v", UInt(32))], returns=[UInt(32)])
-        def call_child(ctx):
+        @jit.method(m)
+        def callChild(ctx, v: UInt[32]) -> UInt[32]:
             with ctx.guard:
                 ctx.always()
 
             with ctx.body:
-                res = child.setMethod(ctx.v)
+                res = child.setMethod(v)
                 ctx.returns(res)
 
-        @jit.rule(m, "incr")
+        @jit.rule(m)
         def incr(ctx):
             with ctx.guard:
                 ctx.always()
@@ -152,9 +154,9 @@ def main() -> None:
         seq.drive("callChild_enable", 0)
 
         # Enable `incr` by making Writer ready; check three outgoing interface calls.
-        seq.call_interface(writer, "store", 1, ready=1)
-        seq.call_interface(writer, "store", 2, ready=1)
-        seq.call_interface(writer, "store", 3, ready=1)
+        seq.call_interface(writer, store, 1, ready=1)
+        seq.call_interface(writer, store, 2, ready=1)
+        seq.call_interface(writer, store, 3, ready=1)
 
         # Disable again and callChild(v=1) with x=3 and child.r=10 => 10 + (3 + 1) = 14
         seq.drive("writer_store_ready", 0)

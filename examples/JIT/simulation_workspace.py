@@ -52,55 +52,47 @@ def create_demo_circuit():
         count_reg = m.instance(reg32, "count", clk=clk, rst=rst)
         running_reg = m.instance(reg1, "running", clk=clk, rst=rst)
 
-        # Method: start - Start counting
-        with jit.method(m, "start") as meth:
-            with meth.guard as g:
-                running = g.call(running_reg, "read")
-                not_running = g.not_(running)
-                g.returns(not_running)
-            with meth.body as body:
-                body.call(running_reg, "write", body.const(1, 1))
+        @jit.method(m)
+        def start(meth) -> None:
+            with meth.guard:
+                meth.returns(meth.not_(running_reg.read))
+            with meth.body:
+                running_reg.write(meth.const(1, 1))
 
-        # Method: stop - Stop counting
-        with jit.method(m, "stop") as meth:
-            with meth.guard as g:
-                running = g.call(running_reg, "read")
-                g.returns(running)
-            with meth.body as body:
-                body.call(running_reg, "write", body.const(0, 1))
+        @jit.method(m)
+        def stop(meth) -> None:
+            with meth.guard:
+                meth.returns(running_reg.read)
+            with meth.body:
+                running_reg.write(meth.const(0, 1))
 
-        # Method: reset_count - Reset counter to 0
-        with jit.method(m, "reset_count") as meth:
-            with meth.guard as g:
-                g.always()
-            with meth.body as body:
-                body.call(count_reg, "write", body.const(0, 32))
+        @jit.method(m)
+        def reset_count(meth) -> None:
+            with meth.guard:
+                meth.always()
+            with meth.body:
+                count_reg.write(meth.const(0, 32))
 
         # Rule: increment - Increment counter when running
         with jit.rule(m, "increment") as rule:
             with rule.guard as g:
-                running = g.call(running_reg, "read")
-                g.returns(running)
+                g.returns(running_reg.read)
             with rule.body as body:
-                count = body.call(count_reg, "read")
-                new_count = body.add(count, body.const(1, 32))
-                body.call(count_reg, "write", new_count)
+                count_reg.next = count_reg.read + 1
 
-        # Value: get_count - Read current count
-        with jit.value(m, "get_count", returns=[UInt(32)]) as val:
-            with val.guard as g:
-                g.always()
-            with val.body as body:
-                count = body.call(count_reg, "read")
-                body.returns(count)
+        @jit.value(m)
+        def get_count(val) -> UInt[32]:
+            with val.guard:
+                val.always()
+            with val.body:
+                val.returns(count_reg.read)
 
-        # Value: is_running - Check if running
-        with jit.value(m, "is_running", returns=[UInt(1)]) as val:
-            with val.guard as g:
-                g.always()
-            with val.body as body:
-                running = body.call(running_reg, "read")
-                body.returns(running)
+        @jit.value(m)
+        def is_running(val) -> UInt[1]:
+            with val.guard:
+                val.always()
+            with val.body:
+                val.returns(running_reg.read)
 
     return circuit
 

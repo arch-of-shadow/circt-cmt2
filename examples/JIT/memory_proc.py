@@ -70,46 +70,42 @@ def create_memory_accumulator_circuit():
         # =====================================================================
         # Method: write(addr, data) - Write to memory
         # =====================================================================
-        with jit.method(m, "write", args=[("addr", UInt(2)), ("data", UInt(32))]) as write_meth:
-            with write_meth.guard as g:
-                busy = g.call(busy_reg, "read")
-                not_busy = g.not_(busy)
-                g.returns(not_busy)
-            with write_meth.body as body:
-                addr = body.arg("addr")
-                data = body.arg("data")
-                body.call(mem, "write", data, addr)
+        @jit.method(m)
+        def write(write_meth, addr: UInt[2], data: UInt[32]) -> None:
+            with write_meth.guard:
+                write_meth.returns(write_meth.not_(busy_reg.read))
+            with write_meth.body:
+                mem.write(data, addr)
 
         # =====================================================================
         # Method: read(addr) -> data - Read from memory (combinational)
         # =====================================================================
-        with jit.method(m, "read", args=[("addr", UInt(2))], returns=[UInt(32)]) as read_meth:
-            with read_meth.guard as g:
-                g.always()
-            with read_meth.body as body:
-                addr = body.arg("addr")
-                data = body.call(mem, "read", addr)
-                body.returns(data)
+        @jit.method(m)
+        def read(read_meth, addr: UInt[2]) -> UInt[32]:
+            with read_meth.guard:
+                read_meth.always()
+            with read_meth.body:
+                read_meth.returns(mem.read(addr))
 
         # =====================================================================
         # Value: get_sum() -> sum - Get accumulated sum
         # =====================================================================
-        with jit.value(m, "get_sum", returns=[UInt(32)]) as get_sum_val:
-            with get_sum_val.guard as g:
-                g.always()
-            with get_sum_val.body as body:
-                result = body.call(accum_reg, "read")
-                body.returns(result)
+        @jit.value(m)
+        def get_sum(get_sum_val) -> UInt[32]:
+            with get_sum_val.guard:
+                get_sum_val.always()
+            with get_sum_val.body:
+                get_sum_val.returns(accum_reg.read)
 
         # =====================================================================
         # Value: is_busy() -> bool - Check if sum operation is in progress
         # =====================================================================
-        with jit.value(m, "is_busy", returns=[UInt(1)]) as is_busy_val:
-            with is_busy_val.guard as g:
-                g.always()
-            with is_busy_val.body as body:
-                result = body.call(busy_reg, "read")
-                body.returns(result)
+        @jit.value(m)
+        def is_busy(is_busy_val) -> UInt[1]:
+            with is_busy_val.guard:
+                is_busy_val.always()
+            with is_busy_val.body:
+                is_busy_val.returns(busy_reg.read)
 
         # =====================================================================
         # Procedural Steps for sum operation
@@ -141,15 +137,14 @@ def create_memory_accumulator_circuit():
         # =====================================================================
         # Method: start_sum() - Start the sum operation
         # =====================================================================
-        with jit.method(m, "start_sum") as start_sum_meth:
-            with start_sum_meth.guard as g:
-                busy = g.call(busy_reg, "read")
-                not_busy = g.not_(busy)
-                g.returns(not_busy)
-            with start_sum_meth.body as body:
-                body.call(accum_reg, "write", body.const(0, 32))
-                body.call(addr_reg, "write", body.const(0, 2))
-                body.call(busy_reg, "write", body.const(1, 1))
+        @jit.method(m)
+        def start_sum(start_sum_meth) -> None:
+            with start_sum_meth.guard:
+                start_sum_meth.returns(start_sum_meth.not_(busy_reg.read))
+            with start_sum_meth.body:
+                accum_reg.write(start_sum_meth.const(0, 32))
+                addr_reg.write(start_sum_meth.const(0, 2))
+                busy_reg.write(start_sum_meth.const(1, 1))
 
         # =====================================================================
         # Proc Rule: sum_loop

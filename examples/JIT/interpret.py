@@ -1079,13 +1079,12 @@ def test_info_command() -> bool:
             with rule2.body as b:
                 b.call(counter, "write", b.const(0, 32))
 
-        # Add method
-        with jit.method(m, "get_value", returns=[UInt(32)]) as meth:
-            with meth.guard as g:
-                g.always()
-            with meth.body as b:
-                val = b.call(counter, "read")
-                b.returns(val)
+        @jit.method(m)
+        def get_value(meth) -> UInt[32]:
+            with meth.guard:
+                meth.always()
+            with meth.body:
+                meth.returns(counter.read)
 
     mlir = circuit.emit_mlir()
 

@@ -223,86 +223,83 @@ def create_pipeline_circuit():
         # Control Methods
         # =====================================================================
 
-        # Method: start - Enable source generation
-        with jit.method(m, "start") as meth:
-            with meth.guard as g:
-                g.always()
-            with meth.body as body:
-                body.call(source_enable, "write", body.const(1, 1))
+        @jit.method(m)
+        def start(meth) -> None:
+            with meth.guard:
+                meth.always()
+            with meth.body:
+                source_enable.write(meth.const(1, 1))
 
-        # Method: stop - Disable source generation
-        with jit.method(m, "stop") as meth:
-            with meth.guard as g:
-                g.always()
-            with meth.body as body:
-                body.call(source_enable, "write", body.const(0, 1))
+        @jit.method(m)
+        def stop(meth) -> None:
+            with meth.guard:
+                meth.always()
+            with meth.body:
+                source_enable.write(meth.const(0, 1))
 
-        # Method: reset_counters - Reset all counters
-        with jit.method(m, "reset_counters") as meth:
-            with meth.guard as g:
-                g.always()
-            with meth.body as body:
-                body.call(source_counter, "write", body.const(0, 8))
-                body.call(items_produced, "write", body.const(0, 8))
-                body.call(items_consumed, "write", body.const(0, 8))
-                body.call(last_result, "write", body.const(0, 32))
+        @jit.method(m)
+        def reset_counters(meth) -> None:
+            with meth.guard:
+                meth.always()
+            with meth.body:
+                source_counter.write(meth.const(0, 8))
+                items_produced.write(meth.const(0, 8))
+                items_consumed.write(meth.const(0, 8))
+                last_result.write(meth.const(0, 32))
 
-        # Method: inject - Manually inject a value into fifo1
-        with jit.method(m, "inject", args=[("data", UInt(32))]) as meth:
-            with meth.guard as g:
-                full = g.call(fifo1, "full")
-                not_full = g.not_(full)
-                g.returns(not_full)
-            with meth.body as body:
-                data = body.arg("data")
-                body.call(fifo1, "enq", data)
+        @jit.method(m)
+        def inject(meth, data: UInt[32]) -> None:
+            with meth.guard:
+                meth.returns(meth.not_(fifo1.full))
+            with meth.body:
+                fifo1.enq(data)
 
         # =====================================================================
         # Observable Values
         # =====================================================================
 
-        with jit.value(m, "get_last_result", returns=[UInt(32)]) as val:
-            with val.guard as g:
-                g.always()
-            with val.body as body:
-                result = body.call(last_result, "read")
-                body.returns(result)
+        @jit.value(m)
+        def get_last_result(val) -> UInt[32]:
+            with val.guard:
+                val.always()
+            with val.body:
+                val.returns(last_result.read)
 
-        with jit.value(m, "get_produced", returns=[UInt(8)]) as val:
-            with val.guard as g:
-                g.always()
-            with val.body as body:
-                count = body.call(items_produced, "read")
-                body.returns(count)
+        @jit.value(m)
+        def get_produced(val) -> UInt[8]:
+            with val.guard:
+                val.always()
+            with val.body:
+                val.returns(items_produced.read)
 
-        with jit.value(m, "get_consumed", returns=[UInt(8)]) as val:
-            with val.guard as g:
-                g.always()
-            with val.body as body:
-                count = body.call(items_consumed, "read")
-                body.returns(count)
+        @jit.value(m)
+        def get_consumed(val) -> UInt[8]:
+            with val.guard:
+                val.always()
+            with val.body:
+                val.returns(items_consumed.read)
 
-        with jit.value(m, "is_source_enabled", returns=[UInt(1)]) as val:
-            with val.guard as g:
-                g.always()
-            with val.body as body:
-                enabled = body.call(source_enable, "read")
-                body.returns(enabled)
+        @jit.value(m)
+        def is_source_enabled(val) -> UInt[1]:
+            with val.guard:
+                val.always()
+            with val.body:
+                val.returns(source_enable.read)
 
         # FIFO status values
-        with jit.value(m, "fifo1_hasData", returns=[UInt(1)]) as val:
-            with val.guard as g:
-                g.always()
-            with val.body as body:
-                is_empty = body.call(fifo1, "empty")
-                body.returns(body.not_(is_empty))
+        @jit.value(m)
+        def fifo1_hasData(val) -> UInt[1]:
+            with val.guard:
+                val.always()
+            with val.body:
+                val.returns(val.not_(fifo1.empty))
 
-        with jit.value(m, "fifo4_hasData", returns=[UInt(1)]) as val:
-            with val.guard as g:
-                g.always()
-            with val.body as body:
-                is_empty = body.call(fifo4, "empty")
-                body.returns(body.not_(is_empty))
+        @jit.value(m)
+        def fifo4_hasData(val) -> UInt[1]:
+            with val.guard:
+                val.always()
+            with val.body:
+                val.returns(val.not_(fifo4.empty))
 
     return circuit
 

@@ -77,14 +77,12 @@ def example_sequential_task():
         with mod.static_step(1, "store"):
             pass
 
-        # Dataflow with sequential control in tasks
-        with mod.dataflow(
-            "seq_pipeline",
-            args=[("input", UInt(32))],
-            returns=[UInt(32)],
-        ) as df:
+        @jit.dataflow(mod, name="seq_pipeline")
+        def seq_pipeline(df, input: UInt[32]) -> UInt[32]:
+            dfb = df._df
+
             # Task with sequential multi-cycle processing
-            with df.task("process") as task:
+            with dfb.task("process") as task:
                 # Multi-cycle sequence: load -> compute -> store
                 with task.seq():
                     task.enable("load")
@@ -97,7 +95,7 @@ def example_sequential_task():
                 task.yield_tokens(tok)
 
             # Final task
-            with df.task("output", tokens_in=[tok]) as task:
+            with dfb.task("output", tokens_in=[tok]) as task:
                 result = task.token_data(tok)
                 task.return_values(result)
 
@@ -133,13 +131,12 @@ def example_parallel_task():
         with mod.static_step(1, "op_c"):
             pass
 
-        with mod.dataflow(
-            "par_pipeline",
-            args=[("input", UInt(16))],
-            returns=[UInt(16)],
-        ) as df:
+        @jit.dataflow(mod, name="par_pipeline")
+        def par_pipeline(df, input: UInt[16]) -> UInt[16]:
+            dfb = df._df
+
             # Task with parallel operations
-            with df.task("parallel_ops") as task:
+            with dfb.task("parallel_ops") as task:
                 # Three operations run concurrently
                 # Task completion waits for longest (3 cycles)
                 with task.par():
@@ -151,7 +148,7 @@ def example_parallel_task():
                 tok = task.create_token(data, UInt(16))
                 task.yield_tokens(tok)
 
-            with df.task("output", tokens_in=[tok]) as task:
+            with dfb.task("output", tokens_in=[tok]) as task:
                 result = task.token_data(tok)
                 task.return_values(result)
 
@@ -186,12 +183,11 @@ def example_conditional_task():
         with mod.static_step(2, "slow_path_b"):
             pass
 
-        with mod.dataflow(
-            "cond_pipeline",
-            args=[("input", UInt(8))],
-            returns=[UInt(8)],
-        ) as df:
-            with df.task("conditional_process") as task:
+        @jit.dataflow(mod, name="cond_pipeline")
+        def cond_pipeline(df, input: UInt[8]) -> UInt[8]:
+            dfb = df._df
+
+            with dfb.task("conditional_process") as task:
                 # Condition based on constant (in real use, would be data-dependent)
                 cond = task.const(1, 1)
 
@@ -210,7 +206,7 @@ def example_conditional_task():
                 tok = task.create_token(data, UInt(8))
                 task.yield_tokens(tok)
 
-            with df.task("output", tokens_in=[tok]) as task:
+            with dfb.task("output", tokens_in=[tok]) as task:
                 result = task.token_data(tok)
                 task.return_values(result)
 
@@ -239,13 +235,12 @@ def example_iterative_task():
         with mod.static_step(1, "multiply"):
             pass
 
-        with mod.dataflow(
-            "iter_pipeline",
-            args=[("base", UInt(32))],
-            returns=[UInt(32)],
-        ) as df:
+        @jit.dataflow(mod, name="iter_pipeline")
+        def iter_pipeline(df, base: UInt[32]) -> UInt[32]:
+            dfb = df._df
+
             # Task that computes base^4 using repeated multiplication
-            with df.task("power_of_4") as task:
+            with dfb.task("power_of_4") as task:
                 # 4 multiplication iterations
                 with task.static_repeat(4):
                     task.enable("multiply")
@@ -254,7 +249,7 @@ def example_iterative_task():
                 tok = task.create_token(data, UInt(32))
                 task.yield_tokens(tok)
 
-            with df.task("output", tokens_in=[tok]) as task:
+            with dfb.task("output", tokens_in=[tok]) as task:
                 result = task.token_data(tok)
                 task.return_values(result)
 
@@ -296,13 +291,12 @@ def example_complex_pipeline():
         with mod.static_step(1, "writeback"):
             pass
 
-        with mod.dataflow(
-            "processor_pipeline",
-            args=[("instruction", UInt(32))],
-            returns=[UInt(32)],
-        ) as df:
+        @jit.dataflow(mod, name="processor_pipeline")
+        def processor_pipeline(df, instruction: UInt[32]) -> UInt[32]:
+            dfb = df._df
+
             # Stage 1: Fetch and decode (sequential)
-            with df.task("frontend") as task:
+            with dfb.task("frontend") as task:
                 with task.seq():
                     task.enable("fetch")
                     task.enable("decode")
@@ -312,7 +306,7 @@ def example_complex_pipeline():
                 task.yield_tokens(tok1)
 
             # Stage 2: Execute and memory access (parallel for some ops)
-            with df.task("backend", tokens_in=[tok1]) as task:
+            with dfb.task("backend", tokens_in=[tok1]) as task:
                 with task.par():
                     task.enable("execute")
                     task.enable("memory")
@@ -322,7 +316,7 @@ def example_complex_pipeline():
                 task.yield_tokens(tok2)
 
             # Stage 3: Writeback
-            with df.task("commit", tokens_in=[tok2]) as task:
+            with dfb.task("commit", tokens_in=[tok2]) as task:
                 with task.seq():
                     task.enable("writeback")
 
@@ -362,12 +356,11 @@ def example_nested_control():
         with mod.static_step(1, "finalize"):
             pass
 
-        with mod.dataflow(
-            "nested_pipeline",
-            args=[("x", UInt(8))],
-            returns=[UInt(8)],
-        ) as df:
-            with df.task("complex_task") as task:
+        @jit.dataflow(mod, name="nested_pipeline")
+        def nested_pipeline(df, x: UInt[8]) -> UInt[8]:
+            dfb = df._df
+
+            with dfb.task("complex_task") as task:
                 # Level 1: Sequential
                 with task.seq():
                     task.enable("init")
@@ -392,7 +385,7 @@ def example_nested_control():
                 tok = task.create_token(data, UInt(8))
                 task.yield_tokens(tok)
 
-            with df.task("output", tokens_in=[tok]) as task:
+            with dfb.task("output", tokens_in=[tok]) as task:
                 result = task.token_data(tok)
                 task.return_values(result)
 
@@ -416,28 +409,25 @@ def create_simulatable_pipeline():
         rst = mod.reset()
 
         # Simple dataflow: input -> process (add 10) -> multiply by 2 -> output
-        with mod.dataflow(
-            "simple",
-            args=[("x", UInt(16))],
-            returns=[UInt(16)],
-        ) as df:
+        @jit.dataflow(mod, name="simple")
+        def simple(df, x: UInt[16]) -> UInt[16]:
+            dfb = df._df
+
             # Stage 1: Add 10
-            with df.task("add_stage", timing=(0, 1),
-                        tokens_out=[SyncToken(UInt(16))]) as task:
-                result = task.add(df.x, task.const(10, 16))
+            with dfb.task("add_stage", timing=(0, 1), tokens_out=[SyncToken(UInt(16))]) as task:
+                result = task.add(x, task.const(10, 16))
                 tok1 = task.create_token(task.bits(result, 15, 0), UInt(16))
                 task.yield_tokens(tok1)
 
             # Stage 2: Multiply by 2
-            with df.task("mul_stage", tokens_in=[tok1], timing=(1, 2),
-                        tokens_out=[SyncToken(UInt(16))]) as task:
+            with dfb.task("mul_stage", tokens_in=[tok1], timing=(1, 2), tokens_out=[SyncToken(UInt(16))]) as task:
                 data = task.token_data(tok1)
                 result = task.mul(data, task.const(2, 16))
                 tok2 = task.create_token(task.bits(result, 15, 0), UInt(16))
                 task.yield_tokens(tok2)
 
             # Stage 3: Output
-            with df.task("output", tokens_in=[tok2], timing=(2, 3)) as task:
+            with dfb.task("output", tokens_in=[tok2], timing=(2, 3)) as task:
                 result = task.token_data(tok2)
                 task.return_values(result)
 

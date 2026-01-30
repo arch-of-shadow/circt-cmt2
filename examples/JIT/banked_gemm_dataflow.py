@@ -66,91 +66,85 @@ def create_banked_gemm_circuit() -> Circuit:
         # Host-facing write methods for A and B banks (preload).
         # ---------------------------------------------------------------------
         for i in range(4):
-            with jit.method(m, f"a_write_b{i}", args=[("addr", UInt(1)), ("data", UInt(32))]) as meth:
-                with meth.guard as g:
-                    g.always()
-                with meth.body as body:
-                    body.call(a[i], "write", body.arg("data"), body.arg("addr"))
+            def _define_bank_writes(a_bank, b_bank, idx: int):
+                @jit.method(m, name=f"a_write_b{idx}")
+                def a_write(meth, addr: UInt[1], data: UInt[32]) -> None:
+                    with meth.guard:
+                        meth.always()
+                    with meth.body:
+                        a_bank.write(data, addr)
 
-            with jit.method(m, f"b_write_b{i}", args=[("addr", UInt(1)), ("data", UInt(32))]) as meth:
-                with meth.guard as g:
-                    g.always()
-                with meth.body as body:
-                    body.call(b[i], "write", body.arg("data"), body.arg("addr"))
+                @jit.method(m, name=f"b_write_b{idx}")
+                def b_write(meth, addr: UInt[1], data: UInt[32]) -> None:
+                    with meth.guard:
+                        meth.always()
+                    with meth.body:
+                        b_bank.write(data, addr)
+
+            _define_bank_writes(a[i], b[i], i)
 
         # ---------------------------------------------------------------------
         # Host-facing value methods to observe C bank contents for tile (0,0).
         # Tile (0,0) maps to bank_addr=0 for all 4 banks under the mapping above.
         # ---------------------------------------------------------------------
         for i in range(4):
-            with jit.value(m, f"get_c_b{i}", returns=[UInt(32)]) as val:
-                with val.guard as g:
-                    g.always()
-                with val.body as body:
-                    data = body.call(c[i], "read", body.const(0, 2))
-                    body.returns(data)
+            def _define_bank_read(c_bank, idx: int):
+                @jit.value(m, name=f"get_c_b{idx}")
+                def get_c(val) -> UInt[32]:
+                    with val.guard:
+                        val.always()
+                    with val.body:
+                        val.returns(c_bank.read(val.const(0, 2)))
+
+            _define_bank_read(c[i], i)
 
         # ---------------------------------------------------------------------
         # Dataflow: load -> compute (unrolled) -> store
         # ---------------------------------------------------------------------
-        from circt.pycmt2.types import SyncToken
+        from circt.pycmt2 import SyncToken
 
-        with m.dataflow(
-            "gemm",
-            args=[],
-            returns=[UInt(32), UInt(32), UInt(32), UInt(32)],
-        ) as df:
-            # Source token: "go" pulse every cycle (streaming pipeline).
-            with df.task("go", timing=(0, 1), tokens_out=[SyncToken(UInt(1))]) as task:
-                tok_go = task.create_token(task.const(1, 1), UInt(1))
-                task.yield_tokens(tok_go)
+        @jit.dataflow(m)
+        def gemm(df) -> tuple[UInt[32], UInt[32], UInt[32], UInt[32]]:
+            @df.task(tokens_out=[SyncToken[UInt[1]]], timing=(0, 1))
+            def go(task):
+                return task.create_token(task.const(1, 1), UInt[1])
 
-            # Load tile (rows 0..1, cols 0..1) for A (M=4,K=2) and B (K=2,N=4).
-            # Using 4-bank layouts so all 4 elements per operand can be read in parallel.
-            with df.task(
-                "load",
-                tokens_in=[tok_go],
-                timing=(1, 2),
-                tokens_out=[SyncToken(UInt(32))] * 8,
-            ) as task:
-                # A tile elements (bank_addr=0 for rows 0..1):
-                a00 = task.call(a[0], "read", task.const(0, 1))
-                a01 = task.call(a[1], "read", task.const(0, 1))
-                a10 = task.call(a[2], "read", task.const(0, 1))
-                a11 = task.call(a[3], "read", task.const(0, 1))
+            (tok_go,) = go._cmt2_tokens
 
-                # B tile elements (bank_addr=0 for cols 0..1):
-                b00 = task.call(b[0], "read", task.const(0, 1))
-                b01 = task.call(b[1], "read", task.const(0, 1))
-                b10 = task.call(b[2], "read", task.const(0, 1))
-                b11 = task.call(b[3], "read", task.const(0, 1))
-
-                tok_a00 = task.create_token(a00, UInt(32))
-                tok_a01 = task.create_token(a01, UInt(32))
-                tok_a10 = task.create_token(a10, UInt(32))
-                tok_a11 = task.create_token(a11, UInt(32))
-                tok_b00 = task.create_token(b00, UInt(32))
-                tok_b01 = task.create_token(b01, UInt(32))
-                tok_b10 = task.create_token(b10, UInt(32))
-                tok_b11 = task.create_token(b11, UInt(32))
-                task.yield_tokens(
-                    tok_a00,
-                    tok_a01,
-                    tok_a10,
-                    tok_a11,
-                    tok_b00,
-                    tok_b01,
-                    tok_b10,
-                    tok_b11,
+            @df.task(tokens_in=[tok_go], timing=(1, 2), tokens_out=[SyncToken[UInt[32]]] * 8)
+            def load(task):
+                addr0 = task.const(0, 1)
+                a00 = a[0].read(addr0)
+                a01 = a[1].read(addr0)
+                a10 = a[2].read(addr0)
+                a11 = a[3].read(addr0)
+                b00 = b[0].read(addr0)
+                b01 = b[1].read(addr0)
+                b10 = b[2].read(addr0)
+                b11 = b[3].read(addr0)
+                return (
+                    task.create_token(a00, UInt[32]),
+                    task.create_token(a01, UInt[32]),
+                    task.create_token(a10, UInt[32]),
+                    task.create_token(a11, UInt[32]),
+                    task.create_token(b00, UInt[32]),
+                    task.create_token(b01, UInt[32]),
+                    task.create_token(b10, UInt[32]),
+                    task.create_token(b11, UInt[32]),
                 )
 
-            # Compute unrolled K=2 for a 2x2 output tile:
-            # C00 = A00*B00 + A01*B10
-            # C01 = A00*B01 + A01*B11
-            # C10 = A10*B00 + A11*B10
-            # C11 = A10*B01 + A11*B11
-            with df.task(
-                "compute",
+            (
+                tok_a00,
+                tok_a01,
+                tok_a10,
+                tok_a11,
+                tok_b00,
+                tok_b01,
+                tok_b10,
+                tok_b11,
+            ) = load._cmt2_tokens
+
+            @df.task(
                 tokens_in=[
                     tok_a00,
                     tok_a01,
@@ -162,8 +156,9 @@ def create_banked_gemm_circuit() -> Circuit:
                     tok_b11,
                 ],
                 timing=(2, 3),
-                tokens_out=[SyncToken(UInt(32))] * 4,
-            ) as task:
+                tokens_out=[SyncToken[UInt[32]]] * 4,
+            )
+            def compute(task):
                 va00 = task.token_data(tok_a00)
                 va01 = task.token_data(tok_a01)
                 va10 = task.token_data(tok_a10)
@@ -173,50 +168,34 @@ def create_banked_gemm_circuit() -> Circuit:
                 vb10 = task.token_data(tok_b10)
                 vb11 = task.token_data(tok_b11)
 
-                p00 = task.mul(va00, vb00)
-                p01 = task.mul(va01, vb10)
-                s00 = task.add(p00, p01)
+                c00 = task.bits(task.add(task.mul(va00, vb00), task.mul(va01, vb10)), 31, 0)
+                c01 = task.bits(task.add(task.mul(va00, vb01), task.mul(va01, vb11)), 31, 0)
+                c10 = task.bits(task.add(task.mul(va10, vb00), task.mul(va11, vb10)), 31, 0)
+                c11 = task.bits(task.add(task.mul(va10, vb01), task.mul(va11, vb11)), 31, 0)
 
-                p10 = task.mul(va00, vb01)
-                p11 = task.mul(va01, vb11)
-                s01 = task.add(p10, p11)
+                return (
+                    task.create_token(c00, UInt[32]),
+                    task.create_token(c01, UInt[32]),
+                    task.create_token(c10, UInt[32]),
+                    task.create_token(c11, UInt[32]),
+                )
 
-                p20 = task.mul(va10, vb00)
-                p21 = task.mul(va11, vb10)
-                s10 = task.add(p20, p21)
+            (tok_c00, tok_c01, tok_c10, tok_c11) = compute._cmt2_tokens
 
-                p30 = task.mul(va10, vb01)
-                p31 = task.mul(va11, vb11)
-                s11 = task.add(p30, p31)
-
-                c00 = task.bits(s00, 31, 0)
-                c01 = task.bits(s01, 31, 0)
-                c10 = task.bits(s10, 31, 0)
-                c11 = task.bits(s11, 31, 0)
-
-                tok_c00 = task.create_token(c00, UInt(32))
-                tok_c01 = task.create_token(c01, UInt(32))
-                tok_c10 = task.create_token(c10, UInt(32))
-                tok_c11 = task.create_token(c11, UInt(32))
-                task.yield_tokens(tok_c00, tok_c01, tok_c10, tok_c11)
-
-            # Store to C banks (tile (0,0) => bank_addr=0 for all 4 banks) and return outputs.
-            with df.task(
-                "store",
-                tokens_in=[tok_go, tok_c00, tok_c01, tok_c10, tok_c11],
-                timing=(3, 4),
-            ) as task:
+            @df.task(tokens_in=[tok_go, tok_c00, tok_c01, tok_c10, tok_c11], timing=(3, 4))
+            def store(task) -> tuple[UInt[32], UInt[32], UInt[32], UInt[32]]:
                 out00 = task.token_data(tok_c00)
                 out01 = task.token_data(tok_c01)
                 out10 = task.token_data(tok_c10)
                 out11 = task.token_data(tok_c11)
 
-                task.call(c[0], "write", out00, task.const(0, 2))
-                task.call(c[1], "write", out01, task.const(0, 2))
-                task.call(c[2], "write", out10, task.const(0, 2))
-                task.call(c[3], "write", out11, task.const(0, 2))
+                addr_c0 = task.const(0, 2)
+                c[0].write(out00, addr_c0)
+                c[1].write(out01, addr_c0)
+                c[2].write(out10, addr_c0)
+                c[3].write(out11, addr_c0)
 
-                task.return_values(out00, out01, out10, out11)
+                return (out00, out01, out10, out11)
 
     return circuit
 

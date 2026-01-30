@@ -52,23 +52,20 @@ def create_parallel_test(circuit: Circuit, width: int = 32):
         counter2 = harness.instance(reg_mod, "counter2", clk=clk, rst=rst)
         done_reg = harness.instance(reg1_mod, "done_reg", clk=clk, rst=rst)
 
-        # Value: done
-        with jit.value(harness, "done", returns=[UInt(1)]) as done_val:
-            with done_val.guard as g:
-                g.always()
-            with done_val.body as body:
-                d = body.call(done_reg, "read")
-                body.returns(d)
+        @jit.value(harness)
+        def done(done_val) -> UInt[1]:
+            with done_val.guard:
+                done_val.always()
+            with done_val.body:
+                done_val.returns(done_reg.read)
 
-        # Value: result - sum of counter1 + counter2
-        with jit.value(harness, "result", returns=[UInt(width)]) as result_val:
-            with result_val.guard as g:
-                g.always()
-            with result_val.body as body:
-                c1 = body.call(counter1, "read")
-                c2 = body.call(counter2, "read")
-                s = body.add(c1, c2)
-                body.returns(body.bits(s, width-1, 0))
+        @jit.value(harness)
+        def result(result_val) -> UInt[width]:
+            with result_val.guard:
+                result_val.always()
+            with result_val.body:
+                s = counter1.read + counter2.read
+                result_val.returns(result_val.bits(s, width - 1, 0))
 
         # Step: incr1 - increment counter1
         with harness.step("incr1") as step1:
@@ -105,7 +102,7 @@ def create_parallel_test(circuit: Circuit, width: int = 32):
                     # After both complete, mark done
                     seq.enable(done_step.ref())
 
-        harness.precedence(done_val.ref(), result_val.ref(), main.ref())
+        harness.precedence(done._cmt2_ref, result._cmt2_ref, main.ref())
 
     return harness
 

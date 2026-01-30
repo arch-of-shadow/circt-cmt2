@@ -143,18 +143,16 @@ def create_static_proc_circuit():
         # Note: For multi-cycle methods with timing attributes, use proc_method()
         # with control() for sequencing steps
         # =================================================================
-        with jit.method(m, "start", args=[("a", UInt(32)), ("b", UInt(32))]) as meth:
-            with meth.guard as g:
-                is_busy = g.call(busy, "read")
-                not_busy = g.not_(is_busy)
-                g.returns(not_busy)
-            with meth.body as body:
-                # Load first element pair
-                body.call(reg_a, "write", body.arg("a"))
-                body.call(reg_b, "write", body.arg("b"))
-                body.call(busy, "write", body.const(1, 1))
-                body.call(first_elem, "write", body.const(1, 1))  # Mark first element
-                body.call(reg_idx, "write", body.const(0, 32))
+        @jit.method(m)
+        def start(meth, a: UInt[32], b: UInt[32]) -> None:
+            with meth.guard:
+                meth.returns(meth.not_(busy.read))
+            with meth.body:
+                reg_a.write(a)
+                reg_b.write(b)
+                busy.write(meth.const(1, 1))
+                first_elem.write(meth.const(1, 1))  # Mark first element
+                reg_idx.write(meth.const(0, 32))
 
         # =================================================================
         # METHOD: load_element
@@ -162,13 +160,13 @@ def create_static_proc_circuit():
         # Note: For pipelined methods (interval < latency), use proc_method()
         # with control() and multi-cycle step definitions
         # =================================================================
-        with jit.method(m, "load_element", args=[("a", UInt(32)), ("b", UInt(32))]) as meth:
-            with meth.guard as g:
-                is_busy = g.call(busy, "read")
-                g.returns(is_busy)  # Only accept when busy (processing)
-            with meth.body as body:
-                body.call(reg_a, "write", body.arg("a"))
-                body.call(reg_b, "write", body.arg("b"))
+        @jit.method(m)
+        def load_element(meth, a: UInt[32], b: UInt[32]) -> None:
+            with meth.guard:
+                meth.returns(busy.read)  # Only accept when busy (processing)
+            with meth.body:
+                reg_a.write(a)
+                reg_b.write(b)
 
         # =================================================================
         # PROCEDURAL RULE: compute
@@ -206,44 +204,43 @@ def create_static_proc_circuit():
         # =================================================================
         # VALUE: get_result
         # =================================================================
-        with jit.value(m, "get_result", returns=[UInt(32)]) as val:
-            with val.guard as g:
-                is_busy = g.call(busy, "read")
-                g.returns(g.not_(is_busy))
-            with val.body as body:
-                result = body.call(reg_accum, "read")
-                body.returns(result)
+        @jit.value(m)
+        def get_result(val) -> UInt[32]:
+            with val.guard:
+                val.returns(val.not_(busy.read))
+            with val.body:
+                val.returns(reg_accum.read)
 
         # =================================================================
         # VALUE: is_busy
         # =================================================================
-        with jit.value(m, "is_busy", returns=[UInt(1)]) as val:
-            with val.guard as g:
-                g.always()
-            with val.body as body:
-                is_busy = body.call(busy, "read")
-                body.returns(is_busy)
+        @jit.value(m)
+        def is_busy(val) -> UInt[1]:
+            with val.guard:
+                val.always()
+            with val.body:
+                val.returns(busy.read)
 
         # =================================================================
         # VALUE: get_index
         # =================================================================
-        with jit.value(m, "get_index", returns=[UInt(32)]) as val:
-            with val.guard as g:
-                g.always()
-            with val.body as body:
-                idx = body.call(reg_idx, "read")
-                body.returns(idx)
+        @jit.value(m)
+        def get_index(val) -> UInt[32]:
+            with val.guard:
+                val.always()
+            with val.body:
+                val.returns(reg_idx.read)
 
         # =================================================================
         # METHOD: clear
         # =================================================================
-        with jit.method(m, "clear") as meth:
-            with meth.guard as g:
-                is_busy = g.call(busy, "read")
-                g.returns(g.not_(is_busy))
-            with meth.body as body:
-                body.call(reg_accum, "write", body.const(0, 32))
-                body.call(reg_idx, "write", body.const(0, 32))
+        @jit.method(m)
+        def clear(meth) -> None:
+            with meth.guard:
+                meth.returns(meth.not_(busy.read))
+            with meth.body:
+                reg_accum.write(meth.const(0, 32))
+                reg_idx.write(meth.const(0, 32))
 
     return circuit
 

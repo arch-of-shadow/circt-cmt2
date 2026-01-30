@@ -57,33 +57,27 @@ def main():
         result_reg = calc_mod.instance(reg8_mod, "result_reg", clk=clk, rst=rst)
         busy_reg = calc_mod.instance(reg1_mod, "busy_reg", clk=clk, rst=rst)
 
-        # Method: start calculation (sets busy_reg)
-        with jit.method(calc_mod, "start", args=[("data", UInt(8))]) as meth:
-            with meth.guard as g:
-                is_busy = g.call(busy_reg, "read")
-                not_busy = g.eq(is_busy, g.const(0, 1))
-                g.returns(not_busy)
-            with meth.body as b:
-                data = b.arg("data")
-                b.call(input_reg, "write", data)
-                b.call(busy_reg, "write", b.const(1, 1))
+        @jit.method(calc_mod)
+        def start(meth, data: UInt[8]) -> None:
+            with meth.guard:
+                meth.returns(meth.eq(busy_reg.read, meth.const(0, 1)))
+            with meth.body:
+                input_reg.write(data)
+                busy_reg.write(meth.const(1, 1))
 
-        # Value: get result
-        with jit.value(calc_mod, "result", returns=[UInt(8)]) as val:
-            with val.guard as g:
-                g.always()
-            with val.body as b:
-                result = b.call(result_reg, "read")
-                b.returns(result)
+        @jit.value(calc_mod)
+        def result(val) -> UInt[8]:
+            with val.guard:
+                val.always()
+            with val.body:
+                val.returns(result_reg.read)
 
-        # Value: check if done
-        with jit.value(calc_mod, "done", returns=[UInt(1)]) as val:
-            with val.guard as g:
-                g.always()
-            with val.body as b:
-                is_busy = b.call(busy_reg, "read")
-                is_done = b.eq(is_busy, b.const(0, 1))
-                b.returns(is_done)
+        @jit.value(calc_mod)
+        def done(val) -> UInt[1]:
+            with val.guard:
+                val.always()
+            with val.body:
+                val.returns(val.eq(busy_reg.read, val.const(0, 1)))
 
         # Static step: compute result (doubles input)
         with calc_mod.static_step(2, "compute") as step:
@@ -138,33 +132,28 @@ def main():
             step.call(result_reg, "write", result)
             step.call(done_reg, "write", step.const(1, 1))
 
-        # Method: start processing (external trigger)
-        with jit.method(parent_mod, "start", args=[("data", UInt(8))]) as meth:
-            with meth.guard as g:
-                is_started = g.call(started_reg, "read")
-                not_started = g.eq(is_started, g.const(0, 1))
-                g.returns(not_started)
-            with meth.body as b:
-                data = b.arg("data")
-                b.call(data_reg, "write", data)
-                b.call(started_reg, "write", b.const(1, 1))
-                b.call(done_reg, "write", b.const(0, 1))
+        @jit.method(parent_mod)
+        def start(meth, data: UInt[8]) -> None:
+            with meth.guard:
+                meth.returns(meth.eq(started_reg.read, meth.const(0, 1)))
+            with meth.body:
+                data_reg.write(data)
+                started_reg.write(meth.const(1, 1))
+                done_reg.write(meth.const(0, 1))
 
-        # Value: get result
-        with jit.value(parent_mod, "result", returns=[UInt(8)]) as val:
-            with val.guard as g:
-                g.always()
-            with val.body as b:
-                result = b.call(result_reg, "read")
-                b.returns(result)
+        @jit.value(parent_mod)
+        def result(val) -> UInt[8]:
+            with val.guard:
+                val.always()
+            with val.body:
+                val.returns(result_reg.read)
 
-        # Value: is done
-        with jit.value(parent_mod, "done", returns=[UInt(1)]) as val:
-            with val.guard as g:
-                g.always()
-            with val.body as b:
-                done = b.call(done_reg, "read")
-                b.returns(done)
+        @jit.value(parent_mod)
+        def done(val) -> UInt[1]:
+            with val.guard:
+                val.always()
+            with val.body:
+                val.returns(done_reg.read)
 
         # Static step: no-op wait step
         with parent_mod.static_step(1, "wait_step") as step:
@@ -385,33 +374,27 @@ def create_circuit():
         result_reg = calc_mod.instance(reg8_mod, "result_reg", clk=clk, rst=rst)
         busy_reg = calc_mod.instance(reg1_mod, "busy_reg", clk=clk, rst=rst)
 
-        # Method: start calculation (sets busy_reg)
-        with jit.method(calc_mod, "start", args=[("data", UInt(8))]) as meth:
-            with meth.guard as g:
-                is_busy = g.call(busy_reg, "read")
-                not_busy = g.eq(is_busy, g.const(0, 1))
-                g.returns(not_busy)
-            with meth.body as b:
-                data = b.arg("data")
-                b.call(input_reg, "write", data)
-                b.call(busy_reg, "write", b.const(1, 1))
+        @jit.method(calc_mod)
+        def start(meth, data: UInt[8]) -> None:
+            with meth.guard:
+                meth.returns(meth.eq(busy_reg.read, meth.const(0, 1)))
+            with meth.body:
+                input_reg.write(data)
+                busy_reg.write(meth.const(1, 1))
 
-        # Value: get result
-        with jit.value(calc_mod, "result", returns=[UInt(8)]) as val:
-            with val.guard as g:
-                g.always()
-            with val.body as b:
-                result = b.call(result_reg, "read")
-                b.returns(result)
+        @jit.value(calc_mod)
+        def result(val) -> UInt[8]:
+            with val.guard:
+                val.always()
+            with val.body:
+                val.returns(result_reg.read)
 
-        # Value: check if done
-        with jit.value(calc_mod, "done", returns=[UInt(1)]) as val:
-            with val.guard as g:
-                g.always()
-            with val.body as b:
-                is_busy = b.call(busy_reg, "read")
-                is_done = b.eq(is_busy, b.const(0, 1))
-                b.returns(is_done)
+        @jit.value(calc_mod)
+        def done(val) -> UInt[1]:
+            with val.guard:
+                val.always()
+            with val.body:
+                val.returns(val.eq(busy_reg.read, val.const(0, 1)))
 
         # Static step: compute result (doubles input)
         with calc_mod.static_step(2, "compute") as step:
@@ -466,33 +449,28 @@ def create_circuit():
             step.call(result_reg, "write", result)
             step.call(done_reg, "write", step.const(1, 1))
 
-        # Method: start processing (external trigger)
-        with jit.method(parent_mod, "start", args=[("data", UInt(8))]) as meth:
-            with meth.guard as g:
-                is_started = g.call(started_reg, "read")
-                not_started = g.eq(is_started, g.const(0, 1))
-                g.returns(not_started)
-            with meth.body as b:
-                data = b.arg("data")
-                b.call(data_reg, "write", data)
-                b.call(started_reg, "write", b.const(1, 1))
-                b.call(done_reg, "write", b.const(0, 1))
+        @jit.method(parent_mod)
+        def start(meth, data: UInt[8]) -> None:
+            with meth.guard:
+                meth.returns(meth.eq(started_reg.read, meth.const(0, 1)))
+            with meth.body:
+                data_reg.write(data)
+                started_reg.write(meth.const(1, 1))
+                done_reg.write(meth.const(0, 1))
 
-        # Value: get result
-        with jit.value(parent_mod, "result", returns=[UInt(8)]) as val:
-            with val.guard as g:
-                g.always()
-            with val.body as b:
-                result = b.call(result_reg, "read")
-                b.returns(result)
+        @jit.value(parent_mod)
+        def result(val) -> UInt[8]:
+            with val.guard:
+                val.always()
+            with val.body:
+                val.returns(result_reg.read)
 
-        # Value: is done
-        with jit.value(parent_mod, "done", returns=[UInt(1)]) as val:
-            with val.guard as g:
-                g.always()
-            with val.body as b:
-                done = b.call(done_reg, "read")
-                b.returns(done)
+        @jit.value(parent_mod)
+        def done(val) -> UInt[1]:
+            with val.guard:
+                val.always()
+            with val.body:
+                val.returns(done_reg.read)
 
         # Static step: no-op wait step
         with parent_mod.static_step(1, "wait_step") as step:

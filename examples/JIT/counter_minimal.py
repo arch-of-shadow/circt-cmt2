@@ -37,8 +37,8 @@ def counter(width: int = 32) -> Circuit:
             with r.body:
                 count.next = count.read + 1
 
-        @jit.value(m, returns=[UInt(width)])
-        def get_count(r):
+        @jit.value(m)
+        def get_count(r) -> UInt[width]:
             with r.guard:
                 r.always()
 

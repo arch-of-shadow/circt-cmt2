@@ -44,44 +44,36 @@ def create_gcd_circuit():
         reg_a = m.instance(reg_mod, "reg_a", clk=clk, rst=rst)
         reg_b = m.instance(reg_mod, "reg_b", clk=clk, rst=rst)
 
-        # Method: load - Load input values
-        with jit.method(m, "load", args=[("a", UInt(32)), ("b", UInt(32))]) as meth:
-            with meth.guard as g:
-                g.always()
-            with meth.body as body:
-                a_in = body.arg("a")
-                b_in = body.arg("b")
-                body.call(reg_a, "write", a_in)
-                body.call(reg_b, "write", b_in)
+        @jit.method(m)
+        def load(meth, a: UInt[32], b: UInt[32]) -> None:
+            with meth.guard:
+                meth.always()
+            with meth.body:
+                reg_a.write(a)
+                reg_b.write(b)
 
-        # Rule: compute - One iteration of GCD algorithm
-        with jit.rule(m, "compute") as rule:
-            with rule.guard as g:
-                b_val = g.call(reg_b, "read")
-                zero = g.const(0, 32)
-                cond = g.neq(b_val, zero)
-                g.returns(cond)
-            with rule.body as body:
-                a_val = body.call(reg_a, "read")
-                b_val = body.call(reg_b, "read")
-                a_gt_b = body.gt(a_val, b_val)
-                new_a = body.sub(a_val, b_val)
-                new_b = body.sub(b_val, a_val)
-                final_a = body.mux(a_gt_b, new_a, a_val)
-                final_b = body.mux(a_gt_b, b_val, new_b)
-                body.call(reg_a, "write", final_a)
-                body.call(reg_b, "write", final_b)
+        @jit.rule(m)
+        def compute(rule):
+            with rule.guard:
+                rule.returns(reg_b.read != 0)
 
-        # Value method: result - Read the GCD result
-        with jit.value(m, "result", returns=[UInt(32)]) as val:
-            with val.guard as g:
-                b_val = g.call(reg_b, "read")
-                zero = g.const(0, 32)
-                ready = g.eq(b_val, zero)
-                g.returns(ready)
-            with val.body as body:
-                result = body.call(reg_a, "read")
-                body.returns(result)
+            with rule.body:
+                a_val = reg_a.read
+                b_val = reg_b.read
+                a_gt_b = rule.gt(a_val, b_val)
+                new_a = rule.sub(a_val, b_val)
+                new_b = rule.sub(b_val, a_val)
+                final_a = rule.mux(a_gt_b, new_a, a_val)
+                final_b = rule.mux(a_gt_b, b_val, new_b)
+                reg_a.write(final_a)
+                reg_b.write(final_b)
+
+        @jit.value(m)
+        def result(val) -> UInt[32]:
+            with val.guard:
+                val.returns(reg_b.read == 0)
+            with val.body:
+                val.returns(reg_a.read)
 
     return circuit
 

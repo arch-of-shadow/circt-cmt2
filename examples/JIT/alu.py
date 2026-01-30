@@ -49,51 +49,37 @@ def create_alu_circuit():
         reg_result = alu.instance(reg32_mod, "reg_result", clk=clk, rst=rst)
         busy_reg = alu.instance(reg1_mod, "busy", clk=clk, rst=rst)
 
-        # Method: start computation with operands
-        with jit.method(alu, "start", args=[("a", UInt(32)), ("b", UInt(32))]) as meth:
-            with meth.guard as g:
-                busy = g.call(busy_reg, "read")
-                not_busy = g.not_(busy)
-                g.returns(not_busy)
-            with meth.body as body:
-                a_in = body.arg("a")
-                b_in = body.arg("b")
-                body.call(reg_a, "write", a_in)
-                body.call(reg_b, "write", b_in)
-                one = body.const(1, 1)
-                body.call(busy_reg, "write", one)
+        @jit.method(alu)
+        def start(meth, a: UInt[32], b: UInt[32]) -> None:
+            with meth.guard:
+                meth.returns(meth.not_(busy_reg.read))
+            with meth.body:
+                reg_a.write(a)
+                reg_b.write(b)
+                busy_reg.write(meth.const(1, 1))
 
-        # Rule: compute result when busy
-        with jit.rule(alu, "compute") as rule:
-            with rule.guard as g:
-                busy = g.call(busy_reg, "read")
-                g.returns(busy)
-            with rule.body as body:
-                a = body.call(reg_a, "read")
-                b = body.call(reg_b, "read")
-                result = body.add(a, b)
-                body.call(reg_result, "write", result)
-                zero = body.const(0, 1)
-                body.call(busy_reg, "write", zero)
+        @jit.rule(alu)
+        def compute(rule):
+            with rule.guard:
+                rule.returns(busy_reg.read)
+            with rule.body:
+                result = reg_a.read + reg_b.read
+                reg_result.write(result)
+                busy_reg.write(rule.const(0, 1))
 
-        # Value method: read result
-        with jit.value(alu, "get_result", returns=[UInt(32)]) as val:
-            with val.guard as g:
-                busy = g.call(busy_reg, "read")
-                not_busy = g.not_(busy)
-                g.returns(not_busy)
-            with val.body as body:
-                result = body.call(reg_result, "read")
-                body.returns(result)
+        @jit.value(alu)
+        def get_result(val) -> UInt[32]:
+            with val.guard:
+                val.returns(val.not_(busy_reg.read))
+            with val.body:
+                val.returns(reg_result.read)
 
-        # Value method: check if ready
-        with jit.value(alu, "is_ready", returns=[UInt(1)]) as val:
-            with val.guard as g:
-                g.always()
-            with val.body as body:
-                busy = body.call(busy_reg, "read")
-                not_busy = body.not_(busy)
-                body.returns(not_busy)
+        @jit.value(alu)
+        def is_ready(val) -> UInt[1]:
+            with val.guard:
+                val.always()
+            with val.body:
+                val.returns(val.not_(busy_reg.read))
 
     return circuit
 

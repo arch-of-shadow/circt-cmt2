@@ -113,119 +113,70 @@ def create_comprehensive_dataflow():
         # - Proc control (seq, par, static_repeat) in tasks
         # =====================================================================
 
-        with mod.dataflow(
-            "fork_join_pipeline",
-            args=[("data_in", UInt(16))],
-            returns=[UInt(32)],
-            interval=1,  # Fully pipelined
-        ) as df:
-            # -----------------------------------------------------------------
-            # Task 1: Source - create initial token
-            # -----------------------------------------------------------------
-            with df.task("source", timing=(0, 1),
-                        tokens_out=[SyncToken(UInt(16))]) as task:
-                """
-                Source task: captures input and creates token.
-                Demonstrates: Basic token creation with data.
-                """
-                # Create token carrying input data
-                tok_src = task.create_token(df.data_in, UInt(16))
-                task.yield_tokens(tok_src)
+        @jit.dataflow(mod, interval=1)
+        def fork_join_pipeline(df, data_in: UInt[16]) -> UInt[32]:
+            @df.task(timing=(0, 1), tokens_out=[SyncToken[UInt[16]]])
+            def source(task):
+                return task.create_token(data_in, UInt[16])
 
-            # -----------------------------------------------------------------
-            # Task 2a: Branch Add - adds 100 to input
-            # Demonstrates: Fork pattern (same token consumed by multiple tasks)
-            # -----------------------------------------------------------------
-            with df.task("branch_add", tokens_in=[tok_src], timing=(1, 2),
-                        tokens_out=[SyncToken(UInt(32))]) as task:
-                """
-                Branch A: Adds 100 to input.
-                Demonstrates: token.data extraction, arithmetic.
-                """
-                data = task.token_data(tok_src)
-                # Zero-extend to 32 bits before adding
-                data_32 = task.pad(data, 32)
-                result = task.add(data_32, task.const(100, 32))
-                # Truncate to 32 bits (add produces 33 bits)
-                result_32 = task.bits(result, 31, 0)
-                tok_add = task.create_token(result_32, UInt(32))
-                task.yield_tokens(tok_add)
+            (tok_src,) = source._cmt2_tokens
 
-            # -----------------------------------------------------------------
-            # Task 2b: Branch Mul - multiplies input by 2
-            # Demonstrates: Fork pattern (parallel branch)
-            # -----------------------------------------------------------------
-            with df.task("branch_mul", tokens_in=[tok_src], timing=(1, 2),
-                        tokens_out=[SyncToken(UInt(32))]) as task:
-                """
-                Branch B: Multiplies input by 2.
-                Demonstrates: Fork pattern - same source token.
-                """
-                data = task.token_data(tok_src)
-                data_32 = task.pad(data, 32)
-                result = task.mul(data_32, task.const(2, 32))
-                # Truncate back to 32 bits
-                result_32 = task.bits(result, 31, 0)
-                tok_mul = task.create_token(result_32, UInt(32))
-                task.yield_tokens(tok_mul)
+            @df.task(tokens_in=[tok_src], timing=(1, 2), tokens_out=[SyncToken[UInt[32]]])
+            def branch_add(task):
+                data = task.pad(task.token_data(tok_src), 32)
+                result = task.bits(task.add(data, task.const(100, 32)), 31, 0)
+                return task.create_token(result, UInt[32])
 
-            # -----------------------------------------------------------------
-            # Task 3: Join - waits for both branches and combines results
-            # Demonstrates: Join pattern (multiple token inputs)
-            # -----------------------------------------------------------------
-            with df.task("join", tokens_in=[tok_add, tok_mul], timing=(2, 3),
-                        tokens_out=[SyncToken(UInt(32))]) as task:
-                """
-                Join task: Combines results from both branches.
-                Demonstrates: Multiple token inputs (join pattern).
-                Result = (data + 100) + (data * 2) = 3*data + 100
-                """
+            (tok_add,) = branch_add._cmt2_tokens
+
+            @df.task(tokens_in=[tok_src], timing=(1, 2), tokens_out=[SyncToken[UInt[32]]])
+            def branch_mul(task):
+                data = task.pad(task.token_data(tok_src), 32)
+                result = task.bits(task.mul(data, task.const(2, 32)), 31, 0)
+                return task.create_token(result, UInt[32])
+
+            (tok_mul,) = branch_mul._cmt2_tokens
+
+            @df.task(tokens_in=[tok_add, tok_mul], timing=(2, 3), tokens_out=[SyncToken[UInt[32]]])
+            def join(task):
                 val_add = task.token_data(tok_add)
                 val_mul = task.token_data(tok_mul)
-                combined = task.add(val_add, val_mul)
-                # Truncate to 32 bits
-                combined_32 = task.bits(combined, 31, 0)
-                tok_combined = task.create_token(combined_32, UInt(32))
-                task.yield_tokens(tok_combined)
+                combined = task.bits(task.add(val_add, val_mul), 31, 0)
+                return task.create_token(combined, UInt[32])
 
-            # -----------------------------------------------------------------
-            # Task 4: Finalize - stores result
-            # Demonstrates: dataflow.return for final output
-            # -----------------------------------------------------------------
-            with df.task("finalize", tokens_in=[tok_combined], timing=(3, 4)) as task:
-                """
-                Final task: Outputs the combined result.
-                Demonstrates: dataflow.return for pipeline output.
-                """
-                result = task.token_data(tok_combined)
-                task.return_values(result)
+            (tok_combined,) = join._cmt2_tokens
+
+            @df.task(tokens_in=[tok_combined], timing=(3, 4))
+            def finalize(task) -> UInt[32]:
+                return task.token_data(tok_combined)
 
         # =====================================================================
         # Method to start processing
         # =====================================================================
-        with jit.method(mod, "start", args=[("data", UInt(16))]) as meth:
-            with meth.guard as g:
-                g.always()
-            with meth.body as b:
-                b.call(input_reg, "write", b.arg("data"))
-                b.call(valid_reg, "write", b.const(0, 1))
+        @jit.method(mod)
+        def start(meth, data: UInt[16]) -> None:
+            with meth.guard:
+                meth.always()
+            with meth.body:
+                input_reg.write(data)
+                valid_reg.write(meth.const(0, 1))
 
         # =====================================================================
         # Value methods for reading results
         # =====================================================================
-        with jit.value(mod, "get_result", returns=[UInt(32)]) as val:
-            with val.guard as g:
-                g.always()
-            with val.body as b:
-                result = b.call(result_reg, "read")
-                b.returns(result)
+        @jit.value(mod)
+        def get_result(val) -> UInt[32]:
+            with val.guard:
+                val.always()
+            with val.body:
+                val.returns(result_reg.read)
 
-        with jit.value(mod, "is_valid", returns=[UInt(1)]) as val:
-            with val.guard as g:
-                g.always()
-            with val.body as b:
-                valid = b.call(valid_reg, "read")
-                b.returns(valid)
+        @jit.value(mod)
+        def is_valid(val) -> UInt[1]:
+            with val.guard:
+                val.always()
+            with val.body:
+                val.returns(valid_reg.read)
 
     return circuit
 

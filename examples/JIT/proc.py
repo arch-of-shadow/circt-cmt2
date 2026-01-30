@@ -241,47 +241,46 @@ def create_proc_comprehensive_circuit():
         # Method: load - Load input values (non-procedural)
         # =====================================================================
 
-        with jit.method(m, "load", args=[("a", UInt(32)), ("b", UInt(32))]) as meth:
-            with meth.guard as g:
-                g.always()
-            with meth.body as body:
-                a_in = body.arg("a")
-                b_in = body.arg("b")
-                body.call(reg_a, "write", a_in)
-                body.call(reg_b, "write", b_in)
+        @jit.method(m)
+        def load(meth, a: UInt[32], b: UInt[32]) -> None:
+            with meth.guard:
+                meth.always()
+            with meth.body:
+                reg_a.write(a)
+                reg_b.write(b)
 
         # =====================================================================
         # Value: get_result - Read result (non-procedural)
         # =====================================================================
 
-        with jit.value(m, "get_result", returns=[UInt(32)]) as val:
-            with val.guard as g:
-                g.always()
-            with val.body as body:
-                result = body.call(reg_result, "read")
-                body.returns(result)
+        @jit.value(m)
+        def get_result(val) -> UInt[32]:
+            with val.guard:
+                val.always()
+            with val.body:
+                val.returns(reg_result.read)
 
         # =====================================================================
         # Value: get_counter - Read counter (non-procedural)
         # =====================================================================
 
-        with jit.value(m, "get_counter", returns=[UInt(32)]) as val:
-            with val.guard as g:
-                g.always()
-            with val.body as body:
-                count = body.call(reg_counter, "read")
-                body.returns(count)
+        @jit.value(m)
+        def get_counter(val) -> UInt[32]:
+            with val.guard:
+                val.always()
+            with val.body:
+                val.returns(reg_counter.read)
 
         # =====================================================================
         # Value: get_flag - Read flag (non-procedural)
         # =====================================================================
 
-        with jit.value(m, "get_flag", returns=[UInt(1)]) as val:
-            with val.guard as g:
-                g.always()
-            with val.body as body:
-                flag = body.call(reg_flag, "read")
-                body.returns(flag)
+        @jit.value(m)
+        def get_flag(val) -> UInt[1]:
+            with val.guard:
+                val.always()
+            with val.body:
+                val.returns(reg_flag.read)
 
     return circuit
 

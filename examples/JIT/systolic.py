@@ -110,49 +110,43 @@ def create_systolic_circuit():
         # =====================================================================
         # Method: load_a - Load matrix A (row-major)
         # =====================================================================
-        with jit.method(m, "load_a", args=[("a00", UInt(32)), ("a01", UInt(32)),
-                                       ("a10", UInt(32)), ("a11", UInt(32))]) as meth:
-            with meth.guard as g:
-                is_busy = g.call(busy, "read")
-                not_busy = g.not_(is_busy)
-                g.returns(not_busy)
-            with meth.body as body:
-                body.call(a00_reg, "write", body.arg("a00"))
-                body.call(a01_reg, "write", body.arg("a01"))
-                body.call(a10_reg, "write", body.arg("a10"))
-                body.call(a11_reg, "write", body.arg("a11"))
+        @jit.method(m)
+        def load_a(meth, a00: UInt[32], a01: UInt[32], a10: UInt[32], a11: UInt[32]) -> None:
+            with meth.guard:
+                meth.returns(meth.not_(busy.read))
+            with meth.body:
+                a00_reg.write(a00)
+                a01_reg.write(a01)
+                a10_reg.write(a10)
+                a11_reg.write(a11)
 
         # =====================================================================
         # Method: load_b - Load matrix B (row-major)
         # =====================================================================
-        with jit.method(m, "load_b", args=[("b00", UInt(32)), ("b01", UInt(32)),
-                                       ("b10", UInt(32)), ("b11", UInt(32))]) as meth:
-            with meth.guard as g:
-                is_busy = g.call(busy, "read")
-                not_busy = g.not_(is_busy)
-                g.returns(not_busy)
-            with meth.body as body:
-                body.call(b00_reg, "write", body.arg("b00"))
-                body.call(b01_reg, "write", body.arg("b01"))
-                body.call(b10_reg, "write", body.arg("b10"))
-                body.call(b11_reg, "write", body.arg("b11"))
+        @jit.method(m)
+        def load_b(meth, b00: UInt[32], b01: UInt[32], b10: UInt[32], b11: UInt[32]) -> None:
+            with meth.guard:
+                meth.returns(meth.not_(busy.read))
+            with meth.body:
+                b00_reg.write(b00)
+                b01_reg.write(b01)
+                b10_reg.write(b10)
+                b11_reg.write(b11)
 
         # =====================================================================
         # Method: start - Begin computation
         # =====================================================================
-        with jit.method(m, "start") as meth:
-            with meth.guard as g:
-                is_busy = g.call(busy, "read")
-                not_busy = g.not_(is_busy)
-                g.returns(not_busy)
-            with meth.body as body:
-                body.call(busy, "write", body.const(1, 1))
-                body.call(cycle_count, "write", body.const(0, 32))
-                # Clear accumulators
-                body.call(c00_acc, "write", body.const(0, 32))
-                body.call(c01_acc, "write", body.const(0, 32))
-                body.call(c10_acc, "write", body.const(0, 32))
-                body.call(c11_acc, "write", body.const(0, 32))
+        @jit.method(m)
+        def start(meth) -> None:
+            with meth.guard:
+                meth.returns(meth.not_(busy.read))
+            with meth.body:
+                busy.write(meth.const(1, 1))
+                cycle_count.write(meth.const(0, 32))
+                c00_acc.write(meth.const(0, 32))
+                c01_acc.write(meth.const(0, 32))
+                c10_acc.write(meth.const(0, 32))
+                c11_acc.write(meth.const(0, 32))
 
         # =====================================================================
         # Rule: cycle0 - Cycle 0: Only PE[0,0] active
@@ -270,40 +264,40 @@ def create_systolic_circuit():
         # =====================================================================
         # Value methods to read results
         # =====================================================================
-        with jit.value(m, "get_c00", returns=[UInt(32)]) as val:
-            with val.guard as g:
-                is_busy = g.call(busy, "read")
-                g.returns(g.not_(is_busy))
-            with val.body as body:
-                body.returns(body.call(c00_acc, "read"))
+        @jit.value(m)
+        def get_c00(val) -> UInt[32]:
+            with val.guard:
+                val.returns(val.not_(busy.read))
+            with val.body:
+                val.returns(c00_acc.read)
 
-        with jit.value(m, "get_c01", returns=[UInt(32)]) as val:
-            with val.guard as g:
-                is_busy = g.call(busy, "read")
-                g.returns(g.not_(is_busy))
-            with val.body as body:
-                body.returns(body.call(c01_acc, "read"))
+        @jit.value(m)
+        def get_c01(val) -> UInt[32]:
+            with val.guard:
+                val.returns(val.not_(busy.read))
+            with val.body:
+                val.returns(c01_acc.read)
 
-        with jit.value(m, "get_c10", returns=[UInt(32)]) as val:
-            with val.guard as g:
-                is_busy = g.call(busy, "read")
-                g.returns(g.not_(is_busy))
-            with val.body as body:
-                body.returns(body.call(c10_acc, "read"))
+        @jit.value(m)
+        def get_c10(val) -> UInt[32]:
+            with val.guard:
+                val.returns(val.not_(busy.read))
+            with val.body:
+                val.returns(c10_acc.read)
 
-        with jit.value(m, "get_c11", returns=[UInt(32)]) as val:
-            with val.guard as g:
-                is_busy = g.call(busy, "read")
-                g.returns(g.not_(is_busy))
-            with val.body as body:
-                body.returns(body.call(c11_acc, "read"))
+        @jit.value(m)
+        def get_c11(val) -> UInt[32]:
+            with val.guard:
+                val.returns(val.not_(busy.read))
+            with val.body:
+                val.returns(c11_acc.read)
 
-        with jit.value(m, "is_done", returns=[UInt(1)]) as val:
-            with val.guard as g:
-                g.always()
-            with val.body as body:
-                is_busy = body.call(busy, "read")
-                body.returns(body.not_(is_busy))
+        @jit.value(m)
+        def is_done(val) -> UInt[1]:
+            with val.guard:
+                val.always()
+            with val.body:
+                val.returns(val.not_(busy.read))
 
     return circuit
 
