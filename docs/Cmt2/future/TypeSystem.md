@@ -78,8 +78,8 @@ def top():
 Interfaces use the same types for method/value signatures:
 
 ```python
-with circuit.interface("Writer") as i:
-    @i.method_sig
+with circuit.interface() as Writer:
+    @Writer.method_sig
     def store(data: UInt[32]) -> None: ...
 ```
 

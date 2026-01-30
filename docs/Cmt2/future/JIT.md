@@ -55,7 +55,7 @@ def counter(width: int = 32):
     with jit.module(circuit, "Counter") as m:
         clk = m.clock()
         rst = m.reset()
-        count = m.instance(Reg.create(circuit, width), "count", clk=clk, rst=rst)
+        count = m.instance(Reg.create(circuit, width), clk=clk, rst=rst)
 
         @jit.rule(m)
         def increment(r):
@@ -81,17 +81,17 @@ def counter(width: int = 32):
 Interfaces are defined at **circuit scope** (signatures), then used inside
 modules via declarations/definitions and instance bindings:
 
-- `circuit.interface("Reader")`: define interface functions (`method`/`value`)
-- `m.interface_decl("reader", "Reader")`: declare an interface instance in a module
-- `m.interface_def("readX", "Reader").bind(x, "read", "getData")`: define a mapping
-- `m.instance(child, ..., interface_bindings={"readX": "reader"})`: bind on instantiation
+- `with circuit.interface() as Reader`: define interface functions (`method`/`value`) with name inference
+- `reader = m.interface_decl(Reader)`: declare an interface instance in a module (name inferred)
+- `read_x = m.interface_def(Reader).bind(x.instance, x.instance.read, getData)`: define a mapping (no strings)
+- `m.instance(child, interface_bindings={read_x: reader.decl}, ...)`: bind on instantiation
 
 In JIT, interface decls are wrapped as `InterfaceRef`:
 
 ```python
-reader = m.interface_decl("reader", "Reader")
+reader = m.interface_decl(Reader)
 data = reader.getData          # value (property-like)
-writer = m.interface_decl("writer", "Writer")
+writer = m.interface_decl(Writer)
 writer.store(data)             # method (callable)
 ```
 
@@ -180,8 +180,8 @@ from cmt2.stl import Reg, FIFO
 reg_mod = Reg.create(circuit, 32, init=0)
 fifo_mod = FIFO.create(circuit, 32, depth=2)
 
-reg = m.instance(reg_mod, "r", clk=clk, rst=rst)
-fifo = m.instance(fifo_mod, "q", clk=clk, rst=rst)
+reg = m.instance(reg_mod, clk=clk, rst=rst)   # name inferred from `reg = ...`
+fifo = m.instance(fifo_mod, clk=clk, rst=rst) # name inferred from `fifo = ...`
 ```
 
 ## Codegen / simulation / testbenches (PyCMT2)
@@ -215,10 +215,11 @@ assert ok, out
 
 - Use `seq.eval()` to re-evaluate combinational outputs after `seq.drive(...)`
   when you need to sample signals within the same cycle.
-- For interface decls, `seq.call_interface(tb.interface_decl("writer"), "store", ...)`
-  (or `seq.call_interface(tb.interface_decl("writer"), store, ...)`)
-  models an *outgoing* call from the DUT (the DUT drives `*_enable/*_arg*`, the
-  testbench drives `*_ready/*_res*`).
+- For interface decls, keep a typed `InterfaceDecl` handle from elaboration and
+  pass it to the testbench (no string lookup):
+  `circuit, h = build(); writer = tb.interface_decl(h.writer); seq.call_interface(writer, store, ...)`.
+  This models an *outgoing* call from the DUT (the DUT drives `*_enable/*_arg*`,
+  the testbench drives `*_ready/*_res*`).
 
 ## Validation (JIT feature coverage)
 
