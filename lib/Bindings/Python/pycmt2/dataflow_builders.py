@@ -503,20 +503,28 @@ class TaskBuilder(RegionBuilder):
         finally:
             self._block = saved_block
 
-    def enable(self, step_name: str) -> None:
-        """Enable a step by name.
+    def enable(self, step: object) -> None:
+        """Enable a step.
 
         This is used within proc control blocks to activate steps.
 
         Example:
             with task.seq():
-                task.enable("step_a")
-                task.enable("step_b")
+                task.enable(step_a.ref())
+                task.enable(step_b.ref())
 
         Args:
-            step_name: Name of the step to enable.
+            step: A `StepRef` (preferred) or a string step name.
         """
         from circt.ir import InsertionPoint, Operation, FlatSymbolRefAttr
+        from .refs import StepRef
+
+        if isinstance(step, StepRef):
+            step_name = step.name
+        elif isinstance(step, str):
+            step_name = step
+        else:
+            raise TypeError(f"enable() expects StepRef or str, got {type(step).__name__}")
 
         with InsertionPoint(self._block):
             Operation.create(

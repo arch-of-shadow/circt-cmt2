@@ -134,7 +134,9 @@ class InterfaceBuilder:
         if self._name is None:
             from .circuit import _get_assignment_target
 
-            jit_name = _get_assignment_target(depth=4)
+            # depth=5 to skip: _get_assignment_target -> name -> _create_interface_op
+            # -> __init__ -> circuit.interface() -> user code
+            jit_name = _get_assignment_target(depth=5)
             if jit_name:
                 self._name = jit_name
             else:

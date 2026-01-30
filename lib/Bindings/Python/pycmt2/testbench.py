@@ -832,8 +832,20 @@ class Testbench:
             return list(self.circuit._modules.keys())[-1]
         return self.circuit.name
 
-    def interface_decl(self, name: str, module_name: str | None = None) -> Any:
-        """Look up an InterfaceDecl by name (default: top module)."""
+    def interface_decl(self, decl_or_name: Any, module_name: str | None = None) -> Any:
+        """Get an InterfaceDecl for `seq.call_interface(...)`.
+
+        Preferred usage is to pass the typed `InterfaceDecl` object produced
+        during elaboration (no string lookup).
+
+        For convenience/backward-compatibility, this also accepts a string name
+        and looks it up on the target module (default: top module).
+        """
+        # Fast-path: already an InterfaceDecl-like object.
+        if not isinstance(decl_or_name, str):
+            return decl_or_name
+
+        name = decl_or_name
         if not self.circuit._modules:
             raise KeyError("Circuit has no modules")
 

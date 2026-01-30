@@ -16,7 +16,7 @@ if TYPE_CHECKING:
     from .module import ModuleBuilder
 
 
-def _get_assignment_target(depth: int = 2) -> str | None:
+def _get_assignment_target(depth: int = 2, *, max_lookahead: int = 64) -> str | None:
     """Use bytecode introspection to find the variable name being assigned to.
 
     This enables JIT naming where:
@@ -35,9 +35,17 @@ def _get_assignment_target(depth: int = 2) -> str | None:
 
         for i, instr in enumerate(instructions):
             if instr.offset >= frame.f_lasti:
-                for j in range(i, min(i + 5, len(instructions))):
+                # Calls with many kwargs can have a longer bytecode sequence
+                # before the eventual STORE_* of the assignment target. Keep the
+                # search bounded to avoid accidentally matching far-away stores.
+                for j in range(i, min(i + max_lookahead, len(instructions))):
                     next_instr = instructions[j]
-                    if next_instr.opname in ("STORE_NAME", "STORE_FAST", "STORE_GLOBAL"):
+                    if next_instr.opname in (
+                        "STORE_NAME",
+                        "STORE_FAST",
+                        "STORE_GLOBAL",
+                        "STORE_DEREF",
+                    ):
                         return next_instr.argval
     except Exception:
         pass
@@ -223,6 +231,10 @@ class Circuit:
             An InterfaceBuilder for defining the interface.
         """
         from .interface import InterfaceBuilder
+
+        if name is None:
+            # Infer from `with circuit.interface() as <name>:` when possible.
+            name = _get_assignment_target(depth=3)
 
         builder = InterfaceBuilder(self, name)
         yield builder
