@@ -49,23 +49,23 @@ def build_circuit() -> Circuit:
     c = Circuit("InterfaceHello")
 
     # Circuit-level interface definitions (typed signatures).
-    with c.interface("Reader") as i:
-        i.value_sig(getData)
+    with c.interface() as Reader:
+        Reader.value_sig(getData)
 
-    with c.interface("Writer") as i:
-        i.method_sig(store)
+    with c.interface() as Writer:
+        Writer.method_sig(store)
 
     reg32 = Reg.create(c, 32, init=0)
 
     # Child module: uses an interface decl to read data, plus a local reg.
-    with jit.module(c, "child") as m:
-        clk = m.clock()
-        rst = m.reset()
+    with jit.module(c, "child") as child_m:
+        clk = child_m.clock()
+        rst = child_m.reset()
 
-        r = m.instance(reg32, "r", clk=clk, rst=rst)
-        reader = m.interface_decl("reader", "Reader")
+        r = child_m.instance(reg32, clk=clk, rst=rst)
+        reader = child_m.interface_decl(Reader)
 
-        @jit.method(m)
+        @jit.method(child_m)
         def setMethod(ctx, v: UInt[32]) -> UInt[32]:
             with ctx.guard:
                 ctx.always()
@@ -86,20 +86,17 @@ def build_circuit() -> Circuit:
         clk = m.clock()
         rst = m.reset()
 
-        x = m.instance(reg32, "x", clk=clk, rst=rst)
-        writer = m.interface_decl("writer", "Writer")
+        x = m.instance(reg32, clk=clk, rst=rst)
+        writer = m.interface_decl(Writer)
 
-        read_x = m.interface_def("readX", "Reader")
-        read_x.bind(x, x._instance.read, getData)
+        read_x = m.interface_def(Reader)
+        read_x.bind(x.instance, x.instance.read, getData)
 
-        child_mod = c._modules["child"]
-        child_reader = child_mod._interface_decls["reader"]
         child = m.instance(
-            child_mod,
-            "c",
+            child_m.module_def,
             clk=clk,
             rst=rst,
-            interface_bindings={read_x: child_reader},
+            interface_bindings={read_x: reader.decl},
         )
 
         @jit.method(m)
@@ -122,11 +119,11 @@ def build_circuit() -> Circuit:
                 x.next = new_val
                 writer.store(new_val)
 
-    return c
+    return c, jit.handles(writer=writer.decl)
 
 
 def main() -> None:
-    circuit = build_circuit()
+    circuit, h = build_circuit()
 
     out_dir = Path(__file__).parent / "sim_interface_hello"
     if out_dir.exists():
@@ -134,7 +131,7 @@ def main() -> None:
 
     ws = SimulationWorkspace(circuit, out_dir, debug_ports=False)
     tb = Testbench(circuit)
-    writer = tb.interface_decl("writer")
+    writer = tb.interface_decl(h.writer)
 
     with tb.sequence("basic") as seq:
         # Establish deterministic defaults *before* reset ticks.

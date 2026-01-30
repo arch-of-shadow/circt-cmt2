@@ -236,7 +236,7 @@ def demonstrate_real_circuit_diagnostics():
         clk = m.clock()
         rst = m.reset()
 
-        count = m.instance(reg_mod, "count", clk=clk, rst=rst)
+        count = m.instance(reg_mod, clk=clk, rst=rst)
 
         # Demonstrate what an error would look like
         loc = get_python_location()
@@ -252,13 +252,13 @@ def demonstrate_real_circuit_diagnostics():
         print(type_err.format())
 
         # Actually create a valid rule
-        with jit.rule(m, "increment") as rule:
-            with rule.guard as g:
+        with jit.rule(m) as increment:
+            with increment.guard as g:
                 g.always()
-            with rule.body as body:
-                val = body.call(count, "read")
+            with increment.body as body:
+                val = count.read
                 new_val = body.add(val, body.const(1, 32))
-                body.call(count, "write", new_val)
+                count.next = new_val
 
     # Show what diagnostics would look like during compilation
     print("\nScenario: Compilation with warnings")

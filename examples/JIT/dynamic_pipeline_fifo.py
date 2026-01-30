@@ -154,37 +154,37 @@ def create_pipeline_circuit():
         rst = m.reset()
 
         # State registers
-        source_counter = m.instance(reg32, "source_counter", clk=clk, rst=rst)
-        sink_result = m.instance(reg32, "sink_result", clk=clk, rst=rst)
-        done_flag = m.instance(reg1, "done_flag", clk=clk, rst=rst)
+        source_counter = m.instance(reg32, clk=clk, rst=rst)
+        sink_result = m.instance(reg32, clk=clk, rst=rst)
+        done_flag = m.instance(reg1, clk=clk, rst=rst)
 
         # Pipeline FIFOs
-        fifo_a = m.instance(fifo32, "fifo_a", clk=clk, rst=rst)
-        fifo_b = m.instance(fifo32, "fifo_b", clk=clk, rst=rst)
+        fifo_a = m.instance(fifo32, clk=clk, rst=rst)
+        fifo_b = m.instance(fifo32, clk=clk, rst=rst)
 
         # =================================================================
         # Rule: source_push
         # Push values 0,1,2,3,4 into fifo_a (one per cycle when not blocked)
         # =================================================================
-        with jit.rule(m, "source_push") as source_rule:
-            with source_rule.guard as g:
-                counter = g.call(source_counter, "read")
+        with jit.rule(m) as source_push:
+            with source_push.guard as g:
+                counter = source_counter.read
                 can_produce = g.lt(counter, g.const(5, 32))
                 g.returns(can_produce)
-            with source_rule.body as b:
-                counter = b.call(source_counter, "read")
-                b.call(fifo_a, "enq", counter)
+            with source_push.body as b:
+                counter = source_counter.read
+                fifo_a.enq(counter)
                 new_counter = b.add(counter, b.const(1, 32))
-                b.call(source_counter, "write", b.bits(new_counter, 31, 0))
+                source_counter.next = b.bits(new_counter, 31, 0)
 
         # =================================================================
         # Rule: stage1_process
         # Read from fifo_a, multiply by 2, push to fifo_b
         # =================================================================
-        with jit.rule(m, "stage1_process") as stage1_rule:
-            with stage1_rule.guard as g:
+        with jit.rule(m) as stage1_process:
+            with stage1_process.guard as g:
                 g.always()
-            with stage1_rule.body as b:
+            with stage1_process.body as b:
                 val = fifo_a.deq()
                 doubled = val * 2
                 fifo_b.enq(b.bits(doubled, 31, 0))
@@ -193,10 +193,10 @@ def create_pipeline_circuit():
         # Rule: sink_consume
         # Read from fifo_b and accumulate into sink_result
         # =================================================================
-        with jit.rule(m, "sink_consume") as sink_rule:
-            with sink_rule.guard as g:
+        with jit.rule(m) as sink_consume:
+            with sink_consume.guard as g:
                 g.always()
-            with sink_rule.body as b:
+            with sink_consume.body as b:
                 val = fifo_b.deq()
                 sink_result.write(b.bits(sink_result.read + val, 31, 0))
 
@@ -204,21 +204,21 @@ def create_pipeline_circuit():
         # Rule: mark_done
         # Set done flag when source has produced all values and FIFOs are empty
         # =================================================================
-        with jit.rule(m, "mark_done") as done_rule:
-            with done_rule.guard as g:
-                counter = g.call(source_counter, "read")
+        with jit.rule(m) as mark_done:
+            with mark_done.guard as g:
+                counter = source_counter.read
                 all_produced = g.eq(counter, g.const(5, 32))
                 # For FIFO1, not full == empty (depth 1)
-                fifo_a_full = g.call(fifo_a, "full")
-                fifo_b_full = g.call(fifo_b, "full")
+                fifo_a_full = fifo_a.full
+                fifo_b_full = fifo_b.full
                 fifo_a_empty = g.not_(fifo_a_full)
                 fifo_b_empty = g.not_(fifo_b_full)
                 fifos_empty = g.and_(fifo_a_empty, fifo_b_empty)
-                done = g.call(done_flag, "read")
+                done = done_flag.read
                 not_done = g.not_(done)
                 g.returns(g.and_(g.and_(all_produced, fifos_empty), not_done))
-            with done_rule.body as b:
-                b.call(done_flag, "write", b.const(1, 1))
+            with mark_done.body as b:
+                done_flag.next = b.const(1, 1)
 
         @jit.value(m)
         def get_result(val) -> UInt[32]:
@@ -236,9 +236,9 @@ def create_pipeline_circuit():
 
         # Precedence: downstream drains before upstream fills
         # sink > stage1 > source > mark_done
-        m.precedence(sink_rule.ref(), stage1_rule.ref())
-        m.precedence(stage1_rule.ref(), source_rule.ref())
-        m.precedence(source_rule.ref(), done_rule.ref())
+        m.precedence(sink_consume.ref(), stage1_process.ref())
+        m.precedence(stage1_process.ref(), source_push.ref())
+        m.precedence(source_push.ref(), mark_done.ref())
 
     return circuit
 

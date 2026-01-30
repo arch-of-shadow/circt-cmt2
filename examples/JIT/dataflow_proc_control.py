@@ -68,13 +68,13 @@ def example_sequential_task():
         rst = mod.reset()
 
         # Define steps that the task will use
-        with mod.static_step(1, "load"):
+        with mod.static_step(1) as load:
             pass
 
-        with mod.static_step(2, "compute"):
+        with mod.static_step(2) as compute:
             pass
 
-        with mod.static_step(1, "store"):
+        with mod.static_step(1) as store:
             pass
 
         @jit.dataflow(mod, name="seq_pipeline")
@@ -85,9 +85,9 @@ def example_sequential_task():
             with dfb.task("process") as task:
                 # Multi-cycle sequence: load -> compute -> store
                 with task.seq():
-                    task.enable("load")
-                    task.enable("compute")
-                    task.enable("store")
+                    task.enable(load.ref())
+                    task.enable(compute.ref())
+                    task.enable(store.ref())
 
                 # Create output token
                 data = task.const(100, 32)
@@ -122,13 +122,13 @@ def example_parallel_task():
         rst = mod.reset()
 
         # Define parallel steps
-        with mod.static_step(2, "op_a"):
+        with mod.static_step(2) as op_a:
             pass
 
-        with mod.static_step(3, "op_b"):
+        with mod.static_step(3) as op_b:
             pass
 
-        with mod.static_step(1, "op_c"):
+        with mod.static_step(1) as op_c:
             pass
 
         @jit.dataflow(mod, name="par_pipeline")
@@ -140,9 +140,9 @@ def example_parallel_task():
                 # Three operations run concurrently
                 # Task completion waits for longest (3 cycles)
                 with task.par():
-                    task.enable("op_a")
-                    task.enable("op_b")
-                    task.enable("op_c")
+                    task.enable(op_a.ref())
+                    task.enable(op_b.ref())
+                    task.enable(op_c.ref())
 
                 data = task.const(42, 16)
                 tok = task.create_token(data, UInt(16))
@@ -174,13 +174,13 @@ def example_conditional_task():
         clk = mod.clock()
         rst = mod.reset()
 
-        with mod.static_step(1, "fast_path"):
+        with mod.static_step(1) as fast_path:
             pass
 
-        with mod.static_step(2, "slow_path_a"):
+        with mod.static_step(2) as slow_path_a:
             pass
 
-        with mod.static_step(2, "slow_path_b"):
+        with mod.static_step(2) as slow_path_b:
             pass
 
         @jit.dataflow(mod, name="cond_pipeline")
@@ -195,12 +195,12 @@ def example_conditional_task():
                 with task.if_(cond) as (then_b, else_b):
                     with then_b:
                         # Fast path: 1 cycle
-                        task.enable("fast_path")
+                        task.enable(fast_path.ref())
                     with else_b:
                         # Slow path: sequential 2-cycle operations
                         with task.seq():
-                            task.enable("slow_path_a")
-                            task.enable("slow_path_b")
+                            task.enable(slow_path_a.ref())
+                            task.enable(slow_path_b.ref())
 
                 data = task.const(7, 8)
                 tok = task.create_token(data, UInt(8))
@@ -232,7 +232,7 @@ def example_iterative_task():
         clk = mod.clock()
         rst = mod.reset()
 
-        with mod.static_step(1, "multiply"):
+        with mod.static_step(1) as multiply:
             pass
 
         @jit.dataflow(mod, name="iter_pipeline")
@@ -243,7 +243,7 @@ def example_iterative_task():
             with dfb.task("power_of_4") as task:
                 # 4 multiplication iterations
                 with task.static_repeat(4):
-                    task.enable("multiply")
+                    task.enable(multiply.ref())
 
                 data = task.const(16, 32)  # Result placeholder
                 tok = task.create_token(data, UInt(32))
@@ -276,19 +276,19 @@ def example_complex_pipeline():
         rst = mod.reset()
 
         # Define various steps
-        with mod.static_step(1, "fetch"):
+        with mod.static_step(1) as fetch:
             pass
 
-        with mod.static_step(1, "decode"):
+        with mod.static_step(1) as decode:
             pass
 
-        with mod.static_step(2, "execute"):
+        with mod.static_step(2) as execute:
             pass
 
-        with mod.static_step(3, "memory"):
+        with mod.static_step(3) as memory:
             pass
 
-        with mod.static_step(1, "writeback"):
+        with mod.static_step(1) as writeback:
             pass
 
         @jit.dataflow(mod, name="processor_pipeline")
@@ -298,8 +298,8 @@ def example_complex_pipeline():
             # Stage 1: Fetch and decode (sequential)
             with dfb.task("frontend") as task:
                 with task.seq():
-                    task.enable("fetch")
-                    task.enable("decode")
+                    task.enable(fetch.ref())
+                    task.enable(decode.ref())
 
                 data = task.const(0, 32)
                 tok1 = task.create_token(data, UInt(32))
@@ -308,8 +308,8 @@ def example_complex_pipeline():
             # Stage 2: Execute and memory access (parallel for some ops)
             with dfb.task("backend", tokens_in=[tok1]) as task:
                 with task.par():
-                    task.enable("execute")
-                    task.enable("memory")
+                    task.enable(execute.ref())
+                    task.enable(memory.ref())
 
                 data = task.token_data(tok1)
                 tok2 = task.create_token(data, UInt(32))
@@ -318,7 +318,7 @@ def example_complex_pipeline():
             # Stage 3: Writeback
             with dfb.task("commit", tokens_in=[tok2]) as task:
                 with task.seq():
-                    task.enable("writeback")
+                    task.enable(writeback.ref())
 
                 result = task.token_data(tok2)
                 task.return_values(result)
@@ -344,16 +344,16 @@ def example_nested_control():
         clk = mod.clock()
         rst = mod.reset()
 
-        with mod.static_step(1, "init"):
+        with mod.static_step(1) as init:
             pass
 
-        with mod.static_step(2, "proc_a"):
+        with mod.static_step(2) as proc_a:
             pass
 
-        with mod.static_step(2, "proc_b"):
+        with mod.static_step(2) as proc_b:
             pass
 
-        with mod.static_step(1, "finalize"):
+        with mod.static_step(1) as finalize:
             pass
 
         @jit.dataflow(mod, name="nested_pipeline")
@@ -363,23 +363,23 @@ def example_nested_control():
             with dfb.task("complex_task") as task:
                 # Level 1: Sequential
                 with task.seq():
-                    task.enable("init")
+                    task.enable(init.ref())
 
                     # Level 2: Parallel branches
                     with task.par():
                         # Branch A: Iterative
                         with task.static_repeat(2):
-                            task.enable("proc_a")
+                            task.enable(proc_a.ref())
 
                         # Branch B: Conditional
                         cond = task.const(1, 1)
                         with task.if_(cond) as (then_b, else_b):
                             with then_b:
-                                task.enable("proc_b")
+                                task.enable(proc_b.ref())
                             with else_b:
                                 pass  # Skip
 
-                    task.enable("finalize")
+                    task.enable(finalize.ref())
 
                 data = task.const(99, 8)
                 tok = task.create_token(data, UInt(8))

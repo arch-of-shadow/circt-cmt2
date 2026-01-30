@@ -37,7 +37,7 @@ def build_counter(width: int = 32) -> Circuit:
     with jit.module(circuit, "Counter") as m:
         clk = m.clock()
         rst = m.reset()
-        count = m.instance(Reg.create(circuit, width, init=0), "count", clk=clk, rst=rst)
+        count = m.instance(Reg.create(circuit, width, init=0), clk=clk, rst=rst)
 
         @jit.rule(m)
         def increment(r):

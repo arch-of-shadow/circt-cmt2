@@ -44,10 +44,10 @@ def create_alu_circuit():
         rst = alu.reset("rst")
 
         # Internal state registers using STL Reg modules
-        reg_a = alu.instance(reg32_mod, "reg_a", clk=clk, rst=rst)
-        reg_b = alu.instance(reg32_mod, "reg_b", clk=clk, rst=rst)
-        reg_result = alu.instance(reg32_mod, "reg_result", clk=clk, rst=rst)
-        busy_reg = alu.instance(reg1_mod, "busy", clk=clk, rst=rst)
+        reg_a = alu.instance(reg32_mod, clk=clk, rst=rst)
+        reg_b = alu.instance(reg32_mod, clk=clk, rst=rst)
+        reg_result = alu.instance(reg32_mod, clk=clk, rst=rst)
+        busy_reg = alu.instance(reg1_mod, clk=clk, rst=rst)
 
         @jit.method(alu)
         def start(meth, a: UInt[32], b: UInt[32]) -> None:

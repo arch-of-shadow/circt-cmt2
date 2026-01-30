@@ -77,26 +77,26 @@ def create_comprehensive_dataflow():
         # =====================================================================
         # Registers for state tracking
         # =====================================================================
-        input_reg = mod.instance(Reg.create(circuit, 16), "input_reg", clk=clk, rst=rst)
-        result_reg = mod.instance(Reg.create(circuit, 32), "result_reg", clk=clk, rst=rst)
-        valid_reg = mod.instance(Reg.create(circuit, 1), "valid_reg", clk=clk, rst=rst)
+        input_reg = mod.instance(Reg.create(circuit, 16), clk=clk, rst=rst)
+        result_reg = mod.instance(Reg.create(circuit, 32), clk=clk, rst=rst)
+        valid_reg = mod.instance(Reg.create(circuit, 1), clk=clk, rst=rst)
 
         # =====================================================================
         # Static steps for multi-cycle operations within tasks
         # =====================================================================
 
         # Simple processing steps
-        with mod.static_step(1, "load_step"):
+        with mod.static_step(1) as load_step:
             pass
 
-        with mod.static_step(1, "compute_step"):
+        with mod.static_step(1) as compute_step:
             pass
 
-        with mod.static_step(1, "store_step"):
+        with mod.static_step(1) as store_step:
             pass
 
         # Iterative step for accumulation
-        with mod.static_step(1, "accumulate"):
+        with mod.static_step(1) as accumulate:
             pass
 
         # =====================================================================

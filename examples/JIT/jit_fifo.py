@@ -36,9 +36,9 @@ def build_fifo_demo(width: int = 8, depth: int = 2) -> Circuit:
         clk = m.clock()
         rst = m.reset()
 
-        fifo = m.instance(FIFO.create(circuit, width, depth=depth), "fifo", clk=clk, rst=rst)
-        src = m.instance(Reg.create(circuit, width, init=0), "src", clk=clk, rst=rst)
-        last = m.instance(Reg.create(circuit, width, init=0), "last", clk=clk, rst=rst)
+        fifo = m.instance(FIFO.create(circuit, width, depth=depth), clk=clk, rst=rst)
+        src = m.instance(Reg.create(circuit, width, init=0), clk=clk, rst=rst)
+        last = m.instance(Reg.create(circuit, width, init=0), clk=clk, rst=rst)
 
         @jit.rule(m)
         def produce(r):

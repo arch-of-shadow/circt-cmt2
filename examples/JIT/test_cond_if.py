@@ -41,36 +41,36 @@ def test_cond_if_with_callable():
         rst = mod.reset()
 
         # Create a counter register
-        counter = mod.instance(Reg.create(circuit, 32), "counter", clk=clk, rst=rst)
+        counter = mod.instance(Reg.create(circuit, 32), clk=clk, rst=rst)
         # Create a result register
-        result = mod.instance(Reg.create(circuit, 32), "result", clk=clk, rst=rst)
+        result = mod.instance(Reg.create(circuit, 32), clk=clk, rst=rst)
 
         # Define a step that increments counter
-        with mod.static_step(1, "increment") as step:
-            cnt = step.call(counter, "read")
-            step.call(counter, "write", step.add(cnt, step.const(1, 32)))
+        with mod.static_step(1) as increment:
+            cnt = counter.read
+            counter.next = increment.add(cnt, increment.const(1, 32))
 
         # Define a step that sets result
-        with mod.static_step(1, "set_result") as set_step:
-            set_step.call(result, "write", set_step.const(42, 32))
+        with mod.static_step(1) as set_result:
+            result.next = set_result.const(42, 32)
 
         # Procedural rule with cond_if (callable condition)
-        with mod.proc_rule("test_rule") as rule:
-            with rule.guard as g:
+        with mod.proc_rule() as test_rule:
+            with test_rule.guard as g:
                 g.always()
 
-            with rule.control() as ctrl:
+            with test_rule.control() as ctrl:
                 with ctrl.seq() as seq:
                     # Use callable condition - reads counter at runtime
                     def check_counter(b):
-                        cnt = b.call(counter, "read")
+                        cnt = b.call(counter.instance, counter.instance.read)
                         return b.lt(cnt, b.const(5, 32))
 
                     with seq.if_(check_counter) as if_:
                         with if_.then_() as then_:
-                            then_.enable(step.ref())
+                            then_.enable(increment.ref())
                         with if_.else_() as else_:
-                            else_.enable(set_step.ref())
+                            else_.enable(set_result.ref())
 
     # Print generated MLIR
     mlir_str = circuit.emit_mlir()
@@ -96,22 +96,24 @@ def test_cond_if_with_lambda():
         clk = mod.clock()
         rst = mod.reset()
 
-        counter = mod.instance(Reg.create(circuit, 32), "counter", clk=clk, rst=rst)
+        counter = mod.instance(Reg.create(circuit, 32), clk=clk, rst=rst)
 
-        with mod.static_step(1, "inc") as step:
-            cnt = step.call(counter, "read")
-            step.call(counter, "write", step.add(cnt, step.const(1, 32)))
+        with mod.static_step(1) as inc:
+            cnt = counter.read
+            counter.next = inc.add(cnt, inc.const(1, 32))
 
-        with mod.proc_rule("lambda_rule") as rule:
-            with rule.guard as g:
+        with mod.proc_rule() as lambda_rule:
+            with lambda_rule.guard as g:
                 g.always()
 
-            with rule.control() as ctrl:
+            with lambda_rule.control() as ctrl:
                 with ctrl.seq() as seq:
                     # Lambda form
-                    with seq.if_(lambda b: b.lt(b.call(counter, "read"), b.const(10, 32))) as if_:
+                    with seq.if_(
+                        lambda b: b.lt(b.call(counter.instance, counter.instance.read), b.const(10, 32))
+                    ) as if_:
                         with if_.then_() as then_:
-                            then_.enable(step.ref())
+                            then_.enable(inc.ref())
 
     mlir_str = circuit.emit_mlir()
     print("\nGenerated MLIR:")
@@ -134,23 +136,23 @@ def test_signal_if_still_works():
         clk = mod.clock()
         rst = mod.reset()
 
-        counter = mod.instance(Reg.create(circuit, 32), "counter", clk=clk, rst=rst)
+        counter = mod.instance(Reg.create(circuit, 32), clk=clk, rst=rst)
 
-        with mod.static_step(1, "inc") as step:
-            cnt = step.call(counter, "read")
-            step.call(counter, "write", step.add(cnt, step.const(1, 32)))
+        with mod.static_step(1) as inc:
+            cnt = counter.read
+            counter.next = inc.add(cnt, inc.const(1, 32))
 
-        with mod.proc_rule("signal_rule") as rule:
-            with rule.guard as g:
+        with mod.proc_rule() as signal_rule:
+            with signal_rule.guard as g:
                 g.always()
 
-            with rule.control() as ctrl:
+            with signal_rule.control() as ctrl:
                 with ctrl.seq() as seq:
                     # Pre-computed Signal condition (old style)
                     cond = seq.const(1, 1)  # Always true
                     with seq.if_(cond) as if_:
                         with if_.then_() as then_:
-                            then_.enable(step.ref())
+                            then_.enable(inc.ref())
 
     mlir_str = circuit.emit_mlir()
     print("\nGenerated MLIR:")
@@ -164,6 +166,7 @@ def test_signal_if_still_works():
     print("\n[PASS] Signal condition backward compatibility works")
 
 
+@jit.elaborate
 def create_simulatable_circuit():
     """Create a circuit suitable for E2E simulation.
 
@@ -179,42 +182,42 @@ def create_simulatable_circuit():
         rst = mod.reset()
 
         # Create a counter register
-        counter = mod.instance(Reg.create(circuit, 32), "counter", clk=clk, rst=rst)
+        counter = mod.instance(Reg.create(circuit, 32), clk=clk, rst=rst)
         # Create a result register
-        result = mod.instance(Reg.create(circuit, 32), "result", clk=clk, rst=rst)
+        result = mod.instance(Reg.create(circuit, 32), clk=clk, rst=rst)
         # Create done flag
-        done = mod.instance(Reg.create(circuit, 1), "done", clk=clk, rst=rst)
+        done = mod.instance(Reg.create(circuit, 1), clk=clk, rst=rst)
 
         # Define a step that increments counter
-        with mod.static_step(1, "increment") as step:
-            cnt = step.call(counter, "read")
-            step.call(counter, "write", step.add(cnt, step.const(1, 32)))
+        with mod.static_step(1) as increment:
+            cnt = counter.read
+            counter.next = increment.add(cnt, increment.const(1, 32))
 
         # Define a step that sets result to 42 and marks done
-        with mod.static_step(1, "set_result") as set_step:
-            set_step.call(result, "write", set_step.const(42, 32))
-            set_step.call(done, "write", set_step.const(1, 1))
+        with mod.static_step(1) as set_result:
+            result.next = set_result.const(42, 32)
+            done.next = set_result.const(1, 1)
 
         # Procedural rule with cond_if (callable condition)
-        with mod.proc_rule("compute") as rule:
-            with rule.guard as g:
+        with mod.proc_rule() as compute:
+            with compute.guard as g:
                 # Only run if not done
-                is_done = g.call(done, "read")
+                is_done = done.read
                 not_done = g.not_(is_done)
                 g.returns(not_done)
 
-            with rule.control() as ctrl:
+            with compute.control() as ctrl:
                 with ctrl.seq() as seq:
                     # Use callable condition - reads counter at runtime
                     def check_counter(b):
-                        cnt = b.call(counter, "read")
+                        cnt = b.call(counter.instance, counter.instance.read)
                         return b.lt(cnt, b.const(5, 32))
 
                     with seq.if_(check_counter) as if_:
                         with if_.then_() as then_:
-                            then_.enable(step.ref())
+                            then_.enable(increment.ref())
                         with if_.else_() as else_:
-                            else_.enable(set_step.ref())
+                            else_.enable(set_result.ref())
 
         @jit.value(mod)
         def get_counter(val) -> UInt[32]:

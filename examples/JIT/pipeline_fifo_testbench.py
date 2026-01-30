@@ -75,28 +75,28 @@ def create_pipeline_circuit():
         # =====================================================================
 
         # Source counter (generates sequential data)
-        source_counter = m.instance(reg8, "source_counter", clk=clk, rst=rst)
+        source_counter = m.instance(reg8, clk=clk, rst=rst)
         # Total items produced
-        items_produced = m.instance(reg8, "items_produced", clk=clk, rst=rst)
+        items_produced = m.instance(reg8, clk=clk, rst=rst)
         # Total items consumed
-        items_consumed = m.instance(reg8, "items_consumed", clk=clk, rst=rst)
+        items_consumed = m.instance(reg8, clk=clk, rst=rst)
         # Enable source generation
-        source_enable = m.instance(reg1, "source_enable", clk=clk, rst=rst)
+        source_enable = m.instance(reg1, clk=clk, rst=rst)
         # Last result for validation
-        last_result = m.instance(reg32, "last_result", clk=clk, rst=rst)
+        last_result = m.instance(reg32, clk=clk, rst=rst)
 
         # =====================================================================
         # FIFOs connecting pipeline stages
         # =====================================================================
 
         # FIFO between source and stage 1
-        fifo1 = m.instance(fifo32, "fifo1", clk=clk, rst=rst)
+        fifo1 = m.instance(fifo32, clk=clk, rst=rst)
         # FIFO between stage 1 and stage 2
-        fifo2 = m.instance(fifo32, "fifo2", clk=clk, rst=rst)
+        fifo2 = m.instance(fifo32, clk=clk, rst=rst)
         # FIFO between stage 2 and stage 3
-        fifo3 = m.instance(fifo32, "fifo3", clk=clk, rst=rst)
+        fifo3 = m.instance(fifo32, clk=clk, rst=rst)
         # FIFO between stage 3 and sink
-        fifo4 = m.instance(fifo32, "fifo4", clk=clk, rst=rst)
+        fifo4 = m.instance(fifo32, clk=clk, rst=rst)
 
         # =====================================================================
         # Rule: source_gen
@@ -104,26 +104,25 @@ def create_pipeline_circuit():
         # Guard: source_enable && fifo1.notFull
         # =====================================================================
 
-        with jit.rule(m, "source_gen") as rule:
-            with rule.guard as g:
-                enabled = g.call(source_enable, "read")
-                full = g.call(fifo1, "full")
+        with jit.rule(m) as source_gen:
+            with source_gen.guard as g:
+                enabled = source_enable.read
+                full = fifo1.full
                 not_full = g.not_(full)
                 can_produce = g.and_(enabled, not_full)
                 g.returns(can_produce)
-            with rule.body as body:
+            with source_gen.body as body:
                 # Get current counter value
-                counter = body.call(source_counter, "read")
+                counter = source_counter.read
                 # Zero-extend to 32 bits and enqueue
                 data = body.pad(counter, 32)
-                body.call(fifo1, "enq", data)
+                fifo1.enq(data)
                 # Increment counter
                 new_counter = body.add(counter, body.const(1, 8))
-                body.call(source_counter, "write", new_counter)
+                source_counter.next = body.bits(new_counter, 7, 0)
                 # Track items produced
-                produced = body.call(items_produced, "read")
-                body.call(items_produced, "write",
-                          body.add(produced, body.const(1, 8)))
+                produced = items_produced.read
+                items_produced.next = body.bits(body.add(produced, body.const(1, 8)), 7, 0)
 
         # =====================================================================
         # Rule: stage1_multiply
@@ -131,23 +130,23 @@ def create_pipeline_circuit():
         # Guard: fifo1.notEmpty && fifo2.notFull
         # =====================================================================
 
-        with jit.rule(m, "stage1_multiply") as rule:
-            with rule.guard as g:
+        with jit.rule(m) as stage1_multiply:
+            with stage1_multiply.guard as g:
                 # Check if fifo1 has data and fifo2 can accept
-                is_empty1 = g.call(fifo1, "empty")
+                is_empty1 = fifo1.empty
                 has_input = g.not_(is_empty1)
-                full2 = g.call(fifo2, "full")
+                full2 = fifo2.full
                 can_output = g.not_(full2)
                 ready = g.and_(has_input, can_output)
                 g.returns(ready)
-            with rule.body as body:
+            with stage1_multiply.body as body:
                 # Dequeue input
-                data = body.call(fifo1, "deq")
+                data = fifo1.deq()
                 # Multiply by 2
                 product = body.mul(data, body.const(2, 32))
                 result = body.truncate(product, 32)  # Truncate to 32 bits
                 # Enqueue result
-                body.call(fifo2, "enq", result)
+                fifo2.enq(result)
 
         # =====================================================================
         # Rule: stage2_add
@@ -155,23 +154,23 @@ def create_pipeline_circuit():
         # Guard: fifo2.notEmpty && fifo3.notFull
         # =====================================================================
 
-        with jit.rule(m, "stage2_add") as rule:
-            with rule.guard as g:
+        with jit.rule(m) as stage2_add:
+            with stage2_add.guard as g:
                 # Check if fifo2 has data and fifo3 can accept
-                is_empty2 = g.call(fifo2, "empty")
+                is_empty2 = fifo2.empty
                 has_input = g.not_(is_empty2)
-                full3 = g.call(fifo3, "full")
+                full3 = fifo3.full
                 can_output = g.not_(full3)
                 ready = g.and_(has_input, can_output)
                 g.returns(ready)
-            with rule.body as body:
+            with stage2_add.body as body:
                 # Dequeue input
-                data = body.call(fifo2, "deq")
+                data = fifo2.deq()
                 # Add 10
                 sum_val = body.add(data, body.const(10, 32))
                 result = body.truncate(sum_val, 32)  # Truncate to 32 bits
                 # Enqueue result
-                body.call(fifo3, "enq", result)
+                fifo3.enq(result)
 
         # =====================================================================
         # Rule: stage3_square
@@ -179,23 +178,23 @@ def create_pipeline_circuit():
         # Guard: fifo3.notEmpty && fifo4.notFull
         # =====================================================================
 
-        with jit.rule(m, "stage3_square") as rule:
-            with rule.guard as g:
+        with jit.rule(m) as stage3_square:
+            with stage3_square.guard as g:
                 # Check if fifo3 has data and fifo4 can accept
-                is_empty3 = g.call(fifo3, "empty")
+                is_empty3 = fifo3.empty
                 has_input = g.not_(is_empty3)
-                full4 = g.call(fifo4, "full")
+                full4 = fifo4.full
                 can_output = g.not_(full4)
                 ready = g.and_(has_input, can_output)
                 g.returns(ready)
-            with rule.body as body:
+            with stage3_square.body as body:
                 # Dequeue input
-                data = body.call(fifo3, "deq")
+                data = fifo3.deq()
                 # Square (multiply by itself)
                 squared = body.mul(data, data)
                 result = body.truncate(squared, 32)  # Truncate to 32 bits
                 # Enqueue result
-                body.call(fifo4, "enq", result)
+                fifo4.enq(result)
 
         # =====================================================================
         # Rule: sink_consume
@@ -203,21 +202,20 @@ def create_pipeline_circuit():
         # Guard: fifo4.notEmpty
         # =====================================================================
 
-        with jit.rule(m, "sink_consume") as rule:
-            with rule.guard as g:
+        with jit.rule(m) as sink_consume:
+            with sink_consume.guard as g:
                 # Check if fifo4 has data to consume
-                is_empty4 = g.call(fifo4, "empty")
+                is_empty4 = fifo4.empty
                 has_input = g.not_(is_empty4)
                 g.returns(has_input)
-            with rule.body as body:
+            with sink_consume.body as body:
                 # Dequeue result
-                data = body.call(fifo4, "deq")
+                data = fifo4.deq()
                 # Store for observation
-                body.call(last_result, "write", data)
+                last_result.next = data
                 # Track items consumed
-                consumed = body.call(items_consumed, "read")
-                body.call(items_consumed, "write",
-                          body.add(consumed, body.const(1, 8)))
+                consumed = items_consumed.read
+                items_consumed.next = body.bits(body.add(consumed, body.const(1, 8)), 7, 0)
 
         # =====================================================================
         # Control Methods
@@ -492,8 +490,7 @@ def main():
 
     # Verify structure
     print("   Circuit structure:")
-    print(f"      - Modules: {len(circuit._modules)}")
-    print(f"      - External modules: {len(circuit._external_modules)}")
+    print(f"      - cmt2.module ops: {mlir.count('cmt2.module @')}")
 
     # Count GAA constructs
     gaa_ops = ["cmt2.rule", "cmt2.method", "cmt2.value", "cmt2.call", "cmt2.instance"]

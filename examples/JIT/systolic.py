@@ -84,28 +84,28 @@ def create_systolic_circuit():
         # Matrix storage registers (pre-loaded before computation)
         # =====================================================================
         # Matrix A: 2x2
-        a00_reg = m.instance(reg32, "a00_reg", clk=clk, rst=rst)
-        a01_reg = m.instance(reg32, "a01_reg", clk=clk, rst=rst)
-        a10_reg = m.instance(reg32, "a10_reg", clk=clk, rst=rst)
-        a11_reg = m.instance(reg32, "a11_reg", clk=clk, rst=rst)
+        a00_reg = m.instance(reg32, clk=clk, rst=rst)
+        a01_reg = m.instance(reg32, clk=clk, rst=rst)
+        a10_reg = m.instance(reg32, clk=clk, rst=rst)
+        a11_reg = m.instance(reg32, clk=clk, rst=rst)
 
         # Matrix B: 2x2
-        b00_reg = m.instance(reg32, "b00_reg", clk=clk, rst=rst)
-        b01_reg = m.instance(reg32, "b01_reg", clk=clk, rst=rst)
-        b10_reg = m.instance(reg32, "b10_reg", clk=clk, rst=rst)
-        b11_reg = m.instance(reg32, "b11_reg", clk=clk, rst=rst)
+        b00_reg = m.instance(reg32, clk=clk, rst=rst)
+        b01_reg = m.instance(reg32, clk=clk, rst=rst)
+        b10_reg = m.instance(reg32, clk=clk, rst=rst)
+        b11_reg = m.instance(reg32, clk=clk, rst=rst)
 
         # =====================================================================
         # PE accumulators (result matrix C)
         # =====================================================================
-        c00_acc = m.instance(reg32, "c00_acc", clk=clk, rst=rst)
-        c01_acc = m.instance(reg32, "c01_acc", clk=clk, rst=rst)
-        c10_acc = m.instance(reg32, "c10_acc", clk=clk, rst=rst)
-        c11_acc = m.instance(reg32, "c11_acc", clk=clk, rst=rst)
+        c00_acc = m.instance(reg32, clk=clk, rst=rst)
+        c01_acc = m.instance(reg32, clk=clk, rst=rst)
+        c10_acc = m.instance(reg32, clk=clk, rst=rst)
+        c11_acc = m.instance(reg32, clk=clk, rst=rst)
 
         # Control
-        busy = m.instance(reg1, "busy", clk=clk, rst=rst)
-        cycle_count = m.instance(reg32, "cycle_count", clk=clk, rst=rst)
+        busy = m.instance(reg1, clk=clk, rst=rst)
+        cycle_count = m.instance(reg32, clk=clk, rst=rst)
 
         # =====================================================================
         # Method: load_a - Load matrix A (row-major)
@@ -152,20 +152,20 @@ def create_systolic_circuit():
         # Rule: cycle0 - Cycle 0: Only PE[0,0] active
         # PE[0,0] += a00 * b00
         # =====================================================================
-        with jit.rule(m, "cycle0") as rule:
-            with rule.guard as g:
-                is_busy = g.call(busy, "read")
-                cyc = g.call(cycle_count, "read")
+        with jit.rule(m) as cycle0:
+            with cycle0.guard as g:
+                is_busy = busy.read
+                cyc = cycle_count.read
                 is_cyc0 = g.eq(cyc, g.const(0, 32))
                 g.returns(g.and_(is_busy, is_cyc0))
-            with rule.body as body:
-                a00 = body.call(a00_reg, "read")
-                b00 = body.call(b00_reg, "read")
-                acc = body.call(c00_acc, "read")
+            with cycle0.body as body:
+                a00 = a00_reg.read
+                b00 = b00_reg.read
+                acc = c00_acc.read
                 product = body.mul(a00, b00)
                 new_acc = body.add(acc, product)
-                body.call(c00_acc, "write", new_acc)
-                body.call(cycle_count, "write", body.const(1, 32))
+                c00_acc.next = new_acc
+                cycle_count.next = body.const(1, 32)
 
         # =====================================================================
         # Rule: cycle1 - Cycle 1: PE[0,0], PE[0,1], PE[1,0] active
@@ -173,35 +173,35 @@ def create_systolic_circuit():
         # PE[0,1] += a00 * b01
         # PE[1,0] += a10 * b00
         # =====================================================================
-        with jit.rule(m, "cycle1") as rule:
-            with rule.guard as g:
-                is_busy = g.call(busy, "read")
-                cyc = g.call(cycle_count, "read")
+        with jit.rule(m) as cycle1:
+            with cycle1.guard as g:
+                is_busy = busy.read
+                cyc = cycle_count.read
                 is_cyc1 = g.eq(cyc, g.const(1, 32))
                 g.returns(g.and_(is_busy, is_cyc1))
-            with rule.body as body:
+            with cycle1.body as body:
                 # PE[0,0] += a01 * b10
-                a01 = body.call(a01_reg, "read")
-                b10 = body.call(b10_reg, "read")
-                c00_val = body.call(c00_acc, "read")
+                a01 = a01_reg.read
+                b10 = b10_reg.read
+                c00_val = c00_acc.read
                 c00_new = body.add(c00_val, body.mul(a01, b10))
-                body.call(c00_acc, "write", c00_new)
+                c00_acc.next = c00_new
 
                 # PE[0,1] += a00 * b01
-                a00 = body.call(a00_reg, "read")
-                b01 = body.call(b01_reg, "read")
-                c01_val = body.call(c01_acc, "read")
+                a00 = a00_reg.read
+                b01 = b01_reg.read
+                c01_val = c01_acc.read
                 c01_new = body.add(c01_val, body.mul(a00, b01))
-                body.call(c01_acc, "write", c01_new)
+                c01_acc.next = c01_new
 
                 # PE[1,0] += a10 * b00
-                a10 = body.call(a10_reg, "read")
-                b00 = body.call(b00_reg, "read")
-                c10_val = body.call(c10_acc, "read")
+                a10 = a10_reg.read
+                b00 = b00_reg.read
+                c10_val = c10_acc.read
                 c10_new = body.add(c10_val, body.mul(a10, b00))
-                body.call(c10_acc, "write", c10_new)
+                c10_acc.next = c10_new
 
-                body.call(cycle_count, "write", body.const(2, 32))
+                cycle_count.next = body.const(2, 32)
 
         # =====================================================================
         # Rule: cycle2 - Cycle 2: PE[0,1], PE[1,0], PE[1,1] active
@@ -209,57 +209,57 @@ def create_systolic_circuit():
         # PE[1,0] += a11 * b10
         # PE[1,1] += a10 * b01
         # =====================================================================
-        with jit.rule(m, "cycle2") as rule:
-            with rule.guard as g:
-                is_busy = g.call(busy, "read")
-                cyc = g.call(cycle_count, "read")
+        with jit.rule(m) as cycle2:
+            with cycle2.guard as g:
+                is_busy = busy.read
+                cyc = cycle_count.read
                 is_cyc2 = g.eq(cyc, g.const(2, 32))
                 g.returns(g.and_(is_busy, is_cyc2))
-            with rule.body as body:
+            with cycle2.body as body:
                 # PE[0,1] += a01 * b11
-                a01 = body.call(a01_reg, "read")
-                b11 = body.call(b11_reg, "read")
-                c01_val = body.call(c01_acc, "read")
+                a01 = a01_reg.read
+                b11 = b11_reg.read
+                c01_val = c01_acc.read
                 c01_new = body.add(c01_val, body.mul(a01, b11))
-                body.call(c01_acc, "write", c01_new)
+                c01_acc.next = c01_new
 
                 # PE[1,0] += a11 * b10
-                a11 = body.call(a11_reg, "read")
-                b10 = body.call(b10_reg, "read")
-                c10_val = body.call(c10_acc, "read")
+                a11 = a11_reg.read
+                b10 = b10_reg.read
+                c10_val = c10_acc.read
                 c10_new = body.add(c10_val, body.mul(a11, b10))
-                body.call(c10_acc, "write", c10_new)
+                c10_acc.next = c10_new
 
                 # PE[1,1] += a10 * b01
-                a10 = body.call(a10_reg, "read")
-                b01 = body.call(b01_reg, "read")
-                c11_val = body.call(c11_acc, "read")
+                a10 = a10_reg.read
+                b01 = b01_reg.read
+                c11_val = c11_acc.read
                 c11_new = body.add(c11_val, body.mul(a10, b01))
-                body.call(c11_acc, "write", c11_new)
+                c11_acc.next = c11_new
 
-                body.call(cycle_count, "write", body.const(3, 32))
+                cycle_count.next = body.const(3, 32)
 
         # =====================================================================
         # Rule: cycle3 - Cycle 3: Only PE[1,1] active, then done
         # PE[1,1] += a11 * b11
         # =====================================================================
-        with jit.rule(m, "cycle3") as rule:
-            with rule.guard as g:
-                is_busy = g.call(busy, "read")
-                cyc = g.call(cycle_count, "read")
+        with jit.rule(m) as cycle3:
+            with cycle3.guard as g:
+                is_busy = busy.read
+                cyc = cycle_count.read
                 is_cyc3 = g.eq(cyc, g.const(3, 32))
                 g.returns(g.and_(is_busy, is_cyc3))
-            with rule.body as body:
+            with cycle3.body as body:
                 # PE[1,1] += a11 * b11
-                a11 = body.call(a11_reg, "read")
-                b11 = body.call(b11_reg, "read")
-                c11_val = body.call(c11_acc, "read")
+                a11 = a11_reg.read
+                b11 = b11_reg.read
+                c11_val = c11_acc.read
                 c11_new = body.add(c11_val, body.mul(a11, b11))
-                body.call(c11_acc, "write", c11_new)
+                c11_acc.next = c11_new
 
                 # Done
-                body.call(busy, "write", body.const(0, 1))
-                body.call(cycle_count, "write", body.const(4, 32))
+                busy.next = body.const(0, 1)
+                cycle_count.next = body.const(4, 32)
 
         # =====================================================================
         # Value methods to read results

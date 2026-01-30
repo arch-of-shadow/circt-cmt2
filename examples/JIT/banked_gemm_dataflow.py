@@ -58,23 +58,23 @@ def create_banked_gemm_circuit() -> Circuit:
         rst = m.reset()
 
         # 4 banks for each matrix
-        a = [m.instance(mem_a, f"a_b{i}", clk=clk, rst=rst) for i in range(4)]
-        b = [m.instance(mem_b, f"b_b{i}", clk=clk, rst=rst) for i in range(4)]
-        c = [m.instance(mem_c, f"c_b{i}", clk=clk, rst=rst) for i in range(4)]
+        a = [m.instance(mem_a, clk=clk, rst=rst, alias=f"a_b{i}") for i in range(4)]
+        b = [m.instance(mem_b, clk=clk, rst=rst, alias=f"b_b{i}") for i in range(4)]
+        c = [m.instance(mem_c, clk=clk, rst=rst, alias=f"c_b{i}") for i in range(4)]
 
         # ---------------------------------------------------------------------
         # Host-facing write methods for A and B banks (preload).
         # ---------------------------------------------------------------------
         for i in range(4):
             def _define_bank_writes(a_bank, b_bank, idx: int):
-                @jit.method(m, name=f"a_write_b{idx}")
+                @jit.method(m, alias=f"a_write_b{idx}")
                 def a_write(meth, addr: UInt[1], data: UInt[32]) -> None:
                     with meth.guard:
                         meth.always()
                     with meth.body:
                         a_bank.write(data, addr)
 
-                @jit.method(m, name=f"b_write_b{idx}")
+                @jit.method(m, alias=f"b_write_b{idx}")
                 def b_write(meth, addr: UInt[1], data: UInt[32]) -> None:
                     with meth.guard:
                         meth.always()
@@ -89,7 +89,7 @@ def create_banked_gemm_circuit() -> Circuit:
         # ---------------------------------------------------------------------
         for i in range(4):
             def _define_bank_read(c_bank, idx: int):
-                @jit.value(m, name=f"get_c_b{idx}")
+                @jit.value(m, alias=f"get_c_b{idx}")
                 def get_c(val) -> UInt[32]:
                     with val.guard:
                         val.always()

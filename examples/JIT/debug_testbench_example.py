@@ -56,13 +56,13 @@ def create_state_machine_circuit():
         rst = m.reset()
 
         # State register (0=IDLE, 1=RUNNING, 2=DONE)
-        state = m.instance(reg8, "state", clk=clk, rst=rst)
+        state = m.instance(reg8, clk=clk, rst=rst)
 
         # Counter register
-        counter = m.instance(reg32, "counter", clk=clk, rst=rst)
+        counter = m.instance(reg32, clk=clk, rst=rst)
 
         # Target value register
-        target = m.instance(reg32, "target", clk=clk, rst=rst)
+        target = m.instance(reg32, clk=clk, rst=rst)
 
         @jit.method(m)
         def start(meth, target_val: UInt[32]) -> None:

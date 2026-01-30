@@ -56,10 +56,10 @@ def create_while_loop_circuit():
         rst = counter.reset("rst")
 
         # Counter register
-        cnt = counter.instance(reg_mod, "cnt", clk=clk, rst=rst)
+        cnt = counter.instance(reg_mod, clk=clk, rst=rst)
 
         # Done flag register
-        done_reg = counter.instance(reg1_mod, "done", clk=clk, rst=rst)
+        done_reg = counter.instance(reg1_mod, clk=clk, rst=rst)
 
         @jit.value(counter)
         def count(count_val) -> UInt[width]:
@@ -76,44 +76,44 @@ def create_while_loop_circuit():
                 done_val.returns(done_reg.read)
 
         # Step to increment counter
-        with counter.step("increment") as inc_step:
-            val = inc_step.call(cnt, "read")
-            new_val = inc_step.add(val, inc_step.const(1, width))
-            inc_step.call(cnt, "write", inc_step.bits(new_val, width-1, 0))
-            inc_step.done(inc_step.const(1, 1))
+        with counter.step() as increment:
+            val = cnt.read
+            new_val = increment.add(val, increment.const(1, width))
+            cnt.next = increment.bits(new_val, width - 1, 0)
+            increment.done(increment.const(1, 1))
 
         # Step to mark done
-        with counter.step("mark_done") as done_step:
-            done_step.call(done_reg, "write", done_step.const(1, 1))
-            done_step.done(done_step.const(1, 1))
+        with counter.step() as mark_done:
+            done_reg.next = mark_done.const(1, 1)
+            mark_done.done(mark_done.const(1, 1))
 
         # Procedural rule with while loop
         # The condition function has access to cmt2.call
-        with counter.proc_rule("count_to_five") as rule:
-            with rule.guard as g:
+        with counter.proc_rule() as count_to_five:
+            with count_to_five.guard as g:
                 # Guard: not done yet
-                d = g.call(done_reg, "read")
+                d = done_reg.read
                 not_done = g.not_(d)
                 g.returns(not_done)
 
-            with rule.control() as ctrl:
+            with count_to_five.control() as ctrl:
                 with ctrl.seq() as seq:
                     # While loop with condition region
                     # The condition function receives a builder with call capability
                     def loop_condition(b):
                         """Condition: counter < 5"""
-                        val = b.call(cnt, "read")
+                        val = b.call(cnt.instance, cnt.instance.read)
                         c5 = b.const(5, width)
                         return b.lt(val, c5)
 
                     with seq.while_(loop_condition) as loop:
-                        loop.enable(inc_step.ref())
+                        loop.enable(increment.ref())
 
                     # After loop completes, mark done
-                    seq.enable(done_step.ref())
+                    seq.enable(mark_done.ref())
 
         # Precedence
-        counter.precedence(count.ref(), is_done.ref(), rule.ref())
+        counter.precedence(count.ref(), is_done.ref(), count_to_five.ref())
 
     return circuit
 

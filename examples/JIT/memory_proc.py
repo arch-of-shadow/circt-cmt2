@@ -62,10 +62,10 @@ def create_memory_accumulator_circuit():
         rst = m.reset()
 
         # Instantiate memory and registers
-        mem = m.instance(mem_mod, "mem", clk=clk, rst=rst)
-        accum_reg = m.instance(reg32, "accum", clk=clk, rst=rst)
-        addr_reg = m.instance(reg2, "addr", clk=clk, rst=rst)
-        busy_reg = m.instance(reg1, "busy", clk=clk, rst=rst)
+        mem = m.instance(mem_mod, clk=clk, rst=rst)
+        accum_reg = m.instance(reg32, clk=clk, rst=rst)
+        addr_reg = m.instance(reg2, clk=clk, rst=rst)
+        busy_reg = m.instance(reg1, clk=clk, rst=rst)
 
         # =====================================================================
         # Method: write(addr, data) - Write to memory
@@ -112,27 +112,27 @@ def create_memory_accumulator_circuit():
         # =====================================================================
 
         # Step: init_sum
-        with m.step("init_sum") as step:
-            step.call(accum_reg, "write", step.const(0, 32))
-            step.call(addr_reg, "write", step.const(0, 2))
-            step.call(busy_reg, "write", step.const(1, 1))
-            step.done(step.const(1, 1))
+        with m.step() as init_sum:
+            accum_reg.next = init_sum.const(0, 32)
+            addr_reg.next = init_sum.const(0, 2)
+            busy_reg.next = init_sum.const(1, 1)
+            init_sum.done(init_sum.const(1, 1))
 
         # Step: read_and_add
-        with m.step("read_and_add") as step:
-            addr = step.call(addr_reg, "read")
-            data = step.call(mem, "read", addr)
-            current_sum = step.call(accum_reg, "read")
-            new_sum = step.add(current_sum, data)
-            step.call(accum_reg, "write", new_sum)
-            new_addr = step.add(addr, step.const(1, 2))
-            step.call(addr_reg, "write", new_addr)
-            step.done(step.const(1, 1))
+        with m.step() as read_and_add:
+            addr = addr_reg.read
+            data = mem.read(addr)
+            current_sum = accum_reg.read
+            new_sum = read_and_add.add(current_sum, data)
+            accum_reg.next = new_sum
+            new_addr = read_and_add.add(addr, read_and_add.const(1, 2))
+            addr_reg.next = read_and_add.bits(new_addr, 1, 0)
+            read_and_add.done(read_and_add.const(1, 1))
 
         # Step: finish_sum
-        with m.step("finish_sum") as step:
-            step.call(busy_reg, "write", step.const(0, 1))
-            step.done(step.const(1, 1))
+        with m.step() as finish_sum:
+            busy_reg.next = finish_sum.const(0, 1)
+            finish_sum.done(finish_sum.const(1, 1))
 
         # =====================================================================
         # Method: start_sum() - Start the sum operation
@@ -149,17 +149,17 @@ def create_memory_accumulator_circuit():
         # =====================================================================
         # Proc Rule: sum_loop
         # =====================================================================
-        with m.proc_rule("sum_loop") as rule:
-            with rule.guard as g:
-                busy = g.call(busy_reg, "read")
+        with m.proc_rule() as sum_loop:
+            with sum_loop.guard as g:
+                busy = busy_reg.read
                 g.returns(busy)
-            with rule.control() as ctrl:
+            with sum_loop.control() as ctrl:
                 with ctrl.seq():
-                    ctrl.enable(m._steps["read_and_add"].ref())
-                    ctrl.enable(m._steps["read_and_add"].ref())
-                    ctrl.enable(m._steps["read_and_add"].ref())
-                    ctrl.enable(m._steps["read_and_add"].ref())
-                    ctrl.enable(m._steps["finish_sum"].ref())
+                    ctrl.enable(read_and_add.ref())
+                    ctrl.enable(read_and_add.ref())
+                    ctrl.enable(read_and_add.ref())
+                    ctrl.enable(read_and_add.ref())
+                    ctrl.enable(finish_sum.ref())
 
     return circuit
 

@@ -194,15 +194,15 @@ def test_simple_counter() -> bool:
     with jit.module(circuit, "Counter") as m:
         clk = m.clock()
         rst = m.reset()
-        counter = m.instance(reg_mod, "counter", clk=clk, rst=rst)
+        counter = m.instance(reg_mod, clk=clk, rst=rst)
 
         # Rule: increment counter every cycle
-        with jit.rule(m, "increment") as rule:
-            with rule.guard as g:
+        with jit.rule(m) as increment:
+            with increment.guard as g:
                 g.always()
-            with rule.body as b:
-                val = b.call(counter, "read")
-                b.call(counter, "write", b.bits(b.add(val, b.const(1, 32)), 31, 0))
+            with increment.body as b:
+                val = counter.read
+                counter.next = b.bits(b.add(val, b.const(1, 32)), 31, 0)
 
     mlir = circuit.emit_mlir()
     print(mlir[:500] + "..." if len(mlir) > 500 else mlir)
@@ -243,26 +243,26 @@ def test_precedence() -> bool:
     with jit.module(circuit, "PrecedenceModule") as m:
         clk = m.clock()
         rst = m.reset()
-        counter = m.instance(reg_mod, "counter", clk=clk, rst=rst)
+        counter = m.instance(reg_mod, clk=clk, rst=rst)
 
         # Rule 1: increment by 1 (always enabled)
-        with jit.rule(m, "incr_by_1") as rule1:
-            with rule1.guard as g:
+        with jit.rule(m) as incr_by_1:
+            with incr_by_1.guard as g:
                 g.always()
-            with rule1.body as b:
-                val = b.call(counter, "read")
-                b.call(counter, "write", b.bits(b.add(val, b.const(1, 32)), 31, 0))
+            with incr_by_1.body as b:
+                val = counter.read
+                counter.next = b.bits(b.add(val, b.const(1, 32)), 31, 0)
 
         # Rule 2: reset to 0 when counter > 4 (i.e., >= 5)
-        with jit.rule(m, "reset_at_5") as rule2:
-            with rule2.guard as g:
-                val = g.call(counter, "read")
+        with jit.rule(m) as reset_at_5:
+            with reset_at_5.guard as g:
+                val = counter.read
                 g.returns(g.gt(val, g.const(4, 32)))
-            with rule2.body as b:
-                b.call(counter, "write", b.const(0, 32))
+            with reset_at_5.body as b:
+                counter.next = b.const(0, 32)
 
         # reset_at_5 has higher priority
-        m.precedence(rule2.ref(), rule1.ref())
+        m.precedence(reset_at_5.ref(), incr_by_1.ref())
 
     mlir = circuit.emit_mlir()
     print(mlir[:500] + "..." if len(mlir) > 500 else mlir)
@@ -301,20 +301,20 @@ def test_proc_rule() -> bool:
     with jit.module(circuit, "ProcModule") as m:
         clk = m.clock()
         rst = m.reset()
-        counter = m.instance(reg_mod, "counter", clk=clk, rst=rst)
+        counter = m.instance(reg_mod, clk=clk, rst=rst)
 
         # Define a step that increments counter
-        with m.step("incr_step") as step:
-            val = step.call(counter, "read")
-            step.call(counter, "write", step.bits(step.add(val, step.const(1, 32)), 31, 0))
-            step.done(step.const(1, 1))  # Always done after one cycle
+        with m.step() as incr_step:
+            val = counter.read
+            counter.next = incr_step.bits(incr_step.add(val, incr_step.const(1, 32)), 31, 0)
+            incr_step.done(incr_step.const(1, 1))  # Always done after one cycle
 
         # Proc rule that runs the step
-        with m.proc_rule("incr_proc") as proc:
-            with proc.guard as g:
+        with m.proc_rule() as incr_proc:
+            with incr_proc.guard as g:
                 g.always()
-            with proc.control() as ctrl:
-                ctrl.enable(step.ref())
+            with incr_proc.control() as ctrl:
+                ctrl.enable(incr_step.ref())
 
     mlir = circuit.emit_mlir()
     print(mlir[:500] + "..." if len(mlir) > 500 else mlir)
@@ -353,32 +353,32 @@ def test_proc_conflict() -> bool:
     with jit.module(circuit, "ProcConflictModule") as m:
         clk = m.clock()
         rst = m.reset()
-        counter = m.instance(reg_mod, "counter", clk=clk, rst=rst)
+        counter = m.instance(reg_mod, clk=clk, rst=rst)
 
         # Step that increments
-        with m.step("incr_step") as step:
-            val = step.call(counter, "read")
-            step.call(counter, "write", step.bits(step.add(val, step.const(1, 32)), 31, 0))
-            step.done(step.const(1, 1))  # Always done after one cycle
+        with m.step() as incr_step:
+            val = counter.read
+            counter.next = incr_step.bits(incr_step.add(val, incr_step.const(1, 32)), 31, 0)
+            incr_step.done(incr_step.const(1, 1))  # Always done after one cycle
 
         # Proc rule for increment loop
-        with m.proc_rule("incr_loop") as proc:
-            with proc.guard as g:
+        with m.proc_rule() as incr_loop:
+            with incr_loop.guard as g:
                 g.always()
-            with proc.control() as ctrl:
-                ctrl.enable(step.ref())
+            with incr_loop.control() as ctrl:
+                ctrl.enable(incr_step.ref())
 
         # Regular rule: divide by 2 when counter == 4
-        with jit.rule(m, "div_by_2") as rule:
-            with rule.guard as g:
-                val = g.call(counter, "read")
+        with jit.rule(m) as div_by_2:
+            with div_by_2.guard as g:
+                val = counter.read
                 g.returns(g.eq(val, g.const(4, 32)))
-            with rule.body as b:
-                val = b.call(counter, "read")
-                b.call(counter, "write", b.pad(b.shr(val, 1), 32))
+            with div_by_2.body as b:
+                val = counter.read
+                counter.next = b.pad(b.shr(val, 1), 32)
 
         # div_by_2 has higher priority than incr_loop
-        m.precedence(rule.ref(), proc.ref())
+        m.precedence(div_by_2.ref(), incr_loop.ref())
 
     mlir = circuit.emit_mlir()
     print(mlir[:500] + "..." if len(mlir) > 500 else mlir)
@@ -417,14 +417,14 @@ def test_breakpoints() -> bool:
     with jit.module(circuit, "Counter") as m:
         clk = m.clock()
         rst = m.reset()
-        counter = m.instance(reg_mod, "counter", clk=clk, rst=rst)
+        counter = m.instance(reg_mod, clk=clk, rst=rst)
 
-        with jit.rule(m, "increment") as rule:
-            with rule.guard as g:
+        with jit.rule(m) as increment:
+            with increment.guard as g:
                 g.always()
-            with rule.body as b:
-                val = b.call(counter, "read")
-                b.call(counter, "write", b.bits(b.add(val, b.const(1, 32)), 31, 0))
+            with increment.body as b:
+                val = counter.read
+                counter.next = b.bits(b.add(val, b.const(1, 32)), 31, 0)
 
     mlir = circuit.emit_mlir()
 
@@ -473,14 +473,14 @@ def test_tracing() -> bool:
     with jit.module(circuit, "Counter") as m:
         clk = m.clock()
         rst = m.reset()
-        counter = m.instance(reg_mod, "counter", clk=clk, rst=rst)
+        counter = m.instance(reg_mod, clk=clk, rst=rst)
 
-        with jit.rule(m, "increment") as rule:
-            with rule.guard as g:
+        with jit.rule(m) as increment:
+            with increment.guard as g:
                 g.always()
-            with rule.body as b:
-                val = b.call(counter, "read")
-                b.call(counter, "write", b.bits(b.add(val, b.const(1, 32)), 31, 0))
+            with increment.body as b:
+                val = counter.read
+                counter.next = b.bits(b.add(val, b.const(1, 32)), 31, 0)
 
     mlir = circuit.emit_mlir()
 
@@ -519,28 +519,28 @@ def test_multiple_registers() -> bool:
     with jit.module(circuit, "TwoCounters") as m:
         clk = m.clock()
         rst = m.reset()
-        counter_a = m.instance(reg_mod, "counter_a", clk=clk, rst=rst)
-        counter_b = m.instance(reg_mod, "counter_b", clk=clk, rst=rst)
+        counter_a = m.instance(reg_mod, clk=clk, rst=rst)
+        counter_b = m.instance(reg_mod, clk=clk, rst=rst)
 
         # Rule: increment counter_a
-        with jit.rule(m, "incr_a") as rule_a:
-            with rule_a.guard as g:
+        with jit.rule(m) as incr_a:
+            with incr_a.guard as g:
                 g.always()
-            with rule_a.body as b:
-                val = b.call(counter_a, "read")
-                b.call(counter_a, "write", b.bits(b.add(val, b.const(1, 32)), 31, 0))
+            with incr_a.body as b:
+                val = counter_a.read
+                counter_a.next = b.bits(b.add(val, b.const(1, 32)), 31, 0)
 
         # Rule: copy counter_a to counter_b when counter_a > 4 (i.e., >= 5)
-        with jit.rule(m, "copy_to_b") as rule_b:
-            with rule_b.guard as g:
-                val = g.call(counter_a, "read")
+        with jit.rule(m) as copy_to_b:
+            with copy_to_b.guard as g:
+                val = counter_a.read
                 g.returns(g.gt(val, g.const(4, 32)))
-            with rule_b.body as b:
-                val = b.call(counter_a, "read")
-                b.call(counter_b, "write", val)
+            with copy_to_b.body as b:
+                val = counter_a.read
+                counter_b.next = val
 
         # incr_a has higher priority (always fires)
-        m.precedence(rule_a.ref(), rule_b.ref())
+        m.precedence(incr_a.ref(), copy_to_b.ref())
 
     mlir = circuit.emit_mlir()
     print(mlir[:500] + "..." if len(mlir) > 500 else mlir)
@@ -585,20 +585,20 @@ def test_memory() -> bool:
     with jit.module(circuit, "MemModule") as m:
         clk = m.clock()
         rst = m.reset()
-        counter = m.instance(reg_mod, "counter", clk=clk, rst=rst)
-        mem = m.instance(mem_mod, "mem", clk=clk, rst=rst)
+        counter = m.instance(reg_mod, clk=clk, rst=rst)
+        mem = m.instance(mem_mod, clk=clk, rst=rst)
 
         # Rule: write counter to memory[counter], then increment
-        with jit.rule(m, "store_and_incr") as rule:
-            with rule.guard as g:
-                val = g.call(counter, "read")
+        with jit.rule(m) as store_and_incr:
+            with store_and_incr.guard as g:
+                val = counter.read
                 # Only store for first 10 values
                 g.returns(g.lt(val, g.const(10, 32)))
-            with rule.body as b:
-                val = b.call(counter, "read")
+            with store_and_incr.body as b:
+                val = counter.read
                 addr = b.bits(val, 3, 0)  # Use lower 4 bits as address
-                b.call(mem, "write", val, addr)
-                b.call(counter, "write", b.bits(b.add(val, b.const(1, 32)), 31, 0))
+                mem.write(val, addr)
+                counter.next = b.bits(b.add(val, b.const(1, 32)), 31, 0)
 
     mlir = circuit.emit_mlir()
     print(mlir[:600] + "..." if len(mlir) > 600 else mlir)
@@ -641,23 +641,22 @@ def test_while_loop() -> bool:
     with jit.module(circuit, "WhileModule") as m:
         clk = m.clock()
         rst = m.reset()
-        counter = m.instance(reg_mod, "counter", clk=clk, rst=rst)
+        counter = m.instance(reg_mod, clk=clk, rst=rst)
 
         # Step: increment counter
-        with m.step("incr_step") as incr:
-            val = incr.call(counter, "read")
-            incr.call(counter, "write", incr.bits(incr.add(val, incr.const(1, 32)), 31, 0))
-            incr.done(incr.const(1, 1))
+        with m.step() as incr_step:
+            counter.next = counter.read + 1
+            incr_step.done(incr_step.const(1, 1))
 
         # Proc rule with while loop (condition=0 means no iterations for testing)
-        with m.proc_rule("while_test") as proc:
-            with proc.guard as g:
+        with m.proc_rule() as while_test:
+            with while_test.guard as g:
                 g.always()
-            with proc.control() as ctrl:
+            with while_test.control() as ctrl:
                 # Use constant condition function (0 = false, no iterations)
                 # This verifies the while structure is generated correctly
                 with ctrl.while_(lambda b: b.const(0, 1)) as loop:
-                    loop.enable(incr.ref())
+                    loop.enable(incr_step.ref())
 
     mlir = circuit.emit_mlir()
     print(mlir[:600] + "..." if len(mlir) > 600 else mlir)
@@ -701,19 +700,18 @@ def test_static_step() -> bool:
     with jit.module(circuit, "StaticModule") as m:
         clk = m.clock()
         rst = m.reset()
-        counter = m.instance(reg_mod, "counter", clk=clk, rst=rst)
+        counter = m.instance(reg_mod, clk=clk, rst=rst)
 
         # Static step with 3-cycle latency
-        with m.static_step(3, "incr_3cycles") as step:
-            val = step.call(counter, "read")
-            step.call(counter, "write", step.bits(step.add(val, step.const(1, 32)), 31, 0))
+        with m.static_step(3) as incr_3cycles:
+            counter.next = counter.read + 1
 
         # Proc rule using static step
-        with m.proc_rule("static_incr") as proc:
-            with proc.guard as g:
+        with m.proc_rule() as static_incr:
+            with static_incr.guard as g:
                 g.always()
-            with proc.control() as ctrl:
-                ctrl.enable(step.ref())
+            with static_incr.control() as ctrl:
+                ctrl.enable(incr_3cycles.ref())
 
     mlir = circuit.emit_mlir()
     print(mlir[:600] + "..." if len(mlir) > 600 else mlir)
@@ -753,19 +751,18 @@ def test_static_repeat() -> bool:
     with jit.module(circuit, "RepeatModule") as m:
         clk = m.clock()
         rst = m.reset()
-        counter = m.instance(reg_mod, "counter", clk=clk, rst=rst)
+        counter = m.instance(reg_mod, clk=clk, rst=rst)
 
         # Step that increments
-        with m.step("incr") as incr:
-            val = incr.call(counter, "read")
-            incr.call(counter, "write", incr.bits(incr.add(val, incr.const(1, 32)), 31, 0))
+        with m.step() as incr:
+            counter.next = counter.read + 1
             incr.done(incr.const(1, 1))
 
         # Proc rule: repeat 4 times
-        with m.proc_rule("repeat_4") as proc:
-            with proc.guard as g:
+        with m.proc_rule() as repeat_4:
+            with repeat_4.guard as g:
                 g.always()
-            with proc.control() as ctrl:
+            with repeat_4.control() as ctrl:
                 with ctrl.static_repeat(4) as loop:
                     loop.enable(incr.ref())
 
@@ -812,40 +809,37 @@ def test_static_if() -> bool:
     with jit.module(circuit, "StaticIfModule") as m:
         clk = m.clock()
         rst = m.reset()
-        counter = m.instance(reg_mod, "counter", clk=clk, rst=rst)
-        result = m.instance(reg_mod, "result", clk=clk, rst=rst)
+        counter = m.instance(reg_mod, clk=clk, rst=rst)
+        result = m.instance(reg_mod, clk=clk, rst=rst)
 
         # Step: add 1
-        with m.step("add_1") as add1:
-            val = add1.call(result, "read")
-            add1.call(result, "write", add1.bits(add1.add(val, add1.const(1, 32)), 31, 0))
-            add1.done(add1.const(1, 1))
+        with m.step() as add_1:
+            result.next = result.read + 1
+            add_1.done(add_1.const(1, 1))
 
         # Step: add 10
-        with m.step("add_10") as add10:
-            val = add10.call(result, "read")
-            add10.call(result, "write", add10.bits(add10.add(val, add10.const(10, 32)), 31, 0))
-            add10.done(add10.const(1, 1))
+        with m.step() as add_10:
+            result.next = result.read + 10
+            add_10.done(add_10.const(1, 1))
 
         # Step: increment counter
-        with m.step("incr_counter") as incr:
-            val = incr.call(counter, "read")
-            incr.call(counter, "write", incr.bits(incr.add(val, incr.const(1, 32)), 31, 0))
-            incr.done(incr.const(1, 1))
+        with m.step() as incr_counter:
+            counter.next = counter.read + 1
+            incr_counter.done(incr_counter.const(1, 1))
 
         # Proc rule: if condition is true, add 1; else add 10
-        with m.proc_rule("conditional") as proc:
-            with proc.guard as g:
+        with m.proc_rule() as conditional:
+            with conditional.guard as g:
                 g.always()
-            with proc.control() as ctrl:
+            with conditional.control() as ctrl:
                 # Use constant condition (1 = true, takes then branch)
                 cond = ctrl.const(1, 1)
                 with ctrl.static_if(cond) as sif:
                     with sif.then_() as then_ctrl:
-                        then_ctrl.enable(add1.ref())
+                        then_ctrl.enable(add_1.ref())
                     with sif.else_() as else_ctrl:
-                        else_ctrl.enable(add10.ref())
-                ctrl.enable(incr.ref())
+                        else_ctrl.enable(add_10.ref())
+                ctrl.enable(incr_counter.ref())
 
     mlir = circuit.emit_mlir()
     print(mlir[:800] + "..." if len(mlir) > 800 else mlir)
@@ -899,37 +893,31 @@ def test_fifo1_push() -> bool:
     with jit.module(circuit, "FIFO1PushModule") as m:
         clk = m.clock()
         rst = m.reset()
-        counter = m.instance(reg_mod, "counter", clk=clk, rst=rst)
-        deq_count = m.instance(reg_mod, "deq_count", clk=clk, rst=rst)
-        fifo = m.instance(fifo_mod, "fifo", clk=clk, rst=rst)
+        counter = m.instance(reg_mod, clk=clk, rst=rst)
+        deq_count = m.instance(reg_mod, clk=clk, rst=rst)
+        fifo = m.instance(fifo_mod, clk=clk, rst=rst)
 
         # Rule: producer - enqueue counter value, then increment
-        with jit.rule(m, "producer") as producer_rule:
-            with producer_rule.guard as g:
-                val = g.call(counter, "read")
-                # Only produce first 5 values
-                can_produce = g.lt(val, g.const(5, 32))
-                # Check if FIFO can accept
-                is_full = g.call(fifo, "full")
-                not_full = g.not_(is_full)
-                g.returns(g.and_(can_produce, not_full))
-            with producer_rule.body as b:
-                val = b.call(counter, "read")
-                b.call(fifo, "enq", val)
-                b.call(counter, "write", b.bits(b.add(val, b.const(1, 32)), 31, 0))
+        with jit.rule(m) as producer:
+            with producer.guard as g:
+                val = counter.read
+                # Only produce first 5 values, and only when FIFO can accept.
+                g.returns((val < 5) & ~fifo.full)
+            with producer.body as b:
+                val = counter.read
+                fifo.enq(val)
+                counter.next = val + 1
 
         # Rule: consumer - dequeue when FIFO has data
-        with jit.rule(m, "consumer") as consumer_rule:
-            with consumer_rule.guard as g:
-                is_full = g.call(fifo, "full")
-                g.returns(is_full)
-            with consumer_rule.body as b:
-                b.call(fifo, "deq")
-                cnt = b.call(deq_count, "read")
-                b.call(deq_count, "write", b.bits(b.add(cnt, b.const(1, 32)), 31, 0))
+        with jit.rule(m) as consumer:
+            with consumer.guard as g:
+                g.returns(fifo.full)
+            with consumer.body as b:
+                fifo.deq()
+                deq_count.next = deq_count.read + 1
 
         # producer has higher priority
-        m.precedence(producer_rule.ref(), consumer_rule.ref())
+        m.precedence(producer.ref(), consumer.ref())
 
     mlir = circuit.emit_mlir()
     print(f"Original MLIR ({len(mlir)} chars):")
@@ -998,18 +986,17 @@ def test_fifo1_pull() -> bool:
     with jit.module(circuit, "FIFO1PullModule") as m:
         clk = m.clock()
         rst = m.reset()
-        counter = m.instance(reg_mod, "counter", clk=clk, rst=rst)
-        fifo = m.instance(fifo_mod, "fifo", clk=clk, rst=rst)
+        counter = m.instance(reg_mod, clk=clk, rst=rst)
+        fifo = m.instance(fifo_mod, clk=clk, rst=rst)
 
         # Rule: producer - enqueue counter value (FIFO1Pull has always-ready enq)
-        with jit.rule(m, "producer") as rule:
-            with rule.guard as g:
-                val = g.call(counter, "read")
-                g.returns(g.lt(val, g.const(5, 32)))
-            with rule.body as b:
-                val = b.call(counter, "read")
-                b.call(fifo, "enq", val)
-                b.call(counter, "write", b.bits(b.add(val, b.const(1, 32)), 31, 0))
+        with jit.rule(m) as producer:
+            with producer.guard as g:
+                g.returns(counter.read < 5)
+            with producer.body as b:
+                val = counter.read
+                fifo.enq(val)
+                counter.next = val + 1
 
     mlir = circuit.emit_mlir()
     print(f"Original MLIR ({len(mlir)} chars):")
@@ -1061,23 +1048,21 @@ def test_info_command() -> bool:
     with jit.module(circuit, "InfoModule") as m:
         clk = m.clock()
         rst = m.reset()
-        counter = m.instance(reg_mod, "counter", clk=clk, rst=rst)
+        counter = m.instance(reg_mod, clk=clk, rst=rst)
 
         # Rule 1: increment
-        with jit.rule(m, "increment") as rule:
-            with rule.guard as g:
+        with jit.rule(m) as increment:
+            with increment.guard as g:
                 g.always()
-            with rule.body as b:
-                val = b.call(counter, "read")
-                b.call(counter, "write", b.bits(b.add(val, b.const(1, 32)), 31, 0))
+            with increment.body as b:
+                counter.next = counter.read + 1
 
         # Rule 2: reset at 10
-        with jit.rule(m, "reset_at_10") as rule2:
-            with rule2.guard as g:
-                val = g.call(counter, "read")
-                g.returns(g.gt(val, g.const(9, 32)))
-            with rule2.body as b:
-                b.call(counter, "write", b.const(0, 32))
+        with jit.rule(m) as reset_at_10:
+            with reset_at_10.guard as g:
+                g.returns(counter.read > 9)
+            with reset_at_10.body as b:
+                counter.next = b.const(0, 32)
 
         @jit.method(m)
         def get_value(meth) -> UInt[32]:
@@ -1127,13 +1112,13 @@ def test_modules_command() -> bool:
     with jit.module(circuit, "MainModule") as m:
         clk = m.clock()
         rst = m.reset()
-        counter = m.instance(reg_mod, "counter", clk=clk, rst=rst)
-        mem = m.instance(mem_mod, "mem", clk=clk, rst=rst)
+        counter = m.instance(reg_mod, clk=clk, rst=rst)
+        mem = m.instance(mem_mod, clk=clk, rst=rst)
 
-        with jit.rule(m, "dummy") as rule:
-            with rule.guard as g:
+        with jit.rule(m) as dummy:
+            with dummy.guard as g:
                 g.always()
-            with rule.body as b:
+            with dummy.body as b:
                 pass
 
     mlir = circuit.emit_mlir()
@@ -1174,14 +1159,13 @@ def test_stats_command() -> bool:
     with jit.module(circuit, "StatsModule") as m:
         clk = m.clock()
         rst = m.reset()
-        counter = m.instance(reg_mod, "counter", clk=clk, rst=rst)
+        counter = m.instance(reg_mod, clk=clk, rst=rst)
 
-        with jit.rule(m, "increment") as rule:
-            with rule.guard as g:
+        with jit.rule(m) as increment:
+            with increment.guard as g:
                 g.always()
-            with rule.body as b:
-                val = b.call(counter, "read")
-                b.call(counter, "write", b.bits(b.add(val, b.const(1, 32)), 31, 0))
+            with increment.body as b:
+                counter.next = counter.read + 1
 
     mlir = circuit.emit_mlir()
 
@@ -1222,14 +1206,13 @@ def test_source_command() -> bool:
     with jit.module(circuit, "SourceModule") as m:
         clk = m.clock()
         rst = m.reset()
-        counter = m.instance(reg_mod, "counter", clk=clk, rst=rst)
+        counter = m.instance(reg_mod, clk=clk, rst=rst)
 
-        with jit.rule(m, "increment") as rule:
-            with rule.guard as g:
+        with jit.rule(m) as increment:
+            with increment.guard as g:
                 g.always()
-            with rule.body as b:
-                val = b.call(counter, "read")
-                b.call(counter, "write", b.bits(b.add(val, b.const(1, 32)), 31, 0))
+            with increment.body as b:
+                counter.next = counter.read + 1
 
     mlir = circuit.emit_mlir()
 
@@ -1273,16 +1256,16 @@ def test_combined_commands() -> bool:
     with jit.module(circuit, "WorkflowModule") as m:
         clk = m.clock()
         rst = m.reset()
-        counter = m.instance(reg_mod, "counter", clk=clk, rst=rst)
-        result = m.instance(reg_mod, "result", clk=clk, rst=rst)
+        counter = m.instance(reg_mod, clk=clk, rst=rst)
+        result = m.instance(reg_mod, clk=clk, rst=rst)
 
-        with jit.rule(m, "compute") as rule:
-            with rule.guard as g:
+        with jit.rule(m) as compute:
+            with compute.guard as g:
                 g.always()
-            with rule.body as b:
-                val = b.call(counter, "read")
-                b.call(counter, "write", b.bits(b.add(val, b.const(1, 32)), 31, 0))
-                b.call(result, "write", b.bits(b.mul(val, b.const(2, 32)), 31, 0))
+            with compute.body as b:
+                val = counter.read
+                counter.next = val + 1
+                result.next = val * 2
 
     mlir = circuit.emit_mlir()
 

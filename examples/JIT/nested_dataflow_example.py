@@ -73,8 +73,8 @@ def create_nested_dataflow_design():
         rst = mod.reset()
 
         # Registers for state
-        pixel_count = mod.instance(Reg.create(circuit, 16), "pixel_count", clk=clk, rst=rst)
-        result_reg = mod.instance(Reg.create(circuit, 32), "result_reg", clk=clk, rst=rst)
+        pixel_count = mod.instance(Reg.create(circuit, 16), clk=clk, rst=rst)
+        result_reg = mod.instance(Reg.create(circuit, 32), clk=clk, rst=rst)
 
         # =====================================================================
         # Main Image Processing Pipeline (Outer Dataflow)

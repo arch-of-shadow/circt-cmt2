@@ -13,23 +13,15 @@ Expected behavior:
 - Final values: counter1=1, counter2=1, result=2 (sum)
 
 Usage:
-    PYTHONPATH=build/tools/circt/python_packages/circt_core:python \\
-      python3 examples/JIT/proc_par_test.py
+    cd circt-cmt2/build
+    PYTHONPATH=tools/circt/python_packages/circt_core:../python \\
+      python3 ../examples/JIT/proc_par_test.py
 """
 
 import cmt2.jit as jit
 
-import os
-import sys
 import shutil
 from pathlib import Path
-
-# Add circt Python packages to path
-build_dir = os.path.dirname(os.path.abspath(__file__))
-while build_dir and not os.path.exists(os.path.join(build_dir, "build")):
-    build_dir = os.path.dirname(build_dir)
-if build_dir:
-    sys.path.insert(0, os.path.join(build_dir, "build/tools/circt/python_packages/circt_core"))
 
 from circt.pycmt2.circuit import Circuit
 from circt.pycmt2.stl import Reg, clear_stl_registry
@@ -38,8 +30,12 @@ from circt.pycmt2.simulation import SimulationWorkspace
 from circt.pycmt2.testbench import Testbench
 
 
-def create_parallel_test(circuit: Circuit, width: int = 32):
+@jit.elaborate
+def create_parallel_test(width: int = 32) -> Circuit:
     """Create a simple test for proc.par execution."""
+    clear_stl_registry()
+
+    circuit = Circuit("ProcParTest")
     reg_mod = Reg.create(circuit, width)
     reg1_mod = Reg.create(circuit, 1)
 
@@ -48,9 +44,9 @@ def create_parallel_test(circuit: Circuit, width: int = 32):
         rst = harness.reset("rst")
 
         # Two counters - each will be incremented by its own step
-        counter1 = harness.instance(reg_mod, "counter1", clk=clk, rst=rst)
-        counter2 = harness.instance(reg_mod, "counter2", clk=clk, rst=rst)
-        done_reg = harness.instance(reg1_mod, "done_reg", clk=clk, rst=rst)
+        counter1 = harness.instance(reg_mod, clk=clk, rst=rst)
+        counter2 = harness.instance(reg_mod, clk=clk, rst=rst)
+        done_reg = harness.instance(reg1_mod, clk=clk, rst=rst)
 
         @jit.value(harness)
         def done(done_val) -> UInt[1]:
@@ -68,43 +64,37 @@ def create_parallel_test(circuit: Circuit, width: int = 32):
                 result_val.returns(result_val.bits(s, width - 1, 0))
 
         # Step: incr1 - increment counter1
-        with harness.step("incr1") as step1:
-            cnt = step1.call(counter1, "read")
-            next_cnt = step1.add(cnt, step1.const(1, width))
-            step1.call(counter1, "write", step1.bits(next_cnt, width-1, 0))
-            step1.done(step1.const(1, 1))
+        with harness.step() as incr1:
+            counter1.next = counter1.read + 1
+            incr1.done(incr1.const(1, 1))
 
         # Step: incr2 - increment counter2
-        with harness.step("incr2") as step2:
-            cnt = step2.call(counter2, "read")
-            next_cnt = step2.add(cnt, step2.const(1, width))
-            step2.call(counter2, "write", step2.bits(next_cnt, width-1, 0))
-            step2.done(step2.const(1, 1))
+        with harness.step() as incr2:
+            counter2.next = counter2.read + 1
+            incr2.done(incr2.const(1, 1))
 
         # Step: mark_done
-        with harness.step("mark_done") as done_step:
-            done_step.call(done_reg, "write", done_step.const(1, 1))
-            done_step.done(done_step.const(1, 1))
+        with harness.step() as mark_done:
+            done_reg.next = mark_done.const(1, 1)
+            mark_done.done(mark_done.const(1, 1))
 
         # Procedural rule: main with parallel execution
-        with harness.proc_rule("main") as main:
+        with harness.proc_rule() as main:
             with main.guard as g:
-                d = g.call(done_reg, "read")
-                not_done = g.not_(d)
-                g.returns(not_done)
+                g.returns(~done_reg.read)
 
             with main.control() as ctrl:
                 with ctrl.seq() as seq:
                     # Parallel: both steps run at the same time
                     with seq.par() as par:
-                        par.enable(step1.ref())
-                        par.enable(step2.ref())
+                        par.enable(incr1.ref())
+                        par.enable(incr2.ref())
                     # After both complete, mark done
-                    seq.enable(done_step.ref())
+                    seq.enable(mark_done.ref())
 
         harness.precedence(done._cmt2_ref, result._cmt2_ref, main.ref())
 
-    return harness
+    return circuit
 
 
 def create_parallel_testbench(circuit):
@@ -219,8 +209,6 @@ Test case:
 - Expected result: counter1=1 + counter2=1 = 2
 """)
 
-    width = 32
-
     # Setup paths
     script_dir = Path(__file__).parent
     workspace_dir = script_dir / "proc_par_test_workspace"
@@ -229,13 +217,8 @@ Test case:
     if workspace_dir.exists():
         shutil.rmtree(workspace_dir)
 
-    # Clear STL registry
-    clear_stl_registry()
-
     print("1. Creating parallel test circuit...")
-    circuit = Circuit("ProcParTest")
-    harness = create_parallel_test(circuit, width)
-    print(f"   Module: {harness.name}")
+    circuit = create_parallel_test()
 
     # Emit MLIR
     print("\n2. Emitting MLIR...")
@@ -286,11 +269,11 @@ Test case:
     print("=" * 70)
     print(f"   Workspace: {workspace_dir}")
     print(f"   Waveforms: {workspace_dir / 'waves' / 'TestHarness.vcd'}")
-    print("\n   Status: TEST PASSED - proc.par works correctly!")
+    print("\nE2E Simulation PASSED!")
     print("=" * 70)
 
     return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    raise SystemExit(main())

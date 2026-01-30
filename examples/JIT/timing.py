@@ -77,9 +77,9 @@ def main():
         rst = sched.reset("rst")
 
         # Instantiate ALU and registers
-        alu = sched.instance(alu_mod, "alu")
-        acc_reg = sched.instance(reg_mod, "acc", clk=clk, rst=rst)
-        count_reg = sched.instance(reg_mod, "count", clk=clk, rst=rst)
+        alu = sched.instance(alu_mod)
+        acc_reg = sched.instance(reg_mod, clk=clk, rst=rst)
+        count_reg = sched.instance(reg_mod, clk=clk, rst=rst)
 
         # Static step with fixed 4-cycle latency
         # This step will execute for exactly 4 cycles.
@@ -93,36 +93,36 @@ def main():
         # 1. Allocate FSM states (4 states for 4 cycles)
         # 2. Generate FSM register and transition logic
         # 3. Create timing guards for each operation
-        with sched.static_step(4, "increment_by_10") as step:
+        with sched.static_step(4) as increment_by_10:
             # Read current accumulator value (cycle 0)
-            acc_val = step.call(acc_reg, "read")
+            acc_val = acc_reg.read
 
             # Add 10 to it using ALU (cycle 1)
-            ten = step.const(10, 32)
-            new_val = step.call(alu, "add", acc_val, ten)
+            ten = increment_by_10.const(10, 32)
+            new_val = alu.add(acc_val, ten)
 
             # Write back to accumulator (cycle 2)
-            step.call(acc_reg, "write", new_val)
+            acc_reg.next = new_val
 
             # Increment counter (cycle 3)
-            count_val = step.call(count_reg, "read")
-            one = step.const(1, 32)
-            new_count = step.call(alu, "add", count_val, one)
-            step.call(count_reg, "write", new_count)
+            count_val = count_reg.read
+            one = increment_by_10.const(1, 32)
+            new_count = alu.add(count_val, one)
+            count_reg.next = new_count
 
         # Another static step: compute sum of two registers
-        with sched.static_step(3, "compute_sum") as step2:
-            a = step2.call(acc_reg, "read")
-            b = step2.call(count_reg, "read")
-            sum_val = step2.call(alu, "add", a, b)
-            step2.call(acc_reg, "write", sum_val)
+        with sched.static_step(3) as compute_sum:
+            a = acc_reg.read
+            b = count_reg.read
+            sum_val = alu.add(a, b)
+            acc_reg.next = sum_val
 
         # Proc Rule to run the first step (uses multi-cycle control)
-        with sched.proc_rule("run_increment") as rule:
-            with rule.guard as g:
+        with sched.proc_rule() as run_increment:
+            with run_increment.guard as g:
                 g.returns(g.const(1, 1))
-            with rule.control() as ctrl:
-                ctrl.enable(step.ref())
+            with run_increment.control() as ctrl:
+                ctrl.enable(increment_by_10.ref())
 
         @jit.value(sched)
         def get_accumulator(val) -> UInt[32]:
@@ -201,37 +201,9 @@ def main():
     }
     """)
 
-    # Future enhancements section
-    print("\n" + "=" * 60)
-    print("Future Python API Enhancements")
-    print("-" * 40)
-    print("""
-    The following timing features will be added to the Python API:
-
-    1. Static latency on method declarations:
-       mult_mod.method("multiply", ...,
-           static_latency=4)  # Result available 4 cycles after call
-
-    2. Timing annotation on calls:
-       result = step.call(mult, "multiply", a, b,
-           arg_timing=[(0, 1), (0, 1)],   # Args driven cycles 0-1
-           result_timing=[(4, 5)])         # Result captured cycles 4-5
-
-    3. Initiation interval (II) for pipelining:
-       mult_mod.method("multiply", ...,
-           static_latency=4,
-           interval=3)  # Can accept new inputs every 3 cycles
-
-    4. Port timing for precise scheduling:
-       mult_mod.method("multiply", ...,
-           arg_port_timing=[port.data(0), port.data(0)],
-           result_port_timing=[port.data(4)])
-
-    These features are already available at the MLIR level via:
-    - #cmt2.timing<[start, end]> for timing intervals
-    - #cmt2.interval<n> for initiation intervals
-    - static<n> on BindMethodOp for static latency
-    """)
+    # Keep this example focused on the current JIT surface area. Advanced timing
+    # annotations can still be expressed in MLIR, but the JIT intentionally
+    # avoids backend-specific/overly-complex APIs here.
 
 
 @jit.elaborate
@@ -256,80 +228,80 @@ def create_simulatable_timing_circuit():
         rst = m.reset()
 
         # Registers for state
-        acc = m.instance(Reg.create(circuit, 32), "acc", clk=clk, rst=rst)
-        counter = m.instance(Reg.create(circuit, 32), "counter", clk=clk, rst=rst)
-        aux = m.instance(Reg.create(circuit, 32), "aux", clk=clk, rst=rst)
+        acc = m.instance(Reg.create(circuit, 32), clk=clk, rst=rst)
+        counter = m.instance(Reg.create(circuit, 32), clk=clk, rst=rst)
+        aux = m.instance(Reg.create(circuit, 32), clk=clk, rst=rst)
 
         # =====================================================================
         # Static Step 1: 2-cycle increment (simple)
         # Demonstrates: minimal static step
         # =====================================================================
-        with m.static_step(2, "increment_2cycle") as step1:
-            count = step1.call(counter, "read")
-            new_count = step1.add(count, step1.const(1, 32))
-            step1.call(counter, "write", new_count)
+        with m.static_step(2) as increment_2cycle:
+            count = counter.read
+            new_count = increment_2cycle.add(count, increment_2cycle.const(1, 32))
+            counter.next = new_count
 
         # =====================================================================
         # Static Step 2: 3-cycle add_to_acc (medium)
         # Demonstrates: read-compute-write pattern
         # =====================================================================
-        with m.static_step(3, "add_to_acc") as step2:
-            acc_val = step2.call(acc, "read")
-            add_val = step2.const(10, 32)
-            new_acc = step2.add(acc_val, add_val)
-            step2.call(acc, "write", new_acc)
+        with m.static_step(3) as add_to_acc:
+            acc_val = acc.read
+            add_val = add_to_acc.const(10, 32)
+            new_acc = add_to_acc.add(acc_val, add_val)
+            acc.next = new_acc
 
         # =====================================================================
         # Static Step 3: 4-cycle compute_sum (longer)
         # Demonstrates: multi-register read and combine
         # Similar to example's compute_sum
         # =====================================================================
-        with m.static_step(4, "compute_sum") as step3:
-            acc_val = step3.call(acc, "read")
-            cnt_val = step3.call(counter, "read")
-            sum_val = step3.add(acc_val, cnt_val)
-            step3.call(aux, "write", sum_val)
+        with m.static_step(4) as compute_sum:
+            acc_val = acc.read
+            cnt_val = counter.read
+            sum_val = compute_sum.add(acc_val, cnt_val)
+            aux.next = sum_val
 
         # =====================================================================
         # Static Step 4: 5-cycle combined operation
         # Demonstrates: multiple reads, compute, multiple writes
         # =====================================================================
-        with m.static_step(5, "combined_ops") as step4:
+        with m.static_step(5) as combined_ops:
             # Read all registers
-            acc_val = step4.call(acc, "read")
-            cnt_val = step4.call(counter, "read")
+            acc_val = acc.read
+            cnt_val = counter.read
             # Compute: acc + counter + 1
-            sum_val = step4.add(acc_val, cnt_val)
-            final_val = step4.add(sum_val, step4.const(1, 32))
+            sum_val = combined_ops.add(acc_val, cnt_val)
+            final_val = combined_ops.add(sum_val, combined_ops.const(1, 32))
             # Write back to acc
-            step4.call(acc, "write", final_val)
+            acc.next = final_val
 
         # =====================================================================
         # Proc Rules to run each static step
         # =====================================================================
-        with m.proc_rule("run_increment") as rule:
-            with rule.guard as g:
+        with m.proc_rule() as run_increment:
+            with run_increment.guard as g:
                 g.always()
-            with rule.control() as ctrl:
-                ctrl.enable(step1.ref())
+            with run_increment.control() as ctrl:
+                ctrl.enable(increment_2cycle.ref())
 
-        with m.proc_rule("run_add_acc") as rule:
-            with rule.guard as g:
+        with m.proc_rule() as run_add_acc:
+            with run_add_acc.guard as g:
                 g.always()
-            with rule.control() as ctrl:
-                ctrl.enable(step2.ref())
+            with run_add_acc.control() as ctrl:
+                ctrl.enable(add_to_acc.ref())
 
-        with m.proc_rule("run_compute_sum") as rule:
-            with rule.guard as g:
+        with m.proc_rule() as run_compute_sum:
+            with run_compute_sum.guard as g:
                 g.always()
-            with rule.control() as ctrl:
-                ctrl.enable(step3.ref())
+            with run_compute_sum.control() as ctrl:
+                ctrl.enable(compute_sum.ref())
 
-        with m.proc_rule("run_combined") as rule:
-            with rule.guard as g:
+        with m.proc_rule() as run_combined:
+            with run_combined.guard as g:
                 g.always()
-            with rule.control() as ctrl:
-                ctrl.enable(step4.ref())
+            with run_combined.control() as ctrl:
+                ctrl.enable(combined_ops.ref())
 
         # =====================================================================
         # Value methods to read state

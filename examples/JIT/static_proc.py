@@ -71,61 +71,61 @@ def create_static_proc_circuit():
         # =================================================================
         # Data registers
         # =================================================================
-        reg_a = m.instance(reg32, "reg_a", clk=clk, rst=rst)       # Current element from vector A
-        reg_b = m.instance(reg32, "reg_b", clk=clk, rst=rst)       # Current element from vector B
-        reg_product = m.instance(reg32, "reg_product", clk=clk, rst=rst)  # Multiply result
-        reg_accum = m.instance(reg32, "reg_accum", clk=clk, rst=rst)      # Running sum
-        reg_idx = m.instance(reg32, "reg_idx", clk=clk, rst=rst)   # Element index
+        reg_a = m.instance(reg32, clk=clk, rst=rst)       # Current element from vector A
+        reg_b = m.instance(reg32, clk=clk, rst=rst)       # Current element from vector B
+        reg_product = m.instance(reg32, clk=clk, rst=rst)  # Multiply result
+        reg_accum = m.instance(reg32, clk=clk, rst=rst)      # Running sum
+        reg_idx = m.instance(reg32, clk=clk, rst=rst)   # Element index
 
         # Control registers
-        busy = m.instance(reg1, "busy", clk=clk, rst=rst)
-        first_elem = m.instance(reg1, "first_elem", clk=clk, rst=rst)  # Flag for first element
+        busy = m.instance(reg1, clk=clk, rst=rst)
+        first_elem = m.instance(reg1, clk=clk, rst=rst)  # Flag for first element
 
         # =================================================================
         # STATIC STEP 1: load (1 cycle)
         # Demonstrates: basic static_step with fixed latency
         # =================================================================
-        with m.static_step(1, "load_step") as step:
+        with m.static_step(1) as load_step:
             # In a real design, this would read from memory/FIFO
             # Here we just mark that we're processing
-            idx = step.call(reg_idx, "read")
-            next_idx = step.add(idx, step.const(1, 32))
-            step.call(reg_idx, "write", next_idx)
+            idx = reg_idx.read
+            next_idx = load_step.add(idx, load_step.const(1, 32))
+            reg_idx.next = next_idx
 
         # =================================================================
         # STATIC STEP 2: multiply (3 cycles)
         # Demonstrates: multi-cycle static step simulating pipelined multiply
         # In real hardware, this would connect to a pipelined multiplier
         # =================================================================
-        with m.static_step(3, "multiply_step") as step:
-            a = step.call(reg_a, "read")
-            b = step.call(reg_b, "read")
-            product = step.mul(a, b)
-            step.call(reg_product, "write", product)
+        with m.static_step(3) as multiply_step:
+            a = reg_a.read
+            b = reg_b.read
+            product = multiply_step.mul(a, b)
+            reg_product.next = product
 
         # =================================================================
         # STATIC STEP 3: accumulate (1 cycle)
         # Demonstrates: conditional accumulation using static_if
         # =================================================================
-        with m.static_step(1, "accumulate_step") as step:
-            product = step.call(reg_product, "read")
-            accum = step.call(reg_accum, "read")
-            new_accum = step.add(accum, product)
-            step.call(reg_accum, "write", new_accum)
+        with m.static_step(1) as accumulate_step:
+            product = reg_product.read
+            accum = reg_accum.read
+            new_accum = accumulate_step.add(accum, product)
+            reg_accum.next = new_accum
 
         # =================================================================
         # STATIC STEP 4: init_accum (1 cycle)
         # Initializes accumulator to zero on first element
         # =================================================================
-        with m.static_step(1, "init_accum_step") as step:
-            step.call(reg_accum, "write", step.const(0, 32))
-            step.call(first_elem, "write", step.const(0, 1))  # Clear first flag
+        with m.static_step(1) as init_accum_step:
+            reg_accum.next = init_accum_step.const(0, 32)
+            first_elem.next = init_accum_step.const(0, 1)  # Clear first flag
 
         # =================================================================
         # STATIC STEP 5: skip_init (1 cycle)
         # No-op for subsequent elements (padding for static_if balance)
         # =================================================================
-        with m.static_step(1, "skip_init_step") as step:
+        with m.static_step(1) as skip_init_step:
             # Just a delay cycle for static_if balance
             pass
 
@@ -133,9 +133,9 @@ def create_static_proc_circuit():
         # DYNAMIC STEP: finish
         # Demonstrates: dynamic step with explicit done signal
         # =================================================================
-        with m.step("finish_step") as step:
-            step.call(busy, "write", step.const(0, 1))
-            step.done(step.const(1, 1))
+        with m.step() as finish_step:
+            busy.next = finish_step.const(0, 1)
+            finish_step.done(finish_step.const(1, 1))
 
         # =================================================================
         # METHOD: start
@@ -175,16 +175,16 @@ def create_static_proc_circuit():
         # - static_if for conditional with known latencies
         # - seq for sequential composition
         # =================================================================
-        with m.proc_rule("compute") as rule:
-            with rule.guard as g:
-                is_busy = g.call(busy, "read")
+        with m.proc_rule() as compute:
+            with compute.guard as g:
+                is_busy = busy.read
                 g.returns(is_busy)
 
-            with rule.control() as ctrl:
+            with compute.control() as ctrl:
                 # Sequential execution of static steps
                 with ctrl.seq() as seq:
                     # Load initial data
-                    seq.enable(m._steps["load_step"].ref())
+                    seq.enable(load_step.ref())
 
                     # =====================================================
                     # STATIC REPEAT: Process 4 elements
@@ -193,13 +193,13 @@ def create_static_proc_circuit():
                     with seq.static_repeat(4, body_latency=4) as loop:
                         with loop.seq() as inner_seq:
                             # Multiply (3 cycles)
-                            inner_seq.enable(m._steps["multiply_step"].ref())
+                            inner_seq.enable(multiply_step.ref())
 
                             # Accumulate (1 cycle)
-                            inner_seq.enable(m._steps["accumulate_step"].ref())
+                            inner_seq.enable(accumulate_step.ref())
 
                     # Final cleanup
-                    seq.enable(m._steps["finish_step"].ref())
+                    seq.enable(finish_step.ref())
 
         # =================================================================
         # VALUE: get_result

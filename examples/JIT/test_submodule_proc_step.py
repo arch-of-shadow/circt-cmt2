@@ -39,173 +39,6 @@ from circt.pycmt2.simulation import SimulationWorkspace
 from circt.pycmt2.testbench import Testbench
 
 
-def main():
-    clear_stl_registry()
-
-    circuit = Circuit("SubmoduleProcStepTest")
-    reg1_mod = Reg.create(circuit, 1, init=0)
-    reg8_mod = Reg.create(circuit, 8, init=0)
-
-    # ========================================
-    # Submodule with proc_rule
-    # ========================================
-    with jit.module(circuit, "Calculator") as calc_mod:
-        clk = calc_mod.clock()
-        rst = calc_mod.reset()
-
-        input_reg = calc_mod.instance(reg8_mod, "input_reg", clk=clk, rst=rst)
-        result_reg = calc_mod.instance(reg8_mod, "result_reg", clk=clk, rst=rst)
-        busy_reg = calc_mod.instance(reg1_mod, "busy_reg", clk=clk, rst=rst)
-
-        @jit.method(calc_mod)
-        def start(meth, data: UInt[8]) -> None:
-            with meth.guard:
-                meth.returns(meth.eq(busy_reg.read, meth.const(0, 1)))
-            with meth.body:
-                input_reg.write(data)
-                busy_reg.write(meth.const(1, 1))
-
-        @jit.value(calc_mod)
-        def result(val) -> UInt[8]:
-            with val.guard:
-                val.always()
-            with val.body:
-                val.returns(result_reg.read)
-
-        @jit.value(calc_mod)
-        def done(val) -> UInt[1]:
-            with val.guard:
-                val.always()
-            with val.body:
-                val.returns(val.eq(busy_reg.read, val.const(0, 1)))
-
-        # Static step: compute result (doubles input)
-        with calc_mod.static_step(2, "compute") as step:
-            val = step.call(input_reg, "read")
-            result = step.add(val, val)  # input * 2
-            step.call(result_reg, "write", result)
-
-        # Static step: clear busy
-        with calc_mod.static_step(1, "clear_busy") as step:
-            step.call(busy_reg, "write", step.const(0, 1))
-
-        # Proc rule: trigger computation when busy
-        with calc_mod.proc_rule("run_calc") as rule:
-            with rule.guard as g:
-                is_busy = g.call(busy_reg, "read")
-                g.returns(is_busy)
-
-            with rule.control() as ctrl:
-                with ctrl.seq() as seq:
-                    seq.enable(calc_mod._steps["compute"].ref())
-                    seq.enable(calc_mod._steps["clear_busy"].ref())
-
-    # ========================================
-    # Parent module that calls submodule from static step
-    # ========================================
-    with jit.module(circuit, "ParentModule") as parent_mod:
-        clk = parent_mod.clock()
-        rst = parent_mod.reset()
-
-        # State
-        data_reg = parent_mod.instance(reg8_mod, "data_reg", clk=clk, rst=rst)
-        started_reg = parent_mod.instance(reg1_mod, "started_reg", clk=clk, rst=rst)
-        done_reg = parent_mod.instance(reg1_mod, "done_reg", clk=clk, rst=rst)
-        result_reg = parent_mod.instance(reg8_mod, "result_reg", clk=clk, rst=rst)
-
-        # Submodule instance
-        calc = parent_mod.instance(calc_mod, "calc", clk=clk, rst=rst)
-
-        # Static step: call submodule.start() - THIS IS THE KEY TEST
-        # Issue 7 claims this pattern may not work correctly
-        with parent_mod.static_step(1, "trigger_submodule") as step:
-            """
-            This step calls calc.start() which sets calc.busy_reg = 1.
-            This should trigger calc.run_calc proc_rule to fire.
-            """
-            data = step.call(data_reg, "read")
-            step.call(calc, "start", data)
-
-        # Static step: collect result
-        with parent_mod.static_step(1, "collect_result") as step:
-            result = step.call(calc, "result")
-            step.call(result_reg, "write", result)
-            step.call(done_reg, "write", step.const(1, 1))
-
-        @jit.method(parent_mod)
-        def start(meth, data: UInt[8]) -> None:
-            with meth.guard:
-                meth.returns(meth.eq(started_reg.read, meth.const(0, 1)))
-            with meth.body:
-                data_reg.write(data)
-                started_reg.write(meth.const(1, 1))
-                done_reg.write(meth.const(0, 1))
-
-        @jit.value(parent_mod)
-        def result(val) -> UInt[8]:
-            with val.guard:
-                val.always()
-            with val.body:
-                val.returns(result_reg.read)
-
-        @jit.value(parent_mod)
-        def done(val) -> UInt[1]:
-            with val.guard:
-                val.always()
-            with val.body:
-                val.returns(done_reg.read)
-
-        # Static step: no-op wait step
-        with parent_mod.static_step(1, "wait_step") as step:
-            """
-            No-op step used for waiting. Just passes time.
-            """
-            pass  # Nothing to do, just wait one cycle
-
-        # Proc rule: processing pipeline
-        with parent_mod.proc_rule("process") as rule:
-            """
-            When started:
-            1. Trigger submodule (calls calc.start)
-            2. Wait for calc to complete (using while_ with condition function)
-            3. Collect result
-            """
-            with rule.guard as g:
-                is_started = g.call(started_reg, "read")
-                g.returns(is_started)
-
-            with rule.control() as ctrl:
-                with ctrl.seq() as seq:
-                    # Step 1: Trigger submodule
-                    seq.enable(parent_mod._steps["trigger_submodule"].ref())
-
-                    # Step 2: Wait for submodule to complete
-                    # Using while_ with condition function (since submodule completion
-                    # depends on its proc_rule firing)
-                    def wait_for_calc(b):
-                        calc_done = b.call(calc, "done")
-                        not_done = b.eq(calc_done, b.const(0, 1))
-                        return not_done
-
-                    with seq.while_(wait_for_calc) as loop:
-                        loop.enable(parent_mod._steps["wait_step"].ref())
-
-                    # Step 3: Collect result and mark done
-                    seq.enable(parent_mod._steps["collect_result"].ref())
-
-        # Rule: clear started after done
-        with jit.rule(parent_mod, "clear_started") as rule:
-            with rule.guard as g:
-                is_started = g.call(started_reg, "read")
-                is_done = g.call(done_reg, "read")
-                should_clear = g.and_(is_started, is_done)
-                g.returns(should_clear)
-            with rule.body as b:
-                b.call(started_reg, "write", b.const(0, 1))
-
-    return circuit
-
-
 def create_submodule_testbench(circuit):
     """Create testbench using DSL for submodule proc step test.
 
@@ -370,9 +203,9 @@ def create_circuit():
         clk = calc_mod.clock()
         rst = calc_mod.reset()
 
-        input_reg = calc_mod.instance(reg8_mod, "input_reg", clk=clk, rst=rst)
-        result_reg = calc_mod.instance(reg8_mod, "result_reg", clk=clk, rst=rst)
-        busy_reg = calc_mod.instance(reg1_mod, "busy_reg", clk=clk, rst=rst)
+        input_reg = calc_mod.instance(reg8_mod, clk=clk, rst=rst)
+        result_reg = calc_mod.instance(reg8_mod, clk=clk, rst=rst)
+        busy_reg = calc_mod.instance(reg1_mod, clk=clk, rst=rst)
 
         @jit.method(calc_mod)
         def start(meth, data: UInt[8]) -> None:
@@ -397,25 +230,25 @@ def create_circuit():
                 val.returns(val.eq(busy_reg.read, val.const(0, 1)))
 
         # Static step: compute result (doubles input)
-        with calc_mod.static_step(2, "compute") as step:
-            val = step.call(input_reg, "read")
-            result = step.add(val, val)  # input * 2
-            step.call(result_reg, "write", result)
+        with calc_mod.static_step(2) as compute:
+            val = input_reg.read
+            result = compute.add(val, val)  # input * 2
+            result_reg.next = result
 
         # Static step: clear busy
-        with calc_mod.static_step(1, "clear_busy") as step:
-            step.call(busy_reg, "write", step.const(0, 1))
+        with calc_mod.static_step(1) as clear_busy:
+            busy_reg.next = clear_busy.const(0, 1)
 
         # Proc rule: trigger computation when busy
-        with calc_mod.proc_rule("run_calc") as rule:
-            with rule.guard as g:
-                is_busy = g.call(busy_reg, "read")
+        with calc_mod.proc_rule() as run_calc:
+            with run_calc.guard as g:
+                is_busy = busy_reg.read
                 g.returns(is_busy)
 
-            with rule.control() as ctrl:
+            with run_calc.control() as ctrl:
                 with ctrl.seq() as seq:
-                    seq.enable(calc_mod._steps["compute"].ref())
-                    seq.enable(calc_mod._steps["clear_busy"].ref())
+                    seq.enable(compute.ref())
+                    seq.enable(clear_busy.ref())
 
     # ========================================
     # Parent module that calls submodule from static step
@@ -425,29 +258,29 @@ def create_circuit():
         rst = parent_mod.reset()
 
         # State
-        data_reg = parent_mod.instance(reg8_mod, "data_reg", clk=clk, rst=rst)
-        started_reg = parent_mod.instance(reg1_mod, "started_reg", clk=clk, rst=rst)
-        done_reg = parent_mod.instance(reg1_mod, "done_reg", clk=clk, rst=rst)
-        result_reg = parent_mod.instance(reg8_mod, "result_reg", clk=clk, rst=rst)
+        data_reg = parent_mod.instance(reg8_mod, clk=clk, rst=rst)
+        started_reg = parent_mod.instance(reg1_mod, clk=clk, rst=rst)
+        done_reg = parent_mod.instance(reg1_mod, clk=clk, rst=rst)
+        result_reg = parent_mod.instance(reg8_mod, clk=clk, rst=rst)
 
         # Submodule instance
-        calc = parent_mod.instance(calc_mod, "calc", clk=clk, rst=rst)
+        calc = parent_mod.instance(calc_mod, clk=clk, rst=rst)
 
         # Static step: call submodule.start() - THIS IS THE KEY TEST
         # Issue 7 claims this pattern may not work correctly
-        with parent_mod.static_step(1, "trigger_submodule") as step:
+        with parent_mod.static_step(1) as trigger_submodule:
             """
             This step calls calc.start() which sets calc.busy_reg = 1.
             This should trigger calc.run_calc proc_rule to fire.
             """
-            data = step.call(data_reg, "read")
-            step.call(calc, "start", data)
+            data = data_reg.read
+            calc.start(data)
 
         # Static step: collect result
-        with parent_mod.static_step(1, "collect_result") as step:
-            result = step.call(calc, "result")
-            step.call(result_reg, "write", result)
-            step.call(done_reg, "write", step.const(1, 1))
+        with parent_mod.static_step(1) as collect_result:
+            result = calc.result
+            result_reg.next = result
+            done_reg.next = collect_result.const(1, 1)
 
         @jit.method(parent_mod)
         def start(meth, data: UInt[8]) -> None:
@@ -473,52 +306,52 @@ def create_circuit():
                 val.returns(done_reg.read)
 
         # Static step: no-op wait step
-        with parent_mod.static_step(1, "wait_step") as step:
+        with parent_mod.static_step(1) as wait_step:
             """
             No-op step used for waiting. Just passes time.
             """
             pass  # Nothing to do, just wait one cycle
 
         # Proc rule: processing pipeline
-        with parent_mod.proc_rule("process") as rule:
+        with parent_mod.proc_rule() as process:
             """
             When started:
             1. Trigger submodule (calls calc.start)
             2. Wait for calc to complete (using while_ with condition function)
             3. Collect result
             """
-            with rule.guard as g:
-                is_started = g.call(started_reg, "read")
+            with process.guard as g:
+                is_started = started_reg.read
                 g.returns(is_started)
 
-            with rule.control() as ctrl:
+            with process.control() as ctrl:
                 with ctrl.seq() as seq:
                     # Step 1: Trigger submodule
-                    seq.enable(parent_mod._steps["trigger_submodule"].ref())
+                    seq.enable(trigger_submodule.ref())
 
                     # Step 2: Wait for submodule to complete
                     # Using while_ with condition function (since submodule completion
                     # depends on its proc_rule firing)
                     def wait_for_calc(b):
-                        calc_done = b.call(calc, "done")
+                        calc_done = b.call(calc.instance, calc.instance.done)
                         not_done = b.eq(calc_done, b.const(0, 1))
                         return not_done
 
                     with seq.while_(wait_for_calc) as loop:
-                        loop.enable(parent_mod._steps["wait_step"].ref())
+                        loop.enable(wait_step.ref())
 
                     # Step 3: Collect result and mark done
-                    seq.enable(parent_mod._steps["collect_result"].ref())
+                    seq.enable(collect_result.ref())
 
         # Rule: clear started after done
-        with jit.rule(parent_mod, "clear_started") as rule:
-            with rule.guard as g:
-                is_started = g.call(started_reg, "read")
-                is_done = g.call(done_reg, "read")
+        with jit.rule(parent_mod) as clear_started:
+            with clear_started.guard as g:
+                is_started = started_reg.read
+                is_done = done_reg.read
                 should_clear = g.and_(is_started, is_done)
                 g.returns(should_clear)
-            with rule.body as b:
-                b.call(started_reg, "write", b.const(0, 1))
+            with clear_started.body as b:
+                started_reg.next = b.const(0, 1)
 
     return circuit
 

@@ -27,23 +27,14 @@ Expected behavior:
 
 Usage:
     cd circt-cmt2/build
-    PYTHONPATH=tools/circt/python_packages/circt_core python3 \
-        ../examples/JIT/proc_pipeline.py
+    PYTHONPATH=tools/circt/python_packages/circt_core:../python \\
+      python3 ../examples/JIT/proc_pipeline.py
 """
 
 import cmt2.jit as jit
 
-import os
-import sys
 import shutil
 from pathlib import Path
-
-# Add circt Python packages to path
-build_dir = os.path.dirname(os.path.abspath(__file__))
-while build_dir and not os.path.exists(os.path.join(build_dir, "build")):
-    build_dir = os.path.dirname(build_dir)
-if build_dir:
-    sys.path.insert(0, os.path.join(build_dir, "build/tools/circt/python_packages/circt_core"))
 
 from circt.pycmt2.circuit import Circuit
 from circt.pycmt2.stl import Reg, FIFO1Push, clear_stl_registry
@@ -79,7 +70,7 @@ def create_pipeline(circuit: Circuit, width: int, num_stages: int, name: str = "
         # Instantiate FIFOs
         fifos = []
         for i in range(num_stages):
-            fifo = pipeline.instance(fifo_mod, f"stage_{i}", clk=clk, rst=rst)
+            fifo = pipeline.instance(fifo_mod, clk=clk, rst=rst, alias=f"stage_{i}")
             fifos.append(fifo)
 
         @jit.value(pipeline)
@@ -113,16 +104,16 @@ def create_pipeline(circuit: Circuit, width: int, num_stages: int, name: str = "
         # Transfer rules between stages
         transfer_rules = []
         for i in range(num_stages - 1):
-            with jit.rule(pipeline, f"transfer_{i}") as transfer:
+            with jit.rule(pipeline, alias=f"transfer_{i}") as transfer:
                 with transfer.guard as g:
-                    src_has_data = g.call(fifos[i], "full")
-                    dst_full = g.call(fifos[i+1], "full")
+                    src_has_data = fifos[i].full
+                    dst_full = fifos[i + 1].full
                     dst_not_full = g.not_(dst_full)
                     can_transfer = g.and_(src_has_data, dst_not_full)
                     g.returns(can_transfer)
                 with transfer.body as body:
-                    data = body.call(fifos[i], "deq")
-                    body.call(fifos[i+1], "enq", data)
+                    data = fifos[i].deq()
+                    fifos[i + 1].enq(data)
                 transfer_rules.append(transfer)
 
         # Precedence: enq < deq < transfers
@@ -155,14 +146,14 @@ def create_test_harness(circuit: Circuit, pipeline_mod, width: int, num_stages: 
         rst = harness.reset("rst")
 
         # Registers for state
-        in_counter = harness.instance(reg_mod, "in_counter", clk=clk, rst=rst)  # Value to push
-        out_sum = harness.instance(reg_mod, "out_sum", clk=clk, rst=rst)        # Accumulated sum
-        push_cnt = harness.instance(reg_mod, "push_cnt", clk=clk, rst=rst)      # Push count
-        pop_cnt = harness.instance(reg_mod, "pop_cnt", clk=clk, rst=rst)        # Pop count
-        done_reg = harness.instance(reg1_mod, "done_reg", clk=clk, rst=rst)
+        in_counter = harness.instance(reg_mod, clk=clk, rst=rst)  # Value to push
+        out_sum = harness.instance(reg_mod, clk=clk, rst=rst)        # Accumulated sum
+        push_cnt = harness.instance(reg_mod, clk=clk, rst=rst)      # Push count
+        pop_cnt = harness.instance(reg_mod, clk=clk, rst=rst)        # Pop count
+        done_reg = harness.instance(reg1_mod, clk=clk, rst=rst)
 
         # Pipeline instance
-        pipe = harness.instance(pipeline_mod, "pipe", clk=clk, rst=rst)
+        pipe = harness.instance(pipeline_mod, clk=clk, rst=rst)
 
         @jit.value(harness)
         def done(done_val) -> UInt[1]:
@@ -178,51 +169,69 @@ def create_test_harness(circuit: Circuit, pipeline_mod, width: int, num_stages: 
             with result_val.body:
                 result_val.returns(out_sum.read)
 
+        @jit.value(harness)
+        def push_count(val) -> UInt[width]:
+            with val.guard:
+                val.always()
+            with val.body:
+                val.returns(push_cnt.read)
+
+        @jit.value(harness)
+        def pop_count(val) -> UInt[width]:
+            with val.guard:
+                val.always()
+            with val.body:
+                val.returns(pop_cnt.read)
+
+        @jit.value(harness)
+        def next_input(val) -> UInt[width]:
+            with val.guard:
+                val.always()
+            with val.body:
+                val.returns(in_counter.read)
+
         # ==== STATIC STEPS (latency=1) for static_repeat ====
-        # Using static_step means FSM advances immediately without waiting for done signal
-        # This achieves single-cycle iteration in static_repeat
+        #
+        # `proc.static_repeat` relies on deterministic step latency. Use
+        # `static_step(latency=1)` to get 1-cycle iterations without `done`.
 
-        # Static step: push_static - enqueue with known latency=1
-        with harness.static_step(1, "push_static") as push_static:
-            cnt = push_static.call(in_counter, "read")
-            push_static.call(pipe, "enq", cnt)
+        with harness.static_step(1) as push_static:
+            cnt = in_counter.read
+            pipe.enq(cnt)
             next_cnt = push_static.add(cnt, push_static.const(1, width))
-            push_static.call(in_counter, "write", push_static.bits(next_cnt, width-1, 0))
-            pcnt = push_static.call(push_cnt, "read")
-            push_static.call(push_cnt, "write", push_static.bits(push_static.add(pcnt, push_static.const(1, width)), width-1, 0))
+            in_counter.next = push_static.bits(next_cnt, width - 1, 0)
+            pcnt = push_cnt.read
+            push_cnt.next = push_static.bits(
+                push_static.add(pcnt, push_static.const(1, width)), width - 1, 0
+            )
 
-        # Static step: wait_static - do nothing for one cycle (known latency)
-        with harness.static_step(1, "wait_static") as wait_static:
-            # No-op: just advance FSM after 1 cycle
-            _ = wait_static.const(0, 1)  # Dummy operation to ensure non-empty body
-
-        # ==== DYNAMIC STEPS for while loop ====
-        # Dynamic steps use done signals, needed for loops with conditions
+        with harness.static_step(1) as wait_static:
+            _ = wait_static.const(0, 1)  # keep non-empty
 
         # Dynamic step: push_item - for while loop
-        with harness.step("push_item") as push_step:
-            cnt = push_step.call(in_counter, "read")
-            push_step.call(pipe, "enq", cnt)
-            next_cnt = push_step.add(cnt, push_step.const(1, width))
-            push_step.call(in_counter, "write", push_step.bits(next_cnt, width-1, 0))
-            pcnt = push_step.call(push_cnt, "read")
-            push_step.call(push_cnt, "write", push_step.bits(push_step.add(pcnt, push_step.const(1, width)), width-1, 0))
-            push_step.done(push_step.const(1, 1))
+        with harness.step() as push_item:
+            cnt = in_counter.read
+            pipe.enq(cnt)
+            next_cnt = push_item.add(cnt, push_item.const(1, width))
+            in_counter.next = push_item.bits(next_cnt, width - 1, 0)
+            pcnt = push_cnt.read
+            push_cnt.next = push_item.bits(push_item.add(pcnt, push_item.const(1, width)), width - 1, 0)
+            push_item.done(push_item.const(1, 1))
 
         # Dynamic step: pop_item - for while loop
-        with harness.step("pop_item") as pop_step:
-            data = pop_step.call(pipe, "deq")
-            sum_val = pop_step.call(out_sum, "read")
-            new_sum = pop_step.add(sum_val, data)
-            pop_step.call(out_sum, "write", pop_step.bits(new_sum, width-1, 0))
-            pcnt = pop_step.call(pop_cnt, "read")
-            pop_step.call(pop_cnt, "write", pop_step.bits(pop_step.add(pcnt, pop_step.const(1, width)), width-1, 0))
-            pop_step.done(pop_step.const(1, 1))
+        with harness.step() as pop_item:
+            data = pipe.deq()
+            sum_val = out_sum.read
+            new_sum = pop_item.add(sum_val, data)
+            out_sum.next = pop_item.bits(new_sum, width - 1, 0)
+            pcnt = pop_cnt.read
+            pop_cnt.next = pop_item.bits(pop_item.add(pcnt, pop_item.const(1, width)), width - 1, 0)
+            pop_item.done(pop_item.const(1, 1))
 
         # Step: mark_done
-        with harness.step("mark_done") as done_step:
-            done_step.call(done_reg, "write", done_step.const(1, 1))
-            done_step.done(done_step.const(1, 1))
+        with harness.step() as mark_done:
+            done_reg.next = mark_done.const(1, 1)
+            mark_done.done(mark_done.const(1, 1))
 
         # Procedural rule: main with parallel push/pop
         # Structure:
@@ -233,11 +242,9 @@ def create_test_harness(circuit: Circuit, pipeline_mod, width: int, num_stages: 
         # Key insight:
         # - static_repeat uses static_step (latency=1) for single-cycle iteration
         # - while uses dynamic_step (with done signal) because condition needs re-evaluation
-        with harness.proc_rule("main") as main:
+        with harness.proc_rule() as main:
             with main.guard as g:
-                d = g.call(done_reg, "read")
-                not_done = g.not_(d)
-                g.returns(not_done)
+                g.returns(g.not_(done_reg.read))
 
             with main.control() as ctrl:
                 with ctrl.seq() as seq:
@@ -247,46 +254,52 @@ def create_test_harness(circuit: Circuit, pipeline_mod, width: int, num_stages: 
                         with par.seq() as push_seq:
                             # Phase 1: Prime the pipeline with num_stages items (STATIC - 1 cycle each)
                             with push_seq.static_repeat(num_stages) as prime:
-                                prime.enable(push_static.ref())  # Static step for best performance
+                                prime.enable(push_static.ref())
 
                             # Phase 2: Continue pushing while push_cnt < num_items (DYNAMIC)
                             def push_cond(b):
-                                pcnt = b.call(push_cnt, "read")
+                                pcnt = b.call(push_cnt.instance, push_cnt.instance.read)
                                 limit = b.const(num_items, width)
                                 return b.lt(pcnt, limit)
 
                             with push_seq.while_(push_cond) as push_loop:
-                                push_loop.enable(push_step.ref())  # Dynamic step for condition re-eval
+                                push_loop.enable(push_item.ref())  # Dynamic step for condition re-eval
 
                         # Pop branch: static_repeat to wait for data, then while to drain
                         with par.seq() as pop_seq:
                             # Phase 1: Wait for pipeline to fill (STATIC - 1 cycle each)
                             with pop_seq.static_repeat(num_stages) as wait:
-                                wait.enable(wait_static.ref())  # Static step for best performance
+                                wait.enable(wait_static.ref())
 
                             # Phase 2: Drain the pipeline while pop_cnt < num_items (DYNAMIC)
                             def pop_cond(b):
-                                pcnt = b.call(pop_cnt, "read")
+                                pcnt = b.call(pop_cnt.instance, pop_cnt.instance.read)
                                 limit = b.const(num_items, width)
                                 return b.lt(pcnt, limit)
 
                             with pop_seq.while_(pop_cond) as pop_loop:
-                                pop_loop.enable(pop_step.ref())  # Dynamic step for condition re-eval
+                                pop_loop.enable(pop_item.ref())  # Dynamic step for condition re-eval
 
                     # After both branches complete, mark done
-                    seq.enable(done_step.ref())
+                    seq.enable(mark_done.ref())
 
         harness.precedence(done._cmt2_ref, result._cmt2_ref, main.ref())
 
     return harness
 
 
-def create_pipeline_testbench(circuit, expected_sum: int):
+def create_pipeline_testbench(
+    circuit,
+    *,
+    expected_sum: int,
+    num_stages: int,
+    num_items: int,
+):
     """Create testbench using DSL for pipeline test.
 
-    NOTE: This pipeline example has a known timing issue where the complex
-    proc.par with nested static_repeat + while loops takes a very long time.
-    The testbench uses observation rather than strict timing verification.
+    This testbench checks both:
+    - Golden values (final sum, counters)
+    - Cycle-level behavior (event-driven invariants)
     """
     tb = Testbench(circuit, auto_debug_ports=True)
 
@@ -299,47 +312,69 @@ def create_pipeline_testbench(circuit, expected_sum: int):
         seq.wait(1)
         seq.expect("done_res0", 0, "Should not be done after reset")
         seq.expect("result_res0", 0, "Result should be 0 after reset")
+        seq.expect("push_count_res0", 0, "push_count should be 0 after reset")
+        seq.expect("pop_count_res0", 0, "pop_count should be 0 after reset")
+        seq.expect("next_input_res0", 0, "next_input should be 0 after reset")
         seq.print("Reset test passed - done=0, result=0")
 
     # =========================================================================
-    # Test Sequence: Pipeline Operation Observation
+    # Test Sequence: Cycle-level Throughput + Golden Result
     # =========================================================================
-    with tb.sequence("test_pipeline_observe") as seq:
+    with tb.sequence("test_pipeline") as seq:
         seq.comment("=" * 60)
-        seq.comment("Test: Observe pipeline operation (proc.par)")
+        seq.comment("Test: Verify pipeline (proc.par) behavior")
         seq.comment("=" * 60)
         seq.comment(f"Expected sum when done: {expected_sum}")
         seq.reset(10)
 
-        seq.record_cycle("start")
+        # ORAAT semantics + explicit transfer rules mean we cannot assume
+        # push/pop/transfer happen every cycle. Instead, validate *event-driven*
+        # invariants: when counters advance, dependent signals match.
+        #
+        # This still checks cycle-level behavior, but it is robust to scheduling
+        # and arbitration details.
 
-        # Run for a fixed number of cycles and observe progress
-        # (Pipeline may not complete in this time due to complex FSM)
-        seq.comment("Observing pipeline for 100 cycles...")
-        for i in range(10):
-            seq.wait(10)
-            seq.print("result=", "result_res0")
-            seq.print("done=", "done_res0")
+        seq.expect("done_res0", 0, "done should start low")
+        seq.expect("result_res0", 0, "result should start at 0")
+        seq.expect("push_count_res0", 0, "push_count should start at 0")
+        seq.expect("pop_count_res0", 0, "pop_count should start at 0")
+        seq.expect("next_input_res0", 0, "next_input should start at 0")
 
-        seq.record_cycle("observe_end")
-        seq.print_cycle_diff("start", "observe_end", "Observation period")
-        seq.print("Pipeline observation completed")
+        # Track pop_count from reset onward. When pop_count reaches i, result
+        # should equal sum(0..i-1).
+        running_sum = 0
+        for i in range(1, num_items + 1):
+            running_sum += (i - 1)
+            seq.wait_condition(f"dut->pop_count_res0 == {i}", timeout=4000)
+            seq.expect("result_res0", running_sum, f"result should be sum(0..{i-1})")
 
-    # =========================================================================
-    # Test Sequence: Debug Port Verification (Brief)
-    # =========================================================================
-    with tb.sequence("test_debug_brief") as seq:
-        seq.comment("=" * 60)
-        seq.comment("Debug Port Verification (brief)")
-        seq.comment("=" * 60)
-        seq.reset(10)
+        # Completion: done asserts after both branches complete + mark_done runs.
+        seq.wait_condition("dut->done_res0 == 1", timeout=4000)
+        seq.expect("push_count_res0", num_items, "push_count should reach num_items")
+        seq.expect("pop_count_res0", num_items, "pop_count should reach num_items")
+        seq.expect("result_res0", expected_sum, "Final sum should match golden value")
+        seq.expect("next_input_res0", num_items, "next_input should equal num_items after final push")
 
-        # Just check debug ports are accessible
-        seq.wait(5)
-        seq.print_rule_status("main_state0")
-        seq.print("Debug ports accessible")
+        # Stability after completion.
+        seq.wait(1)
+        seq.expect("done_res0", 1, "done should remain asserted")
+        seq.expect("result_res0", expected_sum, "result should remain stable after done")
 
     return tb
+
+
+@jit.elaborate
+def create_pipeline_circuit(
+    *,
+    width: int,
+    num_stages: int,
+    num_items: int,
+):
+    clear_stl_registry()
+    circuit = Circuit("ProcPipelineTest")
+    pipeline_mod = create_pipeline(circuit, width, num_stages)
+    harness_mod = create_test_harness(circuit, pipeline_mod, width, num_stages, num_items)
+    return circuit, jit.handles(pipeline=pipeline_mod, harness=harness_mod)
 
 
 def main():
@@ -370,18 +405,14 @@ This example demonstrates:
     if workspace_dir.exists():
         shutil.rmtree(workspace_dir)
 
-    clear_stl_registry()
-
     print(f"1. Creating {num_stages}-stage pipeline...")
-    circuit = Circuit("ProcPipelineTest")
-    pipeline_mod = create_pipeline(circuit, width, num_stages)
-    print(f"   Pipeline module: {pipeline_mod.name}")
+    circuit, h = create_pipeline_circuit(width=width, num_stages=num_stages, num_items=num_items)
+    print(f"   Pipeline module: {h.pipeline.name}")
 
     print(f"\n2. Creating test harness with parallel push/pop (proc.par)...")
     print(f"   - Push branch: static_repeat({num_stages}) + while(cnt < {num_items})")
     print(f"   - Pop branch:  static_repeat({num_stages}) + while(cnt < {num_items})")
-    harness_mod = create_test_harness(circuit, pipeline_mod, width, num_stages, num_items)
-    print(f"   Test harness module: {harness_mod.name}")
+    print(f"   Test harness module: {h.harness.name}")
 
     print("\n3. Emitting MLIR...")
     mlir = circuit.emit_mlir()
@@ -410,14 +441,19 @@ This example demonstrates:
 
     # Create testbench using DSL
     print("\n5. Creating testbench using Testbench DSL...")
-    tb = create_pipeline_testbench(circuit, expected_sum)
+    tb = create_pipeline_testbench(
+        circuit,
+        expected_sum=expected_sum,
+        num_stages=num_stages,
+        num_items=num_items,
+    )
     print(f"   Test sequences: {len(tb._sequences)}")
     for seq in tb._sequences:
         print(f"      - {seq.name}: {len(seq._ops)} operations")
 
     # Create simulation workspace with debug ports
     print("\n6. Setting up simulation workspace with debug_ports=True...")
-    ws = SimulationWorkspace(circuit, workspace_dir, debug_ports=True)
+    ws = SimulationWorkspace(circuit, workspace_dir, debug_ports=True, use_circt_opt=True)
 
     # Generate workspace with testbench
     ws.generate_with_testbench(tb)
@@ -450,13 +486,11 @@ This example demonstrates:
     print(f"   Workspace: {workspace_dir}")
     print(f"   Expected result: {expected_sum}")
     print(f"   Waveforms: {workspace_dir / 'waves' / 'TestHarness.vcd'}")
-    print("\n   Status: TESTS COMPLETED (observation mode)")
-    print("   NOTE: This pipeline has complex proc.par with nested control flow.")
-    print("   Full functional verification may require longer simulation runs.")
+    print("\nE2E Simulation PASSED!")
     print("=" * 70)
 
     return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    raise SystemExit(main())

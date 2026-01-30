@@ -91,27 +91,27 @@ def create_packet_processor():
         # =====================================================================
         # Registers for state tracking and statistics
         # =====================================================================
-        packet_count = mod.instance(Reg.create(circuit, 16), "packet_count", clk=clk, rst=rst)
-        checksum_acc = mod.instance(Reg.create(circuit, 32), "checksum_acc", clk=clk, rst=rst)
-        result_reg = mod.instance(Reg.create(circuit, 32), "result_reg", clk=clk, rst=rst)
-        status_reg = mod.instance(Reg.create(circuit, 8), "status_reg", clk=clk, rst=rst)
+        packet_count = mod.instance(Reg.create(circuit, 16), clk=clk, rst=rst)
+        checksum_acc = mod.instance(Reg.create(circuit, 32), clk=clk, rst=rst)
+        result_reg = mod.instance(Reg.create(circuit, 32), clk=clk, rst=rst)
+        status_reg = mod.instance(Reg.create(circuit, 8), clk=clk, rst=rst)
 
         # =====================================================================
         # Static steps for multi-cycle operations
         # =====================================================================
-        with mod.static_step(1, "parse_header"):
+        with mod.static_step(1) as parse_header:
             """Parse packet header fields."""
             pass
 
-        with mod.static_step(1, "compute_checksum_step"):
+        with mod.static_step(1) as compute_checksum_step:
             """One iteration of checksum computation."""
             pass
 
-        with mod.static_step(2, "encrypt_round"):
+        with mod.static_step(2) as encrypt_round:
             """One round of simple XOR encryption."""
             pass
 
-        with mod.static_step(1, "aggregate_step"):
+        with mod.static_step(1) as aggregate_step:
             """Aggregate results from parallel paths."""
             pass
 

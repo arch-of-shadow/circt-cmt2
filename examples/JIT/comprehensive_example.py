@@ -134,27 +134,29 @@ def create_comprehensive_example():
         rst = mag_mod.reset()
 
         # Internal state
-        input_reg = mag_mod.instance(reg16_mod, "input_reg", clk=clk, rst=rst)
-        result_reg = mag_mod.instance(reg16_mod, "result_reg", clk=clk, rst=rst)
-        busy_flag = mag_mod.instance(reg1_mod, "busy", clk=clk, rst=rst)
+        input_reg = mag_mod.instance(reg16_mod, clk=clk, rst=rst)
+        result_reg = mag_mod.instance(reg16_mod, clk=clk, rst=rst)
+        busy_flag = mag_mod.instance(reg1_mod, clk=clk, rst=rst)
 
         # Static step: 2-cycle magnitude calculation
-        with mag_mod.static_step(2, "calc_magnitude") as step:
+        with mag_mod.static_step(2) as calc_magnitude:
             """
             Static step with 2-cycle latency.
             Calculates iteration count for slow path based on data value.
             """
-            val = step.call(input_reg, "read")
+            val = input_reg.read
 
             # Use lower 2 bits + 1 to get iteration count (1-4 iterations)
-            low_bits = step.bits(val, 1, 0)
-            magnitude = step.add(step.pad(low_bits, 16), step.const(1, 16))
+            low_bits = calc_magnitude.bits(val, 1, 0)
+            magnitude = calc_magnitude.add(
+                calc_magnitude.pad(low_bits, 16), calc_magnitude.const(1, 16)
+            )
 
-            step.call(result_reg, "write", magnitude)
+            result_reg.next = magnitude
 
         # Static step: clear busy flag
-        with mag_mod.static_step(1, "clear_busy_step") as step:
-            step.call(busy_flag, "write", step.const(0, 1))
+        with mag_mod.static_step(1) as clear_busy_step:
+            busy_flag.next = clear_busy_step.const(0, 1)
 
         @jit.method(mag_mod)
         def start(meth, data: UInt[16]) -> None:
@@ -179,19 +181,19 @@ def create_comprehensive_example():
                 val.returns(val.eq(busy_flag.read, val.const(0, 1)))
 
         # Proc rule: trigger calculation when busy
-        with mag_mod.proc_rule("run_calc") as rule:
+        with mag_mod.proc_rule() as run_calc:
             """
             This proc_rule fires when busy_flag is set by start().
             Executes the magnitude calculation and clears busy.
             """
-            with rule.guard as g:
-                is_busy = g.call(busy_flag, "read")
+            with run_calc.guard as g:
+                is_busy = busy_flag.read
                 g.returns(is_busy)
 
-            with rule.control() as ctrl:
+            with run_calc.control() as ctrl:
                 with ctrl.seq() as seq:
-                    seq.enable(mag_mod._steps["calc_magnitude"].ref())
-                    seq.enable(mag_mod._steps["clear_busy_step"].ref())
+                    seq.enable(calc_magnitude.ref())
+                    seq.enable(clear_busy_step.ref())
 
     # =========================================================================
     # Part 3: Accumulator Submodule with while_ loop
@@ -209,57 +211,57 @@ def create_comprehensive_example():
         rst = acc_mod.reset()
 
         # State
-        accumulator = acc_mod.instance(reg32_mod, "acc", clk=clk, rst=rst)
-        counter = acc_mod.instance(reg16_mod, "counter", clk=clk, rst=rst)
-        target = acc_mod.instance(reg16_mod, "target", clk=clk, rst=rst)
-        increment = acc_mod.instance(reg16_mod, "increment", clk=clk, rst=rst)
-        running = acc_mod.instance(reg1_mod, "running", clk=clk, rst=rst)
+        accumulator = acc_mod.instance(reg32_mod, clk=clk, rst=rst)
+        counter = acc_mod.instance(reg16_mod, clk=clk, rst=rst)
+        target = acc_mod.instance(reg16_mod, clk=clk, rst=rst)
+        increment = acc_mod.instance(reg16_mod, clk=clk, rst=rst)
+        running = acc_mod.instance(reg1_mod, clk=clk, rst=rst)
 
         # Static step: single accumulation iteration
-        with acc_mod.static_step(1, "accumulate_step") as step:
+        with acc_mod.static_step(1) as accumulate_step:
             """
             One iteration: acc += increment, counter++
             """
-            acc_val = step.call(accumulator, "read")
-            inc_val = step.call(increment, "read")
-            cnt_val = step.call(counter, "read")
+            acc_val = accumulator.read
+            inc_val = increment.read
+            cnt_val = counter.read
 
             # Accumulate
-            inc_extended = step.pad(inc_val, 32)
-            new_acc = step.add(acc_val, inc_extended)
-            step.call(accumulator, "write", new_acc)
+            inc_extended = accumulate_step.pad(inc_val, 32)
+            new_acc = accumulate_step.add(acc_val, inc_extended)
+            accumulator.next = new_acc
 
             # Increment counter
-            new_cnt = step.add(cnt_val, step.const(1, 16))
-            step.call(counter, "write", new_cnt)
+            new_cnt = accumulate_step.add(cnt_val, accumulate_step.const(1, 16))
+            counter.next = accumulate_step.bits(new_cnt, 15, 0)
 
         # Static step: clear running flag
-        with acc_mod.static_step(1, "clear_running") as step:
-            step.call(running, "write", step.const(0, 1))
+        with acc_mod.static_step(1) as clear_running:
+            running.next = clear_running.const(0, 1)
 
         # Proc rule: iterative accumulation with while loop
-        with acc_mod.proc_rule("run_accumulation") as rule:
+        with acc_mod.proc_rule() as run_accumulation:
             """
             Procedural rule using while loop for iterative computation.
             Demonstrates: while_ with condition function, enable, seq
             """
-            with rule.guard as g:
-                is_running = g.call(running, "read")
+            with run_accumulation.guard as g:
+                is_running = running.read
                 g.returns(is_running)
 
-            with rule.control() as ctrl:
+            with run_accumulation.control() as ctrl:
                 with ctrl.seq() as seq:
                     # While counter < target (using condition function)
                     def loop_condition(b):
-                        cnt = b.call(counter, "read")
-                        tgt = b.call(target, "read")
+                        cnt = b.call(counter.instance, counter.instance.read)
+                        tgt = b.call(target.instance, target.instance.read)
                         return b.lt(cnt, tgt)
 
                     with seq.while_(loop_condition) as loop:
-                        loop.enable(acc_mod._steps["accumulate_step"].ref())
+                        loop.enable(accumulate_step.ref())
 
                     # Clear running after loop completes
-                    seq.enable(acc_mod._steps["clear_running"].ref())
+                    seq.enable(clear_running.ref())
 
         @jit.method(acc_mod)
         def start(meth, iterations: UInt[16], inc_value: UInt[16]) -> None:
@@ -308,23 +310,23 @@ def create_comprehensive_example():
         # ---------------------------------------------------------------------
 
         # Input FIFO for buffering
-        input_fifo = main_mod.instance(fifo_mod, "input_fifo", clk=clk, rst=rst)
+        input_fifo = main_mod.instance(fifo_mod, clk=clk, rst=rst)
 
         # Processing registers
-        even_flag = main_mod.instance(reg1_mod, "even_flag", clk=clk, rst=rst)
-        magnitude_reg = main_mod.instance(reg16_mod, "magnitude", clk=clk, rst=rst)
+        even_flag = main_mod.instance(reg1_mod, clk=clk, rst=rst)
+        magnitude_reg = main_mod.instance(reg16_mod, clk=clk, rst=rst)
 
         # Result storage
-        result_reg = main_mod.instance(reg32_mod, "result", clk=clk, rst=rst)
-        valid_reg = main_mod.instance(reg1_mod, "valid", clk=clk, rst=rst)
+        result_reg = main_mod.instance(reg32_mod, clk=clk, rst=rst)
+        valid_reg = main_mod.instance(reg1_mod, clk=clk, rst=rst)
 
         # Submodule instances - THESE WILL ACTUALLY BE USED
-        mag_calc = main_mod.instance(mag_mod, "mag_calc", clk=clk, rst=rst)
-        accumulator = main_mod.instance(acc_mod, "accumulator", clk=clk, rst=rst)
+        mag_calc = main_mod.instance(mag_mod, clk=clk, rst=rst)
+        accumulator = main_mod.instance(acc_mod, clk=clk, rst=rst)
 
         # State for pipeline control
-        pipeline_stage = main_mod.instance(reg16_mod, "stage", clk=clk, rst=rst)
-        current_data = main_mod.instance(reg16_mod, "current_data", clk=clk, rst=rst)
+        pipeline_stage = main_mod.instance(reg16_mod, clk=clk, rst=rst)
+        current_data = main_mod.instance(reg16_mod, clk=clk, rst=rst)
 
         # ---------------------------------------------------------------------
         # Method: Enqueue data to FIFO
@@ -342,92 +344,94 @@ def create_comprehensive_example():
         # ---------------------------------------------------------------------
 
         # Dequeue from FIFO
-        with main_mod.static_step(1, "dequeue_and_start") as step:
-            data = step.call(input_fifo, "deq")
-            step.call(current_data, "write", data)
-            step.call(valid_reg, "write", step.const(0, 1))
-            step.call(pipeline_stage, "write", step.const(1, 16))
+        with main_mod.static_step(1) as dequeue_and_start:
+            data = input_fifo.deq()
+            current_data.next = data
+            valid_reg.next = dequeue_and_start.const(0, 1)
+            pipeline_stage.next = dequeue_and_start.const(1, 16)
 
         # Check even/odd
-        with main_mod.static_step(1, "check_even_odd") as step:
-            data = step.call(current_data, "read")
-            is_even = step.eq(step.bit(data, 0), step.const(0, 1))
-            step.call(even_flag, "write", is_even)
+        with main_mod.static_step(1) as check_even_odd:
+            data = current_data.read
+            is_even = check_even_odd.eq(check_even_odd.bit(data, 0), check_even_odd.const(0, 1))
+            even_flag.next = is_even
 
         # Start magnitude calculation submodule
-        with main_mod.static_step(1, "start_mag_calc") as step:
-            data = step.call(current_data, "read")
-            step.call(mag_calc, "start", data)
+        with main_mod.static_step(1) as start_mag_calc:
+            data = current_data.read
+            mag_calc.start(data)
 
         # Wait step (no-op, for while loops)
-        with main_mod.static_step(1, "wait_step") as step:
+        with main_mod.static_step(1) as wait_step:
             pass
 
         # Inline magnitude calculation: magnitude = (data & 3) + 1
-        with main_mod.static_step(1, "calc_magnitude_inline") as step:
-            data = step.call(current_data, "read")
-            low_bits = step.bits(data, 1, 0)  # data & 3
-            low_bits_ext = step.pad(low_bits, 16)
-            magnitude = step.add(low_bits_ext, step.const(1, 16))  # + 1
-            step.call(magnitude_reg, "write", magnitude)
+        with main_mod.static_step(1) as calc_magnitude_inline:
+            data = current_data.read
+            low_bits = calc_magnitude_inline.bits(data, 1, 0)  # data & 3
+            low_bits_ext = calc_magnitude_inline.pad(low_bits, 16)
+            magnitude = calc_magnitude_inline.add(
+                low_bits_ext, calc_magnitude_inline.const(1, 16)
+            )  # + 1
+            magnitude_reg.next = magnitude
 
         # Move to stage 2
-        with main_mod.static_step(1, "move_to_stage2") as step:
-            step.call(pipeline_stage, "write", step.const(2, 16))
+        with main_mod.static_step(1) as move_to_stage2:
+            pipeline_stage.next = move_to_stage2.const(2, 16)
 
         # Fast path: result = data * 2
-        with main_mod.static_step(1, "fast_path_compute") as step:
-            data = step.call(current_data, "read")
-            data_ext = step.pad(data, 32)
-            doubled = step.add(data_ext, data_ext)
-            step.call(result_reg, "write", doubled)
-            step.call(pipeline_stage, "write", step.const(5, 16))
+        with main_mod.static_step(1) as fast_path_compute:
+            data = current_data.read
+            data_ext = fast_path_compute.pad(data, 32)
+            doubled = fast_path_compute.add(data_ext, data_ext)
+            result_reg.next = doubled
+            pipeline_stage.next = fast_path_compute.const(5, 16)
 
         # Slow path: initialize result to 0
-        with main_mod.static_step(1, "slow_path_init") as step:
-            step.call(result_reg, "write", step.const(0, 32))
+        with main_mod.static_step(1) as slow_path_init:
+            result_reg.next = slow_path_init.const(0, 32)
 
         # Slow path: single accumulation iteration (result += data)
-        with main_mod.static_step(1, "slow_path_accumulate") as step:
-            result = step.call(result_reg, "read")
-            data = step.call(current_data, "read")
-            data_ext = step.pad(data, 32)
-            new_result = step.add(result, data_ext)
-            step.call(result_reg, "write", new_result)
+        with main_mod.static_step(1) as slow_path_accumulate:
+            result = result_reg.read
+            data = current_data.read
+            data_ext = slow_path_accumulate.pad(data, 32)
+            new_result = slow_path_accumulate.add(result, data_ext)
+            result_reg.next = new_result
 
         # Slow path: move to done stage after accumulation
-        with main_mod.static_step(1, "slow_path_done") as step:
-            step.call(pipeline_stage, "write", step.const(5, 16))
+        with main_mod.static_step(1) as slow_path_done:
+            pipeline_stage.next = slow_path_done.const(5, 16)
 
         # Conditional bonus: add 100 if result >= 500 (demonstrates if_ with condition function)
-        with main_mod.static_step(1, "apply_bonus") as step:
-            result = step.call(result_reg, "read")
-            bonus_amount = step.const(100, 32)
-            new_result = step.add(result, bonus_amount)
-            step.call(result_reg, "write", new_result)
+        with main_mod.static_step(1) as apply_bonus:
+            result = result_reg.read
+            bonus_amount = apply_bonus.const(100, 32)
+            new_result = apply_bonus.add(result, bonus_amount)
+            result_reg.next = new_result
 
         # Finalize result
-        with main_mod.static_step(1, "finalize_result") as step:
-            step.call(valid_reg, "write", step.const(1, 1))
-            step.call(pipeline_stage, "write", step.const(0, 16))
+        with main_mod.static_step(1) as finalize_result:
+            valid_reg.next = finalize_result.const(1, 1)
+            pipeline_stage.next = finalize_result.const(0, 16)
 
         # ---------------------------------------------------------------------
         # Pipeline Rules - Using ALL control flow features
         # ---------------------------------------------------------------------
 
         # Rule 1: Dequeue from FIFO (stage 0 -> 1)
-        with main_mod.proc_rule("stage0_dequeue") as rule:
-            with rule.guard as g:
-                stage = g.call(pipeline_stage, "read")
+        with main_mod.proc_rule() as stage0_dequeue:
+            with stage0_dequeue.guard as g:
+                stage = pipeline_stage.read
                 is_idle = g.eq(stage, g.const(0, 16))
                 g.returns(is_idle)
 
-            with rule.control() as ctrl:
-                ctrl.enable(main_mod._steps["dequeue_and_start"].ref())
+            with stage0_dequeue.control() as ctrl:
+                ctrl.enable(dequeue_and_start.ref())
 
         # Rule 2: Analysis (stage 1)
         # Demonstrates: par block for parallel execution
-        with main_mod.proc_rule("stage1_analysis") as rule:
+        with main_mod.proc_rule() as stage1_analysis:
             """
             Analysis of data using parallel execution:
             1. Check even/odd flag  |  (parallel)
@@ -438,86 +442,86 @@ def create_comprehensive_example():
             run in parallel since they both read current_data but write to
             different registers.
             """
-            with rule.guard as g:
-                stage = g.call(pipeline_stage, "read")
+            with stage1_analysis.guard as g:
+                stage = pipeline_stage.read
                 is_stage1 = g.eq(stage, g.const(1, 16))
                 g.returns(is_stage1)
 
-            with rule.control() as ctrl:
+            with stage1_analysis.control() as ctrl:
                 with ctrl.seq() as seq:
                     # Par block: both steps read current_data, write to different regs
                     with seq.par() as p:
-                        p.enable(main_mod._steps["check_even_odd"].ref())
-                        p.enable(main_mod._steps["calc_magnitude_inline"].ref())
+                        p.enable(check_even_odd.ref())
+                        p.enable(calc_magnitude_inline.ref())
                     # After parallel steps complete, move to next stage
-                    seq.enable(main_mod._steps["move_to_stage2"].ref())
+                    seq.enable(move_to_stage2.ref())
 
         # Rule 3a: Fast path for even numbers (stage 2)
         # Uses mutually exclusive guard with stage2_odd_slow
-        with main_mod.proc_rule("stage2_even_fast") as rule:
+        with main_mod.proc_rule() as stage2_even_fast:
             """
             Fast path for even numbers using mutually exclusive guards.
             """
-            with rule.guard as g:
-                stage = g.call(pipeline_stage, "read")
+            with stage2_even_fast.guard as g:
+                stage = pipeline_stage.read
                 is_stage2 = g.eq(stage, g.const(2, 16))
-                is_even = g.call(even_flag, "read")
+                is_even = even_flag.read
                 cond = g.and_(is_stage2, is_even)
                 g.returns(cond)
 
-            with rule.control() as ctrl:
-                ctrl.enable(main_mod._steps["fast_path_compute"].ref())
+            with stage2_even_fast.control() as ctrl:
+                ctrl.enable(fast_path_compute.ref())
 
         # Rule 3b: Slow path for odd numbers (stage 2)
         # Demonstrates: static_repeat
-        with main_mod.proc_rule("stage2_odd_slow") as rule:
+        with main_mod.proc_rule() as stage2_odd_slow:
             """
             Slow path for odd numbers using static_repeat.
             Demonstrates: nested seq and static_repeat(4)
             """
-            with rule.guard as g:
-                stage = g.call(pipeline_stage, "read")
+            with stage2_odd_slow.guard as g:
+                stage = pipeline_stage.read
                 is_stage2 = g.eq(stage, g.const(2, 16))
-                is_even = g.call(even_flag, "read")
+                is_even = even_flag.read
                 is_odd = g.eq(is_even, g.const(0, 1))
                 cond = g.and_(is_stage2, is_odd)
                 g.returns(cond)
 
-            with rule.control() as ctrl:
+            with stage2_odd_slow.control() as ctrl:
                 with ctrl.seq() as seq:
-                    seq.enable(main_mod._steps["slow_path_init"].ref())
+                    seq.enable(slow_path_init.ref())
                     with seq.static_repeat(4) as loop:
-                        loop.enable(main_mod._steps["slow_path_accumulate"].ref())
-                    seq.enable(main_mod._steps["slow_path_done"].ref())
+                        loop.enable(slow_path_accumulate.ref())
+                    seq.enable(slow_path_done.ref())
 
         # Rule 5: Finalize (stage 5)
         # Demonstrates: if_ with condition function (ProcCondIfOp)
-        with main_mod.proc_rule("stage5_finalize") as rule:
+        with main_mod.proc_rule() as stage5_finalize:
             """
             Finalization with conditional bonus using if_ with condition function.
             Demonstrates: ProcCondIfOp - dynamic condition evaluated each cycle.
             If result >= 500, add bonus of 100 before finalizing.
             """
-            with rule.guard as g:
-                stage = g.call(pipeline_stage, "read")
+            with stage5_finalize.guard as g:
+                stage = pipeline_stage.read
                 is_done = g.eq(stage, g.const(5, 16))
                 g.returns(is_done)
 
-            with rule.control() as ctrl:
+            with stage5_finalize.control() as ctrl:
                 with ctrl.seq() as seq:
                     # Condition function: evaluate result >= 500 dynamically
                     def check_large_result(b):
-                        result = b.call(result_reg, "read")
+                        result = b.call(result_reg.instance, result_reg.instance.read)
                         threshold = b.const(500, 32)
                         return b.ge(result, threshold)  # greater or equal
 
                     # if_ with condition function (creates ProcCondIfOp)
                     with seq.if_(check_large_result) as if_:
                         with if_.then_() as then_builder:
-                            then_builder.enable(main_mod._steps["apply_bonus"].ref())
+                            then_builder.enable(apply_bonus.ref())
 
                     # Always finalize
-                    seq.enable(main_mod._steps["finalize_result"].ref())
+                    seq.enable(finalize_result.ref())
 
         # ---------------------------------------------------------------------
         # Value methods for external access

@@ -48,10 +48,10 @@ def create_basic_counter():
         # Note: Using g.always() because CMT2 rules are IsolatedFromAbove
         # and can't directly access module ports. A real counter would
         # need to use a register interface method call in the guard.
-        with jit.rule(m, "increment") as rule:
-            with rule.guard as g:
+        with jit.rule(m) as increment:
+            with increment.guard as g:
                 g.always()
-            with rule.body as b:
+            with increment.body as b:
                 # Would increment register here
                 pass
 
@@ -83,13 +83,13 @@ def create_simulatable_counter():
         rst = m.reset()
 
         # Create a 32-bit register for the count value
-        count = m.instance(Reg.create(circuit, 32), "count", clk=clk, rst=rst)
+        count = m.instance(Reg.create(circuit, 32), clk=clk, rst=rst)
 
         # Increment rule - always enabled, increments count
-        with jit.rule(m, "increment") as rule:
-            with rule.guard as g:
+        with jit.rule(m) as increment:
+            with increment.guard as g:
                 g.always()
-            with rule.body as b:
+            with increment.body as b:
                 count.next = count.read + 1
 
         # Value method to expose the count value as a port

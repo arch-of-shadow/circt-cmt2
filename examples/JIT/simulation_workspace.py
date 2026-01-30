@@ -49,8 +49,8 @@ def create_demo_circuit():
         rst = m.reset()
 
         # State registers
-        count_reg = m.instance(reg32, "count", clk=clk, rst=rst)
-        running_reg = m.instance(reg1, "running", clk=clk, rst=rst)
+        count_reg = m.instance(reg32, clk=clk, rst=rst)
+        running_reg = m.instance(reg1, clk=clk, rst=rst)
 
         @jit.method(m)
         def start(meth) -> None:
@@ -74,10 +74,10 @@ def create_demo_circuit():
                 count_reg.write(meth.const(0, 32))
 
         # Rule: increment - Increment counter when running
-        with jit.rule(m, "increment") as rule:
-            with rule.guard as g:
+        with jit.rule(m) as increment:
+            with increment.guard as g:
                 g.returns(running_reg.read)
-            with rule.body as body:
+            with increment.body as body:
                 count_reg.next = count_reg.read + 1
 
         @jit.value(m)

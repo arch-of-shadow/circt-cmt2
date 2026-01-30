@@ -4,7 +4,7 @@
 #  SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
 """
-Test STL (Standard Library) Components (via PyCMT2).
+Test STL (Standard Library) components (JIT stacked on PyCMT2).
 
 This script tests the reimplemented STL components:
 - Reg: Register (external module)
@@ -16,8 +16,9 @@ This script tests the reimplemented STL components:
 - Memory: Sync and async memory (external modules)
 
 Usage:
-    PYTHONPATH=build/tools/circt/python_packages/circt_core:python \\
-      python3 examples/JIT/stl_test.py
+    cd circt-cmt2/build
+    PYTHONPATH=tools/circt/python_packages/circt_core:../python \\
+      python3 ../examples/JIT/stl_test.py
 """
 
 import cmt2.jit as jit
@@ -44,14 +45,14 @@ def test_reg_and_wire():
         rst = m.reset()
 
         # Instantiate
-        counter = m.instance(reg_mod, "counter", clk=clk, rst=rst)
-        temp = m.instance(wire_mod, "temp", clk=clk, rst=rst)
+        counter = m.instance(reg_mod, clk=clk, rst=rst)
+        temp = m.instance(wire_mod, clk=clk, rst=rst)
 
         # Rule to increment counter
-        with jit.rule(m, "increment") as rule:
-            with rule.guard as g:
+        with jit.rule(m) as increment:
+            with increment.guard as g:
                 g.always()
-            with rule.body as body:
+            with increment.body as body:
                 counter.next = counter.read + 1
                 temp.write(body.bits(counter.read, 15, 0))
 
@@ -89,19 +90,19 @@ def test_wire_default():
         clk = m.clock()
         rst = m.reset()
 
-        flag = m.instance(wire_default_mod, "flag", clk=clk, rst=rst)
+        flag = m.instance(wire_default_mod, clk=clk, rst=rst)
 
         # Rule that conditionally writes
-        with jit.rule(m, "maybe_write") as rule:
-            with rule.guard as g:
+        with jit.rule(m) as maybe_write:
+            with maybe_write.guard as g:
                 g.always()
-            with rule.body as body:
+            with maybe_write.body as body:
                 # Read current value
-                val = body.call(flag, "read")
+                val = flag.read
                 # If non-zero, write zero
                 with body.if_(val) as if_:
                     with if_.then_() as then_b:
-                        then_b.call(flag, "write", then_b.const(0, 8))
+                        then_b.call(flag.instance, flag.instance.write, then_b.const(0, 8))
 
         # Value to read
         @jit.value(m)
@@ -135,7 +136,7 @@ def test_fifo1_push():
         clk = m.clock()
         rst = m.reset()
 
-        fifo = m.instance(fifo_mod, "output_fifo", clk=clk, rst=rst)
+        fifo = m.instance(fifo_mod, clk=clk, rst=rst)
 
         # Method to enqueue data
         @jit.method(m)
@@ -181,7 +182,7 @@ def test_fifo1_pull():
         clk = m.clock()
         rst = m.reset()
 
-        fifo = m.instance(fifo_mod, "input_fifo", clk=clk, rst=rst)
+        fifo = m.instance(fifo_mod, clk=clk, rst=rst)
 
         # Method to dequeue data
         @jit.method(m)
@@ -222,7 +223,7 @@ def test_fifo2i():
         clk = m.clock()
         rst = m.reset()
 
-        fifo = m.instance(fifo_mod, "buffer", clk=clk, rst=rst)
+        fifo = m.instance(fifo_mod, clk=clk, rst=rst)
 
         # Method to enqueue
         @jit.method(m)
@@ -273,8 +274,8 @@ def test_memory_sync():
         clk = m.clock()
         rst = m.reset()
 
-        mem = m.instance(mem_mod, "mem", clk=clk, rst=rst)
-        result_reg = m.instance(reg_mod, "result", clk=clk, rst=rst)
+        mem = m.instance(mem_mod, clk=clk, rst=rst)
+        result_reg = m.instance(reg_mod, clk=clk, rst=rst)
 
         # Method to initiate read
         @jit.method(m)
@@ -325,7 +326,7 @@ def test_memory_async():
         clk = m.clock()
         rst = m.reset()
 
-        mem = m.instance(mem_mod, "lut", clk=clk, rst=rst)
+        mem = m.instance(mem_mod, clk=clk, rst=rst)
 
         # Method to read (combinational)
         @jit.method(m)
@@ -397,7 +398,7 @@ def test_precedence():
     with jit.module(circuit, "PrecedenceModule") as m:
         clk = m.clock()
         rst = m.reset()
-        reg = m.instance(reg_mod, "reg", clk=clk, rst=rst)
+        reg = m.instance(reg_mod, clk=clk, rst=rst)
 
         @jit.value(m)
         def read_val(val) -> UInt[32]:
@@ -413,15 +414,15 @@ def test_precedence():
             with meth.body:
                 reg.write(data)
 
-        with jit.rule(m, "update") as rule:
-            with rule.guard as g:
+        with jit.rule(m) as update:
+            with update.guard as g:
                 g.always()
-            with rule.body as body:
-                val = body.call(reg, "read")
-                body.call(reg, "write", body.add(val, body.const(1, 32)))
+            with update.body as body:
+                val = reg.read
+                reg.next = body.add(val, body.const(1, 32))
 
         # Set precedence: read_val < write_meth < update
-        m.precedence(read_val._cmt2_ref, write_meth._cmt2_ref, rule.ref())
+        m.precedence(read_val._cmt2_ref, write_meth._cmt2_ref, update.ref())
 
     mlir = circuit.emit_mlir()
     print("MLIR generated successfully")
@@ -480,4 +481,4 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    raise SystemExit(main())

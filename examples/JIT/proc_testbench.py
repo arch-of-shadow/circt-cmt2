@@ -69,10 +69,10 @@ def create_proc_testable_circuit():
         rst = mult_mod.reset()
 
         # Internal registers for computation
-        op_a = mult_mod.instance(mult_reg32, "op_a", clk=clk, rst=rst)
-        op_b = mult_mod.instance(mult_reg32, "op_b", clk=clk, rst=rst)
-        result_reg = mult_mod.instance(mult_reg32, "result_reg", clk=clk, rst=rst)
-        busy = mult_mod.instance(mult_reg1, "busy", clk=clk, rst=rst)
+        op_a = mult_mod.instance(mult_reg32, clk=clk, rst=rst)
+        op_b = mult_mod.instance(mult_reg32, clk=clk, rst=rst)
+        result_reg = mult_mod.instance(mult_reg32, clk=clk, rst=rst)
+        busy = mult_mod.instance(mult_reg1, clk=clk, rst=rst)
 
         # Method to start multiplication - single-cycle (captures inputs)
         # The actual multi-cycle computation is done by the compute_multiply proc_rule
@@ -107,126 +107,126 @@ def create_proc_testable_circuit():
 
         # Internal proc_rule to perform the actual multiplication
         # This uses a 4-cycle static step to match the declared latency
-        with mult_mod.proc_rule("compute_multiply") as rule:
-            with rule.guard as g:
-                is_busy = g.call(busy, "read")
+        with mult_mod.proc_rule() as compute_multiply:
+            with compute_multiply.guard as g:
+                is_busy = busy.read
                 g.returns(is_busy)
 
-            with rule.control() as ctrl:
+            with compute_multiply.control() as ctrl:
                 with ctrl.seq() as seq:
                     # 4-cycle static step for multiplication
-                    with mult_mod.static_step(4, "do_multiply") as step:
-                        a = step.call(op_a, "read")
-                        b = step.call(op_b, "read")
-                        product = step.mul(a, b)
-                        step.call(result_reg, "write", product)
-                    seq.enable(step.ref())
+                    with mult_mod.static_step(4) as do_multiply:
+                        a = op_a.read
+                        b = op_b.read
+                        product = do_multiply.mul(a, b)
+                        result_reg.next = product
+                    seq.enable(do_multiply.ref())
                     # Clear busy flag (dynamic step)
-                    with mult_mod.step("clear_mult_busy") as clr_step:
-                        clr_step.call(busy, "write", clr_step.const(0, 1))
-                        clr_step.done(clr_step.const(1, 1))
-                    seq.enable(clr_step.ref())
+                    with mult_mod.step() as clear_mult_busy:
+                        busy.next = clear_mult_busy.const(0, 1)
+                        clear_mult_busy.done(clear_mult_busy.const(1, 1))
+                    seq.enable(clear_mult_busy.ref())
 
     with jit.module(circuit, "ProcALU") as m:
         clk = m.clock()
         rst = m.reset()
 
         # State registers
-        reg_a = m.instance(reg32, "reg_a", clk=clk, rst=rst)
-        reg_b = m.instance(reg32, "reg_b", clk=clk, rst=rst)
-        reg_result = m.instance(reg32, "reg_result", clk=clk, rst=rst)
-        reg_counter = m.instance(reg8, "reg_counter", clk=clk, rst=rst)
-        reg_done = m.instance(reg1, "reg_done", clk=clk, rst=rst)
-        reg_busy = m.instance(reg1, "reg_busy", clk=clk, rst=rst)
+        reg_a = m.instance(reg32, clk=clk, rst=rst)
+        reg_b = m.instance(reg32, clk=clk, rst=rst)
+        reg_result = m.instance(reg32, clk=clk, rst=rst)
+        reg_counter = m.instance(reg8, clk=clk, rst=rst)
+        reg_done = m.instance(reg1, clk=clk, rst=rst)
+        reg_busy = m.instance(reg1, clk=clk, rst=rst)
 
         # Operation select register - gates which proc_rule can fire
         # 0=none, 1=seq_add_sub, 2=par_load, 3=cond_compute, 4=loop_increment,
         # 5=mixed_compute, 6=invoke_test, 7=static_sequence, 8=dynamic_sequence,
         # 9=nested_test, 10=timed_multiply_test, 11=pipelined_add_test, 12=complex_par_test
-        reg_op_select = m.instance(reg8, "reg_op_select", clk=clk, rst=rst)
+        reg_op_select = m.instance(reg8, clk=clk, rst=rst)
 
         # =====================================================================
         # Instance of CMT2 Module with Multi-Cycle Method
         # =====================================================================
         # The MultiplierUnit has a multiply method with static_latency=4, interval=2
         # The method is implemented using procedural control (proc_rule + static_step)
-        mult_unit = m.instance(mult_mod, "mult_unit", clk=clk, rst=rst)
+        mult_unit = m.instance(mult_mod, clk=clk, rst=rst)
 
         # =====================================================================
         # Dynamic Steps
         # =====================================================================
 
-        # Step: load_a - Load value into reg_a
-        with m.step("load_a") as step:
-            val = step.call(reg_a, "read")
-            step.done(step.const(1, 1))
+        # Step: load_a - Read reg_a (dynamic)
+        with m.step() as load_a:
+            _ = reg_a.read
+            load_a.done(load_a.const(1, 1))
 
-        # Step: load_b - Load value into reg_b
-        with m.step("load_b") as step:
-            val = step.call(reg_b, "read")
-            step.done(step.const(1, 1))
+        # Step: load_b - Read reg_b (dynamic)
+        with m.step() as load_b:
+            _ = reg_b.read
+            load_b.done(load_b.const(1, 1))
 
         # Step: compute_add - Add reg_a and reg_b, store in reg_result
-        with m.step("compute_add") as step:
-            a = step.call(reg_a, "read")
-            b = step.call(reg_b, "read")
-            result = step.add(a, b)
-            step.call(reg_result, "write", result)
-            step.done(step.const(1, 1))
+        with m.step() as compute_add:
+            a = reg_a.read
+            b = reg_b.read
+            result = compute_add.add(a, b)
+            reg_result.next = result
+            compute_add.done(compute_add.const(1, 1))
 
         # Step: compute_sub - Subtract reg_b from reg_a
-        with m.step("compute_sub") as step:
-            a = step.call(reg_a, "read")
-            b = step.call(reg_b, "read")
-            result = step.sub(a, b)
-            step.call(reg_result, "write", result)
-            step.done(step.const(1, 1))
+        with m.step() as compute_sub:
+            a = reg_a.read
+            b = reg_b.read
+            result = compute_sub.sub(a, b)
+            reg_result.next = result
+            compute_sub.done(compute_sub.const(1, 1))
 
         # Step: increment_counter - Increment the counter
-        with m.step("increment_counter") as step:
-            count = step.call(reg_counter, "read")
-            new_count = step.add(count, step.const(1, 8))
-            step.call(reg_counter, "write", new_count)
-            step.done(step.const(1, 1))
+        with m.step() as increment_counter:
+            count = reg_counter.read
+            new_count = increment_counter.add(count, increment_counter.const(1, 8))
+            reg_counter.next = increment_counter.bits(new_count, 7, 0)
+            increment_counter.done(increment_counter.const(1, 1))
 
         # Step: set_done_flag - Set the done flag
-        with m.step("set_done_flag") as step:
-            step.call(reg_done, "write", step.const(1, 1))
-            step.done(step.const(1, 1))
+        with m.step() as set_done_flag:
+            reg_done.next = set_done_flag.const(1, 1)
+            set_done_flag.done(set_done_flag.const(1, 1))
 
         # Step: clear_done_flag - Clear the done flag
-        with m.step("clear_done_flag") as step:
-            step.call(reg_done, "write", step.const(0, 1))
-            step.done(step.const(1, 1))
+        with m.step() as clear_done_flag:
+            reg_done.next = clear_done_flag.const(0, 1)
+            clear_done_flag.done(clear_done_flag.const(1, 1))
 
         # Step: set_busy - Set busy flag
-        with m.step("set_busy") as step:
-            step.call(reg_busy, "write", step.const(1, 1))
-            step.done(step.const(1, 1))
+        with m.step() as set_busy:
+            reg_busy.next = set_busy.const(1, 1)
+            set_busy.done(set_busy.const(1, 1))
 
         # Step: clear_busy - Clear busy flag
-        with m.step("clear_busy") as step:
-            step.call(reg_busy, "write", step.const(0, 1))
-            step.done(step.const(1, 1))
+        with m.step() as clear_busy:
+            reg_busy.next = clear_busy.const(0, 1)
+            clear_busy.done(clear_busy.const(1, 1))
 
         # =====================================================================
         # Static Steps (fixed latency)
         # =====================================================================
 
         # Static step: delay_2 - 2-cycle delay
-        with m.static_step(2, "delay_2") as step:
+        with m.static_step(2) as delay_2:
             pass  # Just a delay
 
         # Static step: delay_4 - 4-cycle delay
-        with m.static_step(4, "delay_4") as step:
+        with m.static_step(4) as delay_4:
             pass  # Just a delay
 
         # Static step: multiply_3cycle - 3-cycle multiply
-        with m.static_step(3, "multiply_3cycle") as step:
-            a = step.call(reg_a, "read")
-            b = step.call(reg_b, "read")
-            result = step.mul(a, b)
-            step.call(reg_result, "write", result)
+        with m.static_step(3) as multiply_3cycle:
+            a = reg_a.read
+            b = reg_b.read
+            result = multiply_3cycle.mul(a, b)
+            reg_result.next = result
 
         # =====================================================================
         # Static Step with Initiation Interval (Pipeline Timing)
@@ -235,12 +235,12 @@ def create_proc_testable_circuit():
         # A step with latency=4 and interval=2 can accept new inputs every
         # 2 cycles while still taking 4 cycles to produce results.
 
-        with m.static_step(4, "pipelined_add", interval=2) as step:
+        with m.static_step(4, interval=2) as pipelined_add:
             # This step takes 4 cycles total but can be pipelined with II=2
-            a = step.call(reg_a, "read")
-            b = step.call(reg_b, "read")
-            result = step.add(a, b)
-            step.call(reg_result, "write", result)
+            a = reg_a.read
+            b = reg_b.read
+            result = pipelined_add.add(a, b)
+            reg_result.next = result
 
         # =====================================================================
         # Steps for Testing CMT2 Module with Multi-Cycle Method
@@ -252,133 +252,133 @@ def create_proc_testable_circuit():
         # 3. Reading result from mult_unit.get_result()
 
         # Step: start_mult - Start multiplication (calls multiply method)
-        with m.step("start_mult") as step:
-            a = step.call(reg_a, "read")
-            b = step.call(reg_b, "read")
+        with m.step() as start_mult:
+            a = reg_a.read
+            b = reg_b.read
             # Call multiply - this triggers the computation in mult_unit
             # The method sets busy=1 and stores operands
-            step.call(mult_unit, "multiply", a, b)
-            step.done(step.const(1, 1))
+            mult_unit.multiply(a, b)
+            start_mult.done(start_mult.const(1, 1))
 
         # Step: check_mult_busy - Check if mult_unit is still busy
-        with m.step("check_mult_busy") as step:
-            is_busy = step.call(mult_unit, "is_busy")
-            step.done(step.not_(is_busy))  # Done when not busy
+        with m.step() as check_mult_busy:
+            is_busy = mult_unit.is_busy
+            check_mult_busy.done(check_mult_busy.not_(is_busy))  # Done when not busy
 
         # Step: copy_mult_result - Copy result from mult_unit to reg_result
-        with m.step("copy_mult_result") as step:
-            result = step.call(mult_unit, "get_result")
-            step.call(reg_result, "write", result)
-            step.done(step.const(1, 1))
+        with m.step() as copy_mult_result:
+            result = mult_unit.get_result
+            reg_result.next = result
+            copy_mult_result.done(copy_mult_result.const(1, 1))
 
         # =====================================================================
         # Proc Rule 1: Simple Sequential (seq_add_sub)
         # Execute add then sub in sequence
         # =====================================================================
 
-        with m.proc_rule("seq_add_sub") as rule:
-            with rule.guard as g:
-                busy = g.call(reg_busy, "read")
+        with m.proc_rule() as seq_add_sub:
+            with seq_add_sub.guard as g:
+                busy = reg_busy.read
                 not_busy = g.not_(busy)
-                op_sel = g.call(reg_op_select, "read")
+                op_sel = reg_op_select.read
                 is_selected = g.eq(op_sel, g.const(1, 8))
                 g.returns(g.and_(not_busy, is_selected))
-            with rule.control() as ctrl:
+            with seq_add_sub.control() as ctrl:
                 with ctrl.seq() as seq:
-                    seq.enable(m._steps["set_busy"].ref())
-                    seq.enable(m._steps["compute_add"].ref())
-                    seq.enable(m._steps["delay_2"].ref())
-                    seq.enable(m._steps["compute_sub"].ref())
-                    seq.enable(m._steps["set_done_flag"].ref())
-                    seq.enable(m._steps["clear_busy"].ref())
+                    seq.enable(set_busy.ref())
+                    seq.enable(compute_add.ref())
+                    seq.enable(delay_2.ref())
+                    seq.enable(compute_sub.ref())
+                    seq.enable(set_done_flag.ref())
+                    seq.enable(clear_busy.ref())
 
         # =====================================================================
         # Proc Rule 2: Parallel Operations (par_load)
         # Load a and b in parallel
         # =====================================================================
 
-        with m.proc_rule("par_load") as rule:
-            with rule.guard as g:
-                busy = g.call(reg_busy, "read")
+        with m.proc_rule() as par_load:
+            with par_load.guard as g:
+                busy = reg_busy.read
                 not_busy = g.not_(busy)
-                op_sel = g.call(reg_op_select, "read")
+                op_sel = reg_op_select.read
                 is_selected = g.eq(op_sel, g.const(2, 8))
                 g.returns(g.and_(not_busy, is_selected))
-            with rule.control() as ctrl:
+            with par_load.control() as ctrl:
                 with ctrl.seq() as seq:
-                    seq.enable(m._steps["set_busy"].ref())
+                    seq.enable(set_busy.ref())
                     with seq.par() as par:
-                        par.enable(m._steps["load_a"].ref())
-                        par.enable(m._steps["load_b"].ref())
-                    seq.enable(m._steps["clear_busy"].ref())
+                        par.enable(load_a.ref())
+                        par.enable(load_b.ref())
+                    seq.enable(clear_busy.ref())
 
         # =====================================================================
         # Proc Rule 3: Conditional (cond_compute)
         # If done flag is set, do add; else do sub
         # =====================================================================
 
-        with m.proc_rule("cond_compute") as rule:
-            with rule.guard as g:
-                busy = g.call(reg_busy, "read")
+        with m.proc_rule() as cond_compute:
+            with cond_compute.guard as g:
+                busy = reg_busy.read
                 not_busy = g.not_(busy)
-                op_sel = g.call(reg_op_select, "read")
+                op_sel = reg_op_select.read
                 is_selected = g.eq(op_sel, g.const(3, 8))
                 g.returns(g.and_(not_busy, is_selected))
-            with rule.control() as ctrl:
+            with cond_compute.control() as ctrl:
                 with ctrl.seq() as seq:
-                    seq.enable(m._steps["set_busy"].ref())
+                    seq.enable(set_busy.ref())
                     done_flag = seq.const(1, 1)  # Simplified condition
                     with seq.if_(done_flag) as if_ctrl:
                         with if_ctrl.then_() as then_ctrl:
                             with then_ctrl.seq() as then_seq:
-                                then_seq.enable(m._steps["compute_add"].ref())
+                                then_seq.enable(compute_add.ref())
                         with if_ctrl.else_() as else_ctrl:
                             with else_ctrl.seq() as else_seq:
-                                else_seq.enable(m._steps["compute_sub"].ref())
-                    seq.enable(m._steps["set_done_flag"].ref())
-                    seq.enable(m._steps["clear_busy"].ref())
+                                else_seq.enable(compute_sub.ref())
+                    seq.enable(set_done_flag.ref())
+                    seq.enable(clear_busy.ref())
 
         # =====================================================================
         # Proc Rule 4: While Loop (loop_increment)
         # Increment counter in a loop (simplified)
         # =====================================================================
 
-        with m.proc_rule("loop_increment") as rule:
-            with rule.guard as g:
-                busy = g.call(reg_busy, "read")
+        with m.proc_rule() as loop_increment:
+            with loop_increment.guard as g:
+                busy = reg_busy.read
                 not_busy = g.not_(busy)
-                op_sel = g.call(reg_op_select, "read")
+                op_sel = reg_op_select.read
                 is_selected = g.eq(op_sel, g.const(4, 8))
                 g.returns(g.and_(not_busy, is_selected))
-            with rule.control() as ctrl:
+            with loop_increment.control() as ctrl:
                 with ctrl.seq() as seq:
-                    seq.enable(m._steps["set_busy"].ref())
+                    seq.enable(set_busy.ref())
                     # Loop condition function (simplified to false for static test)
                     with seq.while_(lambda b: b.const(0, 1)) as loop:
                         with loop.seq() as loop_seq:
-                            loop_seq.enable(m._steps["increment_counter"].ref())
-                    seq.enable(m._steps["set_done_flag"].ref())
-                    seq.enable(m._steps["clear_busy"].ref())
+                            loop_seq.enable(increment_counter.ref())
+                    seq.enable(set_done_flag.ref())
+                    seq.enable(clear_busy.ref())
 
         # =====================================================================
         # Proc Rule 5: Mixed Static/Dynamic (mixed_compute)
         # Static multiply followed by dynamic operations
         # =====================================================================
 
-        with m.proc_rule("mixed_compute") as rule:
-            with rule.guard as g:
-                busy = g.call(reg_busy, "read")
+        with m.proc_rule() as mixed_compute:
+            with mixed_compute.guard as g:
+                busy = reg_busy.read
                 not_busy = g.not_(busy)
-                op_sel = g.call(reg_op_select, "read")
+                op_sel = reg_op_select.read
                 is_selected = g.eq(op_sel, g.const(5, 8))
                 g.returns(g.and_(not_busy, is_selected))
-            with rule.control() as ctrl:
+            with mixed_compute.control() as ctrl:
                 with ctrl.seq() as seq:
-                    seq.enable(m._steps["set_busy"].ref())
-                    seq.enable(m._steps["multiply_3cycle"].ref())  # 3 cycles
-                    seq.enable(m._steps["delay_4"].ref())          # 4 cycles
-                    seq.enable(m._steps["set_done_flag"].ref())
-                    seq.enable(m._steps["clear_busy"].ref())
+                    seq.enable(set_busy.ref())
+                    seq.enable(multiply_3cycle.ref())  # 3 cycles
+                    seq.enable(delay_4.ref())          # 4 cycles
+                    seq.enable(set_done_flag.ref())
+                    seq.enable(clear_busy.ref())
 
         # =====================================================================
         # Proc Rule 7: Invoke Operations (invoke_test)
@@ -386,21 +386,21 @@ def create_proc_testable_circuit():
         # Uses instance.method_name to get MethodRef for invoke
         # =====================================================================
 
-        with m.proc_rule("invoke_test") as rule:
-            with rule.guard as g:
-                busy = g.call(reg_busy, "read")
+        with m.proc_rule() as invoke_test:
+            with invoke_test.guard as g:
+                busy = reg_busy.read
                 not_busy = g.not_(busy)
-                op_sel = g.call(reg_op_select, "read")
+                op_sel = reg_op_select.read
                 is_selected = g.eq(op_sel, g.const(6, 8))
                 g.returns(g.and_(not_busy, is_selected))
-            with rule.control() as ctrl:
+            with invoke_test.control() as ctrl:
                 with ctrl.seq() as seq:
                     # Use invoke to call methods on instances
                     # inst.method_name returns a MethodRef
                     seq.invoke(reg_busy, reg_busy.write, seq.const(1, 1))
                     # Invoke write on counter with a specific value
                     seq.invoke(reg_counter, reg_counter.write, seq.const(42, 8))
-                    seq.enable(m._steps["delay_2"].ref())  # Static delay
+                    seq.enable(delay_2.ref())  # Static delay
                     seq.invoke(reg_done, reg_done.write, seq.const(1, 1))
                     seq.invoke(reg_busy, reg_busy.write, seq.const(0, 1))
 
@@ -409,73 +409,73 @@ def create_proc_testable_circuit():
         # Tests pure static step sequencing
         # =====================================================================
 
-        with m.proc_rule("static_sequence") as rule:
-            with rule.guard as g:
-                busy = g.call(reg_busy, "read")
+        with m.proc_rule() as static_sequence:
+            with static_sequence.guard as g:
+                busy = reg_busy.read
                 not_busy = g.not_(busy)
-                op_sel = g.call(reg_op_select, "read")
+                op_sel = reg_op_select.read
                 is_selected = g.eq(op_sel, g.const(7, 8))
                 g.returns(g.and_(not_busy, is_selected))
-            with rule.control() as ctrl:
+            with static_sequence.control() as ctrl:
                 with ctrl.seq() as seq:
-                    seq.enable(m._steps["set_busy"].ref())
-                    seq.enable(m._steps["delay_2"].ref())   # 2 cycles
-                    seq.enable(m._steps["delay_4"].ref())   # 4 cycles
-                    seq.enable(m._steps["multiply_3cycle"].ref())  # 3 cycles
-                    seq.enable(m._steps["set_done_flag"].ref())
-                    seq.enable(m._steps["clear_busy"].ref())
+                    seq.enable(set_busy.ref())
+                    seq.enable(delay_2.ref())   # 2 cycles
+                    seq.enable(delay_4.ref())   # 4 cycles
+                    seq.enable(multiply_3cycle.ref())  # 3 cycles
+                    seq.enable(set_done_flag.ref())
+                    seq.enable(clear_busy.ref())
 
         # =====================================================================
         # Proc Rule 9: Dynamic-Only Sequence (dynamic_sequence)
         # Tests pure dynamic step sequencing
         # =====================================================================
 
-        with m.proc_rule("dynamic_sequence") as rule:
-            with rule.guard as g:
-                busy = g.call(reg_busy, "read")
+        with m.proc_rule() as dynamic_sequence:
+            with dynamic_sequence.guard as g:
+                busy = reg_busy.read
                 not_busy = g.not_(busy)
-                op_sel = g.call(reg_op_select, "read")
+                op_sel = reg_op_select.read
                 is_selected = g.eq(op_sel, g.const(8, 8))
                 g.returns(g.and_(not_busy, is_selected))
-            with rule.control() as ctrl:
+            with dynamic_sequence.control() as ctrl:
                 with ctrl.seq() as seq:
-                    seq.enable(m._steps["set_busy"].ref())
-                    seq.enable(m._steps["load_a"].ref())
-                    seq.enable(m._steps["load_b"].ref())
-                    seq.enable(m._steps["compute_add"].ref())
-                    seq.enable(m._steps["increment_counter"].ref())
-                    seq.enable(m._steps["set_done_flag"].ref())
-                    seq.enable(m._steps["clear_busy"].ref())
+                    seq.enable(set_busy.ref())
+                    seq.enable(load_a.ref())
+                    seq.enable(load_b.ref())
+                    seq.enable(compute_add.ref())
+                    seq.enable(increment_counter.ref())
+                    seq.enable(set_done_flag.ref())
+                    seq.enable(clear_busy.ref())
 
         # =====================================================================
         # Proc Rule 6: Nested Control (nested_test)
         # Complex nested structure: seq { par { ... }; if { seq {...} } }
         # =====================================================================
 
-        with m.proc_rule("nested_test") as rule:
-            with rule.guard as g:
-                busy = g.call(reg_busy, "read")
+        with m.proc_rule() as nested_test:
+            with nested_test.guard as g:
+                busy = reg_busy.read
                 not_busy = g.not_(busy)
-                op_sel = g.call(reg_op_select, "read")
+                op_sel = reg_op_select.read
                 is_selected = g.eq(op_sel, g.const(9, 8))
                 g.returns(g.and_(not_busy, is_selected))
-            with rule.control() as ctrl:
+            with nested_test.control() as ctrl:
                 with ctrl.seq() as seq:
-                    seq.enable(m._steps["set_busy"].ref())
+                    seq.enable(set_busy.ref())
                     # Parallel: load and delay
                     with seq.par() as par:
-                        par.enable(m._steps["load_a"].ref())
-                        par.enable(m._steps["delay_2"].ref())
+                        par.enable(load_a.ref())
+                        par.enable(delay_2.ref())
                     # Conditional: based on flag
                     flag = seq.const(1, 1)
                     with seq.if_(flag) as if_ctrl:
                         with if_ctrl.then_() as then_ctrl:
                             with then_ctrl.seq() as then_seq:
-                                then_seq.enable(m._steps["compute_add"].ref())
-                                then_seq.enable(m._steps["increment_counter"].ref())
+                                then_seq.enable(compute_add.ref())
+                                then_seq.enable(increment_counter.ref())
                     # Final cleanup
-                    seq.enable(m._steps["set_done_flag"].ref())
-                    seq.enable(m._steps["clear_busy"].ref())
+                    seq.enable(set_done_flag.ref())
+                    seq.enable(clear_busy.ref())
 
         # =====================================================================
         # Proc Rule 10: Timed Multiply Test (timed_multiply_test)
@@ -485,49 +485,49 @@ def create_proc_testable_circuit():
         #   - compute_multiply proc_rule: performs actual multiplication
         # =====================================================================
 
-        with m.proc_rule("timed_multiply_test") as rule:
-            with rule.guard as g:
-                busy = g.call(reg_busy, "read")
+        with m.proc_rule() as timed_multiply_test:
+            with timed_multiply_test.guard as g:
+                busy = reg_busy.read
                 not_busy = g.not_(busy)
-                op_sel = g.call(reg_op_select, "read")
+                op_sel = reg_op_select.read
                 is_selected = g.eq(op_sel, g.const(10, 8))
                 g.returns(g.and_(not_busy, is_selected))
-            with rule.control() as ctrl:
+            with timed_multiply_test.control() as ctrl:
                 with ctrl.seq() as seq:
-                    seq.enable(m._steps["set_busy"].ref())
+                    seq.enable(set_busy.ref())
                     # Start multiplication in mult_unit
-                    seq.enable(m._steps["start_mult"].ref())
+                    seq.enable(start_mult.ref())
                     # Wait for mult_unit to finish (while busy, loop)
                     # condition_fn: returns True while mult_unit is busy
                     def mult_busy_cond(b):
-                        return b.call(mult_unit, "is_busy")
+                        return b.call(mult_unit.instance, mult_unit.instance.is_busy)
                     with seq.while_(mult_busy_cond) as loop:
                         # Just wait - check_mult_busy step completes when not busy
-                        loop.enable(m._steps["check_mult_busy"].ref())
+                        loop.enable(check_mult_busy.ref())
                     # Copy result from mult_unit to reg_result
-                    seq.enable(m._steps["copy_mult_result"].ref())
-                    seq.enable(m._steps["set_done_flag"].ref())
-                    seq.enable(m._steps["clear_busy"].ref())
+                    seq.enable(copy_mult_result.ref())
+                    seq.enable(set_done_flag.ref())
+                    seq.enable(clear_busy.ref())
 
         # =====================================================================
         # Proc Rule 11: Pipelined Add Test (pipelined_add_test)
         # Tests static_step with interval attribute (II=2)
         # =====================================================================
 
-        with m.proc_rule("pipelined_add_test") as rule:
-            with rule.guard as g:
-                busy = g.call(reg_busy, "read")
+        with m.proc_rule() as pipelined_add_test:
+            with pipelined_add_test.guard as g:
+                busy = reg_busy.read
                 not_busy = g.not_(busy)
-                op_sel = g.call(reg_op_select, "read")
+                op_sel = reg_op_select.read
                 is_selected = g.eq(op_sel, g.const(11, 8))
                 g.returns(g.and_(not_busy, is_selected))
-            with rule.control() as ctrl:
+            with pipelined_add_test.control() as ctrl:
                 with ctrl.seq() as seq:
-                    seq.enable(m._steps["set_busy"].ref())
+                    seq.enable(set_busy.ref())
                     # Use the pipelined_add step (latency=4, interval=2)
-                    seq.enable(m._steps["pipelined_add"].ref())
-                    seq.enable(m._steps["set_done_flag"].ref())
-                    seq.enable(m._steps["clear_busy"].ref())
+                    seq.enable(pipelined_add.ref())
+                    seq.enable(set_done_flag.ref())
+                    seq.enable(clear_busy.ref())
 
         # =====================================================================
         # Proc Rule 12: Complex Par Test (complex_par_test)
@@ -535,29 +535,29 @@ def create_proc_testable_circuit():
         # Structure: par { seq { enable A; enable B }; seq { enable C; enable D } }
         # =====================================================================
 
-        with m.proc_rule("complex_par_test") as rule:
-            with rule.guard as g:
-                busy = g.call(reg_busy, "read")
+        with m.proc_rule() as complex_par_test:
+            with complex_par_test.guard as g:
+                busy = reg_busy.read
                 not_busy = g.not_(busy)
-                op_sel = g.call(reg_op_select, "read")
+                op_sel = reg_op_select.read
                 is_selected = g.eq(op_sel, g.const(12, 8))
                 g.returns(g.and_(not_busy, is_selected))
-            with rule.control() as ctrl:
+            with complex_par_test.control() as ctrl:
                 with ctrl.seq() as seq:
-                    seq.enable(m._steps["set_busy"].ref())
+                    seq.enable(set_busy.ref())
                     # Complex par: two branches with seq inside
                     # Branch 0: load_a then compute_add (stores a+b in result)
                     # Branch 1: load_b then increment_counter
                     # Both branches run in parallel, each progressing through their seq
                     with seq.par() as par:
                         with par.seq() as branch0:
-                            branch0.enable(m._steps["load_a"].ref())
-                            branch0.enable(m._steps["compute_add"].ref())
+                            branch0.enable(load_a.ref())
+                            branch0.enable(compute_add.ref())
                         with par.seq() as branch1:
-                            branch1.enable(m._steps["load_b"].ref())
-                            branch1.enable(m._steps["increment_counter"].ref())
-                    seq.enable(m._steps["set_done_flag"].ref())
-                    seq.enable(m._steps["clear_busy"].ref())
+                            branch1.enable(load_b.ref())
+                            branch1.enable(increment_counter.ref())
+                    seq.enable(set_done_flag.ref())
+                    seq.enable(clear_busy.ref())
 
         # =====================================================================
         # Interface Methods (for external stimulus)

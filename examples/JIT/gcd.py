@@ -41,8 +41,8 @@ def create_gcd_circuit():
         rst = m.reset()
 
         # State registers using STL Reg module
-        reg_a = m.instance(reg_mod, "reg_a", clk=clk, rst=rst)
-        reg_b = m.instance(reg_mod, "reg_b", clk=clk, rst=rst)
+        reg_a = m.instance(reg_mod, clk=clk, rst=rst)
+        reg_b = m.instance(reg_mod, clk=clk, rst=rst)
 
         @jit.method(m)
         def load(meth, a: UInt[32], b: UInt[32]) -> None:

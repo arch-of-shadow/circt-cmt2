@@ -56,185 +56,185 @@ def create_proc_comprehensive_circuit():
         rst = m.reset()
 
         # State registers
-        reg_a = m.instance(reg32, "reg_a", clk=clk, rst=rst)
-        reg_b = m.instance(reg32, "reg_b", clk=clk, rst=rst)
-        reg_result = m.instance(reg32, "reg_result", clk=clk, rst=rst)
-        reg_counter = m.instance(reg32, "reg_counter", clk=clk, rst=rst)
-        reg_flag = m.instance(reg1, "reg_flag", clk=clk, rst=rst)
+        reg_a = m.instance(reg32, clk=clk, rst=rst)
+        reg_b = m.instance(reg32, clk=clk, rst=rst)
+        reg_result = m.instance(reg32, clk=clk, rst=rst)
+        reg_counter = m.instance(reg32, clk=clk, rst=rst)
+        reg_flag = m.instance(reg1, clk=clk, rst=rst)
 
         # =====================================================================
         # Dynamic Steps (explicit done signal based on method call readiness)
         # =====================================================================
 
         # Step: read_a - Read from reg_a (dynamic, depends on read method ready)
-        with m.step("read_a") as step:
-            val = step.call(reg_a, "read")
+        with m.step() as read_a:
+            _ = reg_a.read
             # Done when the read succeeds
-            step.done(step.const(1, 1))
+            read_a.done(read_a.const(1, 1))
 
         # Step: write_result - Write to reg_result (dynamic)
-        with m.step("write_result") as step:
-            val = step.call(reg_a, "read")
-            step.call(reg_result, "write", val)
-            step.done(step.const(1, 1))
+        with m.step() as write_result:
+            val = reg_a.read
+            reg_result.next = val
+            write_result.done(write_result.const(1, 1))
 
         # Step: increment_counter - Increment counter (dynamic)
-        with m.step("increment_counter") as step:
-            count = step.call(reg_counter, "read")
-            new_count = step.add(count, step.const(1, 32))
-            step.call(reg_counter, "write", new_count)
-            step.done(step.const(1, 1))
+        with m.step() as increment_counter:
+            count = reg_counter.read
+            new_count = increment_counter.add(count, increment_counter.const(1, 32))
+            reg_counter.next = new_count
+            increment_counter.done(increment_counter.const(1, 1))
 
         # Step: decrement_counter - Decrement counter (dynamic)
-        with m.step("decrement_counter") as step:
-            count = step.call(reg_counter, "read")
-            new_count = step.sub(count, step.const(1, 32))
-            step.call(reg_counter, "write", new_count)
-            step.done(step.const(1, 1))
+        with m.step() as decrement_counter:
+            count = reg_counter.read
+            new_count = decrement_counter.sub(count, decrement_counter.const(1, 32))
+            reg_counter.next = new_count
+            decrement_counter.done(decrement_counter.const(1, 1))
 
         # Step: set_flag - Set the flag register (dynamic)
-        with m.step("set_flag") as step:
-            step.call(reg_flag, "write", step.const(1, 1))
-            step.done(step.const(1, 1))
+        with m.step() as set_flag:
+            reg_flag.next = set_flag.const(1, 1)
+            set_flag.done(set_flag.const(1, 1))
 
         # Step: clear_flag - Clear the flag register (dynamic)
-        with m.step("clear_flag") as step:
-            step.call(reg_flag, "write", step.const(0, 1))
-            step.done(step.const(1, 1))
+        with m.step() as clear_flag:
+            reg_flag.next = clear_flag.const(0, 1)
+            clear_flag.done(clear_flag.const(1, 1))
 
         # =====================================================================
         # Static Steps (fixed latency, no explicit done needed)
         # =====================================================================
 
         # Static step: delay_1 - 1-cycle delay (effectively a NOP)
-        with m.static_step(1, "delay_1") as step:
+        with m.static_step(1) as delay_1:
             # Just a delay, no operations
             pass
 
         # Static step: delay_3 - 3-cycle delay
-        with m.static_step(3, "delay_3") as step:
+        with m.static_step(3) as delay_3:
             # Multi-cycle delay
             pass
 
         # Static step: compute_sum - Fixed 2-cycle computation
-        with m.static_step(2, "compute_sum") as step:
-            a = step.call(reg_a, "read")
-            b = step.call(reg_b, "read")
-            result = step.add(a, b)
-            step.call(reg_result, "write", result)
+        with m.static_step(2) as compute_sum:
+            a = reg_a.read
+            b = reg_b.read
+            result = compute_sum.add(a, b)
+            reg_result.next = result
 
         # =====================================================================
         # Proc Rule 1: Sequential Control
         # Demonstrates: proc.seq, proc.enable
         # =====================================================================
 
-        with m.proc_rule("seq_test") as rule:
-            with rule.guard as g:
+        with m.proc_rule() as seq_test:
+            with seq_test.guard as g:
                 # Always enabled
                 g.always()
-            with rule.control() as ctrl:
+            with seq_test.control() as ctrl:
                 with ctrl.seq():
                     # Execute steps in sequence
-                    ctrl.enable(m._steps["read_a"].ref())
-                    ctrl.enable(m._steps["write_result"].ref())
+                    ctrl.enable(read_a.ref())
+                    ctrl.enable(write_result.ref())
 
         # =====================================================================
         # Proc Rule 2: Parallel Control
         # Demonstrates: proc.par with multiple concurrent steps
         # =====================================================================
 
-        with m.proc_rule("par_test") as rule:
-            with rule.guard as g:
+        with m.proc_rule() as par_test:
+            with par_test.guard as g:
                 g.always()
-            with rule.control() as ctrl:
+            with par_test.control() as ctrl:
                 with ctrl.par():
                     # Execute steps in parallel (if they don't conflict)
-                    ctrl.enable(m._steps["set_flag"].ref())
-                    ctrl.enable(m._steps["increment_counter"].ref())
+                    ctrl.enable(set_flag.ref())
+                    ctrl.enable(increment_counter.ref())
 
         # =====================================================================
         # Proc Rule 3: Conditional Control
         # Demonstrates: proc.if with then and else branches
         # =====================================================================
 
-        with m.proc_rule("if_test") as rule:
-            with rule.guard as g:
+        with m.proc_rule() as if_test:
+            with if_test.guard as g:
                 g.always()
-            with rule.control() as ctrl:
+            with if_test.control() as ctrl:
                 # Read flag to decide branch
                 flag = ctrl.const(1, 1)  # Simplified for now
                 with ctrl.if_(flag) as if_ctrl:
                     with if_ctrl.then_() as then_ctrl:
                         with then_ctrl.seq():
-                            then_ctrl.enable(m._steps["set_flag"].ref())
+                            then_ctrl.enable(set_flag.ref())
                     with if_ctrl.else_() as else_ctrl:
                         with else_ctrl.seq():
-                            else_ctrl.enable(m._steps["clear_flag"].ref())
+                            else_ctrl.enable(clear_flag.ref())
 
         # =====================================================================
         # Proc Rule 4: While Loop Control
         # Demonstrates: proc.while with loop body
         # =====================================================================
 
-        with m.proc_rule("while_test") as rule:
-            with rule.guard as g:
+        with m.proc_rule() as while_test:
+            with while_test.guard as g:
                 g.always()
-            with rule.control() as ctrl:
+            with while_test.control() as ctrl:
                 # Loop condition function (simplified - returns false, so won't loop)
                 with ctrl.while_(lambda b: b.const(0, 1)) as loop:
                     with loop.seq():
-                        loop.enable(m._steps["increment_counter"].ref())
+                        loop.enable(increment_counter.ref())
 
         # =====================================================================
         # Proc Rule 5: Mixed Static and Dynamic Steps
         # Demonstrates: combining static and dynamic steps in sequence
         # =====================================================================
 
-        with m.proc_rule("mixed_test") as rule:
-            with rule.guard as g:
+        with m.proc_rule() as mixed_test:
+            with mixed_test.guard as g:
                 g.always()
-            with rule.control() as ctrl:
+            with mixed_test.control() as ctrl:
                 with ctrl.seq():
                     # Dynamic step
-                    ctrl.enable(m._steps["read_a"].ref())
+                    ctrl.enable(read_a.ref())
                     # Static step (fixed 3-cycle delay)
-                    ctrl.enable(m._steps["delay_3"].ref())
+                    ctrl.enable(delay_3.ref())
                     # Another dynamic step
-                    ctrl.enable(m._steps["write_result"].ref())
+                    ctrl.enable(write_result.ref())
 
         # =====================================================================
         # Proc Rule 6: Nested Control Structures
         # Demonstrates: nested seq/par/if combinations
         # =====================================================================
 
-        with m.proc_rule("nested_test") as rule:
-            with rule.guard as g:
+        with m.proc_rule() as nested_test:
+            with nested_test.guard as g:
                 g.always()
-            with rule.control() as ctrl:
+            with nested_test.control() as ctrl:
                 with ctrl.seq():
                     # First: parallel operations
                     with ctrl.par():
-                        ctrl.enable(m._steps["set_flag"].ref())
-                        ctrl.enable(m._steps["delay_1"].ref())
+                        ctrl.enable(set_flag.ref())
+                        ctrl.enable(delay_1.ref())
                     # Then: conditional
                     flag = ctrl.const(1, 1)
                     with ctrl.if_(flag) as if_ctrl:
                         with if_ctrl.then_() as then_ctrl:
                             with then_ctrl.seq():
-                                then_ctrl.enable(m._steps["compute_sum"].ref())
+                                then_ctrl.enable(compute_sum.ref())
                     # Finally: more sequential
-                    ctrl.enable(m._steps["clear_flag"].ref())
+                    ctrl.enable(clear_flag.ref())
 
         # =====================================================================
         # Regular (non-procedural) Rule for comparison
         # =====================================================================
 
-        with jit.rule(m, "regular_rule") as rule:
-            with rule.guard as g:
+        with jit.rule(m) as regular_rule:
+            with regular_rule.guard as g:
                 g.always()
-            with rule.body as body:
+            with regular_rule.body as body:
                 # Simple combinational logic
-                val = body.call(reg_a, "read")
+                _ = reg_a.read
                 # No state changes, just demonstrates non-proc rule
 
         # =====================================================================
