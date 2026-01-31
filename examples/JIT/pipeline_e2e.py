@@ -107,7 +107,7 @@ def create_forkjoin_circuit():
         clk = mod.clock()
         rst = mod.reset()
 
-        @jit.dataflow(mod, name="diamond")
+        @jit.dataflow(mod)
         def diamond(df, input: UInt[16]) -> UInt[16]:
             dfb = df._df
 

@@ -127,7 +127,7 @@ def create_packet_processor():
         # the slower encrypt path from stalling the entire pipeline.
         # =====================================================================
 
-        @jit.dataflow(mod, name="packet_process", interval=1)
+        @jit.dataflow(mod, interval=1)
         def packet_process(df, header: UInt[16], payload: UInt[32], ctrl_flags: UInt[8]) -> UInt[32]:
             dfb = df._df
 
@@ -317,7 +317,7 @@ def create_packet_processor():
         # Demonstrates continuous streaming with LI tokens for flow control
         # =====================================================================
 
-        @jit.dataflow(mod, name="stream_process", interval=1)
+        @jit.dataflow(mod, interval=1)
         def stream_process(df, stream_data: UInt[32]) -> UInt[32]:
             dfb = df._df
 

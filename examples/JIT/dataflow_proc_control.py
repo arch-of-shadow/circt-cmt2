@@ -77,7 +77,7 @@ def example_sequential_task():
         with mod.static_step(1) as store:
             pass
 
-        @jit.dataflow(mod, name="seq_pipeline")
+        @jit.dataflow(mod)
         def seq_pipeline(df, input: UInt[32]) -> UInt[32]:
             dfb = df._df
 
@@ -131,7 +131,7 @@ def example_parallel_task():
         with mod.static_step(1) as op_c:
             pass
 
-        @jit.dataflow(mod, name="par_pipeline")
+        @jit.dataflow(mod)
         def par_pipeline(df, input: UInt[16]) -> UInt[16]:
             dfb = df._df
 
@@ -183,7 +183,7 @@ def example_conditional_task():
         with mod.static_step(2) as slow_path_b:
             pass
 
-        @jit.dataflow(mod, name="cond_pipeline")
+        @jit.dataflow(mod)
         def cond_pipeline(df, input: UInt[8]) -> UInt[8]:
             dfb = df._df
 
@@ -235,7 +235,7 @@ def example_iterative_task():
         with mod.static_step(1) as multiply:
             pass
 
-        @jit.dataflow(mod, name="iter_pipeline")
+        @jit.dataflow(mod)
         def iter_pipeline(df, base: UInt[32]) -> UInt[32]:
             dfb = df._df
 
@@ -291,7 +291,7 @@ def example_complex_pipeline():
         with mod.static_step(1) as writeback:
             pass
 
-        @jit.dataflow(mod, name="processor_pipeline")
+        @jit.dataflow(mod)
         def processor_pipeline(df, instruction: UInt[32]) -> UInt[32]:
             dfb = df._df
 
@@ -356,7 +356,7 @@ def example_nested_control():
         with mod.static_step(1) as finalize:
             pass
 
-        @jit.dataflow(mod, name="nested_pipeline")
+        @jit.dataflow(mod)
         def nested_pipeline(df, x: UInt[8]) -> UInt[8]:
             dfb = df._df
 
@@ -409,7 +409,7 @@ def create_simulatable_pipeline():
         rst = mod.reset()
 
         # Simple dataflow: input -> process (add 10) -> multiply by 2 -> output
-        @jit.dataflow(mod, name="simple")
+        @jit.dataflow(mod)
         def simple(df, x: UInt[16]) -> UInt[16]:
             dfb = df._df
 

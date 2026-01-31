@@ -107,7 +107,7 @@ def create_forkjoin_explicit():
         #            |
         #          output
 
-        @jit.dataflow(mod, name="diamond")
+        @jit.dataflow(mod)
         def diamond(df, x: UInt[16]) -> UInt[16]:
             dfb = df._df
 
@@ -161,7 +161,7 @@ def create_multiway_fork():
         clk = mod.clock()
         rst = mod.reset()
 
-        @jit.dataflow(mod, name="three_way")
+        @jit.dataflow(mod)
         def three_way(df, input: UInt[8]) -> UInt[8]:
             dfb = df._df
 
@@ -229,7 +229,7 @@ def create_simulatable_diamond():
         clk = mod.clock()
         rst = mod.reset()
 
-        @jit.dataflow(mod, name="diamond")
+        @jit.dataflow(mod)
         def diamond(df, x: UInt[16]) -> UInt[16]:
             dfb = df._df
 

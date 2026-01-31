@@ -9,16 +9,10 @@ attribute-based method access like `count.read` instead of
 `b.call(count, "read")`.
 
 Example:
-    count = m.instance(Reg.create(circuit, 32), "count", clk=clk, rst=rst)
-    
-    # Old way (string-based):
-    b.call(count, "read")
-    b.call(count, "write", value)
-    
-    # New way (attribute-based):
-    count.read          # MethodRef for read
-    count.write(value)  # Direct write call
-    count.next = value  # Shortcut syntax
+    count = m.instance(Reg.create(circuit, 32), clk=clk, rst=rst)
+    value = count.read()
+    count.write(value)
+    count.next = value  # Shortcut for write
 """
 
 from __future__ import annotations

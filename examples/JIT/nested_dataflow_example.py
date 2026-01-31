@@ -85,7 +85,7 @@ def create_nested_dataflow_design():
         # 3. Postprocess: scale output
         # =====================================================================
 
-        @jit.dataflow(mod, name="image_pipeline", interval=1)
+        @jit.dataflow(mod, interval=1)
         def image_pipeline(df, pixel_in: UInt[16], kernel: UInt[8]) -> UInt[32]:
             dfb = df._df
 
@@ -131,7 +131,7 @@ def create_nested_dataflow_design():
                 pixel = task.token_data(tok_pixel)
                 kernel = task.token_data(tok_kernel)
 
-                @jit.dataflow(task, name="convolution", interval=1)
+                @jit.dataflow(task, interval=1)
                 def convolution(inner, data: UInt[16], weight: UInt[8]) -> UInt[32]:
                     innerb = inner._df
 
@@ -241,7 +241,7 @@ def create_nested_dataflow_design():
         # This demonstrates a simpler nested structure for easier testing.
         # =====================================================================
 
-        @jit.dataflow(mod, name="simple_nested", interval=1)
+        @jit.dataflow(mod, interval=1)
         def simple_nested(df, x: UInt[16]) -> UInt[32]:
             dfb = df._df
 
@@ -254,7 +254,7 @@ def create_nested_dataflow_design():
                 input_val = x
 
                 # Nested dataflow inside the task
-                @jit.dataflow(task, name="inner")
+                @jit.dataflow(task)
                 def inner(inner, a: UInt[16]) -> UInt[32]:
                     innerb = inner._df
 

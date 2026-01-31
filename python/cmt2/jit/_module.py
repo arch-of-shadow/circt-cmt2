@@ -135,7 +135,7 @@ class ModuleContext:
     Example:
         with ModuleContext(circuit, "Counter") as m:
             clk = m.clock()
-            count = m.instance(Reg.create(circuit, width), "count", clk=clk)
+            count = m.instance(Reg.create(circuit, width), clk=clk)
             # count is automatically wrapped - can use count.read, count.write()
     """
     
@@ -300,7 +300,7 @@ def module(circuit: Any, name: str) -> ModuleContext:
     Example:
         with jit.module(circuit, "Counter") as m:
             clk = m.clock()
-            count = m.instance(Reg.create(circuit, width), "count", clk=clk)
+            count = m.instance(Reg.create(circuit, width), clk=clk)
     
     Args:
         circuit: PyCMT2 Circuit object

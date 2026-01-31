@@ -107,7 +107,7 @@ def create_division_pipeline_explicit():
         rst = mod.reset()
 
         # Create dataflow pipeline with explicit task definitions
-        @jit.dataflow(mod, name="div_pipe", interval=1)
+        @jit.dataflow(mod, interval=1)
         def div_pipe(df, dividend: UInt[32], divisor: UInt[32]) -> UInt[32]:
             dfb = df._df
 
@@ -157,7 +157,7 @@ def create_simulatable_shift_pipeline():
         clk = mod.clock()
         rst = mod.reset()
 
-        @jit.dataflow(mod, name="mul_pipe", interval=1)
+        @jit.dataflow(mod, interval=1)
         def mul_pipe(df, input: UInt[16]) -> UInt[16]:
             dfb = df._df
 
