@@ -4,6 +4,8 @@ Index of examples demonstrating CMT2 features.
 
 **Location:** `examples/PyCMT2/`
 
+**JIT location:** `examples/JIT/` (same designs/testbenches, but elaborated via `cmt2.jit`)
+
 ---
 
 ## Running Examples
@@ -15,6 +17,14 @@ export PYTHONPATH=$PWD/tools/circt/python_packages/circt_core
 python3 ../examples/PyCMT2/<example>.py
 ```
 
+To run the JIT version of an example:
+
+```bash
+cd build
+export PYTHONPATH=$PWD/tools/circt/python_packages/circt_core:../python
+python3 ../examples/JIT/<example>.py
+```
+
 ### Curated release-confidence suite (recommended)
 
 Run the curated E2E suite (Verilator) that is kept in sync with the repository:
@@ -22,6 +32,13 @@ Run the curated E2E suite (Verilator) that is kept in sync with the repository:
 ```bash
 cd build
 PYTHONPATH=tools/circt/python_packages/circt_core python3 ../examples/PyCMT2/run_examples.py
+```
+
+Run the matching JIT E2E suite:
+
+```bash
+cd build
+PYTHONPATH=tools/circt/python_packages/circt_core:../python python3 ../examples/JIT/run_examples.py
 ```
 
 ---

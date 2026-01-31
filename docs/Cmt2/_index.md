@@ -21,7 +21,7 @@ CMT2 is a rule-based hardware description dialect implementing **Guarded Atomic 
 |----------|-------------|
 | [QuickStart.md](guides/QuickStart.md) | Introduction and first example |
 | [Concepts.md](features/Concepts.md) | GAA semantics, rules, methods, values |
-| [Examples.md](examples/Examples.md) | Runnable examples (PyCMT2) |
+| [Examples.md](examples/Examples.md) | Runnable examples (PyCMT2 + JIT) |
 
 ### Feature Tour
 
@@ -40,6 +40,7 @@ CMT2 is a rule-based hardware description dialect implementing **Guarded Atomic 
 | Document | Description |
 |----------|-------------|
 | [PyCMT2-Guide.md](guides/PyCMT2-Guide.md) | Python frontend - recommended for new users |
+| [JIT.md](guides/JIT.md) | Typed, ergonomic syntax layer stacked on PyCMT2 |
 | [ECMT2-Guide.md](guides/ECMT2-Guide.md) | C++ embedded DSL |
 | [MultiCycle.md](features/MultiCycle.md) | Multi-cycle operations, timing, and pipelining |
 | [STL.md](features/STL.md) | Standard library components (Reg, FIFO, Memory) |
@@ -53,6 +54,7 @@ CMT2 is a rule-based hardware description dialect implementing **Guarded Atomic 
 | [API-Reference.md](reference/API-Reference.md) | PyCMT2 API documentation (auto-generated) |
 | [Operations.md](reference/Operations.md) | All CMT2 operations |
 | [Attributes.md](reference/Attributes.md) | Timing and scheduling attributes |
+| [TypeSystem.md](reference/TypeSystem.md) | PyCMT2 types (used by JIT and PyCMT2) |
 | [Passes.md](reference/Passes.md) | Transformation and analysis passes |
 | [Examples.md](examples/Examples.md) | Example index with descriptions |
 

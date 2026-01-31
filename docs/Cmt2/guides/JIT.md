@@ -233,5 +233,5 @@ PYTHONPATH=build/tools/circt/python_packages/circt_core:python \
 
 ## Types
 
-JIT uses the **PyCMT2 type system** (see `TypeSystem.md` in this folder).
+JIT uses the **PyCMT2 type system** (see [TypeSystem.md](../reference/TypeSystem.md)).
 Use those types for ports, method args, and method returns.

@@ -176,6 +176,6 @@ Where `<checkbox>` is either `- [ ]` (not done) or `- [x]` (done).
 
 # Future / Design Notes (Non-release)
 
-- [x] FUT1 Keep `docs/Cmt2/future/` limited to current JIT docs
-  - Owner files: `docs/Cmt2/future/JIT.md`, `docs/Cmt2/future/TypeSystem.md`
-  - Validation: `ls docs/Cmt2/future` shows only `JIT.md` and `TypeSystem.md`
+- (none) JIT docs are release-facing:
+  - `docs/Cmt2/guides/JIT.md`
+  - `docs/Cmt2/reference/TypeSystem.md`
