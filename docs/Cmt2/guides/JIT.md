@@ -76,6 +76,17 @@ def counter(width: int = 32):
     return circuit
 ```
 
+### Name inference notes
+
+Several JIT helpers infer symbol names from the assignment target, e.g.:
+
+- `x = m.instance(...)`
+- `with m.step() as s: ...`
+
+This depends on Python stack inspection. If a name cannot be inferred (common
+cases include dynamic container construction or unusual assignment patterns),
+use `alias=...` explicitly.
+
 ### Interfaces (decl/def/bind)
 
 Interfaces are defined at **circuit scope** (signatures), then used inside

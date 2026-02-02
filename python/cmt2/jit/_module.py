@@ -91,6 +91,8 @@ class _NamedBuilderContextCM:
 
     def __enter__(self) -> Any:
         name = self._alias or _infer_assignment_name(depth=3)
+        if not name:
+            raise TypeError("Cannot infer name; use `alias=...`")
         self._cm = self._cm_factory(name)
         builder = self._cm.__enter__()
         self._builder_ctx = BuilderContext(builder)
@@ -117,6 +119,8 @@ class _ProcRuleCM:
 
     def __enter__(self) -> _ProcRuleAdapter:
         name = self._name or _infer_assignment_name(depth=3)
+        if not name:
+            raise TypeError("Cannot infer proc_rule name; use `alias=...`")
         self._cm = self._module_builder.proc_rule(name, *self._args, **self._kwargs)
         rule = self._cm.__enter__()
         return _ProcRuleAdapter(rule)
@@ -172,7 +176,7 @@ class ModuleContext:
         self,
         module_def: Any,
         name: str | None = None,
-        interface_bindings: dict[str, Any] | None = None,
+        interface_bindings: dict[Any, Any] | None = None,
         *,
         alias: str | None = None,
         **connections: Any,

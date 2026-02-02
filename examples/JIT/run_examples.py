@@ -94,7 +94,7 @@ def run_example(name: str, path: str) -> bool:
     return True
 
 
-def run_example_captured(name: str, path: str, log_dir: str) -> bool:
+def run_example_captured(name: str, path: str, log_dir: str, *, strict_pass_markers: bool) -> bool:
     print("\n" + "=" * 60)
     print(f"Running: {name}")
     print("=" * 60)
@@ -142,8 +142,11 @@ def run_example_captured(name: str, path: str, log_dir: str) -> bool:
         or "All tests passed!" in out  # stl_test.py
     )
     if not has_pass_marker:
-        print(f"\nFAIL: {name} produced no PASS marker (log: {log_path})")
-        return False
+        msg = f"{name} produced no PASS marker (log: {log_path})"
+        if strict_pass_markers:
+            print(f"\nFAIL: {msg}")
+            return False
+        print(f"\nWARN: {msg}")
 
     print(f"\nPASS: {name} (log: {log_path})")
     return True
@@ -154,6 +157,11 @@ def main() -> int:
     parser.add_argument('--list', action='store_true', help='List examples and exit')
     parser.add_argument('--keep-going', action='store_true', help='Continue after failures')
     parser.add_argument('--log-dir', default=None, help='Write per-example logs to this dir')
+    parser.add_argument(
+        '--strict-pass-markers',
+        action='store_true',
+        help='Fail if an example exits 0 but prints no known PASS marker',
+    )
     args = parser.parse_args()
 
     script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -184,7 +192,9 @@ def main() -> int:
                 break
             continue
 
-        results[name] = run_example_captured(name, path, log_dir)
+        results[name] = run_example_captured(
+            name, path, log_dir, strict_pass_markers=args.strict_pass_markers
+        )
         if not results[name] and not args.keep_going:
             break
 

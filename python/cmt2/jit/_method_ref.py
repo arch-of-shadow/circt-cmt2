@@ -10,9 +10,9 @@ attribute-based method access like `count.read` instead of
 
 Example:
     count = m.instance(Reg.create(circuit, 32), clk=clk, rst=rst)
-    value = count.read()
-    count.write(value)
-    count.next = value  # Shortcut for write
+    value = count.read         # property-like read (no parentheses)
+    count.write(value)         # callable method
+    count.next = value         # shortcut for write
 """
 
 from __future__ import annotations
@@ -28,12 +28,12 @@ class MethodRef:
     
     Example:
         # count is a Reg instance
-        count.read  # Returns MethodRef for "read" method
+        count.read  # Returns a signal (property-like read)
         count.write  # Returns MethodRef for "write" method
         
         # Call the method
-        value = count.read()  # Calls read method
-        count.write(value)    # Calls write method
+        value = count.read     # Reads current value
+        count.write(value)     # Calls write method
         
         # Shortcut for write
         count.next = value    # Same as count.write(value)
@@ -112,7 +112,7 @@ class SignalRef:
         count = SignalRef(reg_instance)
         
         # Method access
-        val = count.read()      # Calls reg.read()
+        val = count.read        # Property-like read (no parentheses)
         count.write(val + 1)    # Calls reg.write(val + 1)
         
         # Shortcut syntax
@@ -170,11 +170,7 @@ class SignalRef:
                     f"Cannot read '{name}' outside of guard/body context. "
                     "Use within `with r.guard:` / `with r.body:`."
                 )
-            try:
-                py_ref = getattr(self._instance, name)
-            except AttributeError:
-                py_ref = None
-            return builder.call(self._instance, py_ref if py_ref is not None else name)
+            return builder.call(self._instance, name)
 
         # Treat module-defined values as property-like reads.
         inst_module = getattr(self._instance, "_module", None)

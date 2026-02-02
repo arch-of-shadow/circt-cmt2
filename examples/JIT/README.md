@@ -33,5 +33,13 @@ PYTHONPATH=build/tools/circt/python_packages/circt_core:python \
   python3 examples/JIT/run_examples.py --keep-going
 ```
 
+By default the runner passes/fails by exit code (and writes a per-example log).
+To additionally require a known “PASS marker” in each example’s output:
+
+```bash
+PYTHONPATH=build/tools/circt/python_packages/circt_core:python \
+  python3 examples/JIT/run_examples.py --keep-going --strict-pass-markers
+```
+
 Note: these examples generate `sim_*`, `*_workspace`, and `*_sim` folders under
 `examples/JIT/` (gitignored).
