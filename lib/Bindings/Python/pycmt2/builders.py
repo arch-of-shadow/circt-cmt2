@@ -584,7 +584,9 @@ class RegionBuilder:
                 if hasattr(instance_module, "_values") and method_name in instance_module._values:
                     val_builder = instance_module._values[method_name]
                     cmt2_return_types = val_builder._return_types
-                    cmt2_arg_types = []  # Values don't have args
+                    cmt2_arg_types = getattr(val_builder, "_arg_types", [])
+                    if cmt2_arg_types and isinstance(cmt2_arg_types[0], tuple):
+                        cmt2_arg_types = [ty for _, ty in cmt2_arg_types]
                 elif hasattr(instance_module, "_methods") and method_name in instance_module._methods:
                     meth_builder = instance_module._methods[method_name]
                     cmt2_return_types = meth_builder._return_types

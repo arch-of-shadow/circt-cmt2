@@ -536,14 +536,17 @@ class ValueBuilder:
         self,
         module: ModuleBuilder,
         name: str | None,
+        args: list[tuple[str, Cmt2Type]],
         returns: list[Cmt2Type],
     ):
         self._module = module
         self._name = name
+        self._arg_types = args
         self._return_types = returns
         self._guard_builder: GuardBuilder | None = None
         self._body_builder: BodyBuilder | None = None
         self._op = None
+        self._arg_signals: list[tuple[str, Signal]] = []
 
         # Capture Python source location for debugging
         # depth=3 to skip: __init__ -> value() -> contextmanager wrapper -> user code
@@ -568,22 +571,33 @@ class ValueBuilder:
 
         with InsertionPoint(container_body):
             # Build function type
+            arg_mlir_types = [ty.to_firrtl_type(ctx.mlir_context) for _, ty in self._arg_types]
             ret_mlir_types = [ty.to_firrtl_type(ctx.mlir_context) for ty in self._return_types]
-            func_type = FunctionType.get([], ret_mlir_types)
+            func_type = FunctionType.get(arg_mlir_types, ret_mlir_types)
 
+            arg_names = [StringAttr.get(name) for name, _ in self._arg_types]
             body_res_names = [StringAttr.get(f"res{i}") for i in range(len(self._return_types))]
 
             self._op = cmt2.ValueOp(
                 sym_name=StringAttr.get(self.name),
                 function_type=TypeAttr.get(func_type),
-                argNames=ArrayAttr.get([]),
+                argNames=ArrayAttr.get(arg_names),
                 bodyResNames=ArrayAttr.get(body_res_names),
                 loc=mlir_loc,
             )
 
-            # Create guard and body blocks
-            guard_block = Block.create_at_start(self._op.guard)
-            body_block = Block.create_at_start(self._op.body)
+            # Create guard and body blocks with arguments
+            arg_locs = [mlir_loc] * len(arg_mlir_types)
+            guard_block = Block.create_at_start(self._op.guard, arg_mlir_types, arg_locs)
+            body_block = Block.create_at_start(self._op.body, arg_mlir_types, arg_locs)
+
+            # Create signals for arguments (body builder context)
+            from .builders import RegionBuilder
+
+            dummy_builder = RegionBuilder(body_block, ctx.location, ctx)
+            for i, (arg_name, arg_ty) in enumerate(self._arg_types):
+                sig = Signal(body_block.arguments[i], arg_ty, dummy_builder)
+                self._arg_signals.append((arg_name, sig))
 
     @property
     def name(self) -> str:
@@ -608,6 +622,10 @@ class ValueBuilder:
             self._module._circuit._ctx,
         )
         with self._guard_builder as g:
+            # Expose arguments in guard.
+            for i, (arg_name, arg_ty) in enumerate(self._arg_types):
+                sig = Signal(guard_block.arguments[i], arg_ty, g)
+                setattr(g, arg_name, sig)
             yield g
 
     @contextmanager
@@ -619,6 +637,7 @@ class ValueBuilder:
             body_block,
             self._module._circuit._ctx.location,
             self._module._circuit._ctx,
+            args=self._arg_signals,
             return_types=self._return_types,
         )
         with self._body_builder as b:

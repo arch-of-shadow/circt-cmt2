@@ -403,12 +403,14 @@ class ModuleBuilder:
     def value(
         self,
         name: str | None = None,
+        args: list[tuple[str, Cmt2Type]] | None = None,
         returns: list[Cmt2Type] | None = None,
     ) -> Iterator[ValueBuilder]:
         """Define a value method.
 
         Args:
             name: Optional value name.
+            args: Value arguments as (name, type) pairs.
             returns: Return types.
 
         Yields:
@@ -416,7 +418,7 @@ class ModuleBuilder:
         """
         from .function_builders import ValueBuilder
 
-        builder = ValueBuilder(self, name, returns or [])
+        builder = ValueBuilder(self, name, args or [], returns or [])
         yield builder
         builder._finalize()
         self._values[builder.name] = builder

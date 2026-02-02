@@ -174,9 +174,12 @@ class InterfaceBuilder:
 
     @contextmanager
     def value(
-        self, name: str | None = None, returns: list["Cmt2Type"] | None = None
+        self,
+        name: str | None = None,
+        args: list[tuple[str, "Cmt2Type"]] | None = None,
+        returns: list["Cmt2Type"] | None = None,
     ) -> Iterator[ValueBuilder]:
-        builder = ValueBuilder(self, name, returns or [])
+        builder = ValueBuilder(self, name, args or [], returns or [])
         yield builder
         builder._finalize()
         self._values[builder.name] = builder
@@ -224,9 +227,7 @@ class InterfaceBuilder:
         def deco(f: F) -> F:
             val_name = name or f.__name__
             arg_types, ret_types = _parse_interface_signature(f, definition_locals=definition_locals)
-            if arg_types:
-                raise TypeError("Interface values cannot take arguments")
-            with self.value(val_name, returns=ret_types) as v:
+            with self.value(val_name, args=arg_types, returns=ret_types) as v:
                 with v.guard() as g:
                     g.always()
                 with v.body() as b:
