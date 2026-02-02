@@ -421,6 +421,8 @@ class BuilderProxy:
         # If instance is a SignalRef, unwrap it
         if isinstance(instance, SignalRef):
             instance = instance._instance
+        elif isinstance(instance, InterfaceRef):
+            instance = instance.decl
         
         return self._builder.call(instance, method, *args, **kwargs)
 

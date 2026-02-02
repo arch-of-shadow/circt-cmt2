@@ -25,7 +25,7 @@ import sys
 
 def _repo_root(script_dir: str) -> str:
     # script_dir = <repo>/examples/PyCMT2
-    return os.path.dirname(os.path.dirname(os.path.dirname(script_dir)))
+    return os.path.dirname(os.path.dirname(script_dir))
 
 
 def _default_circt_core(repo_root: str) -> str | None:

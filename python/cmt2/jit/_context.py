@@ -34,7 +34,7 @@ class _GuardContext:
         return self._ctx
     
     def __exit__(self, exc_type, exc_val, exc_tb):
-        self._ctx._exit_guard()
+        return self._ctx._exit_guard(exc_type, exc_val, exc_tb)
 
 
 class _BodyContext:
@@ -48,7 +48,7 @@ class _BodyContext:
         return self._ctx
     
     def __exit__(self, exc_type, exc_val, exc_tb):
-        self._ctx._exit_body()
+        return self._ctx._exit_body(exc_type, exc_val, exc_tb)
 
 
 class RuleContext:
@@ -87,17 +87,21 @@ class RuleContext:
         self._guard_builder_ctx = BuilderContext(self._guard_builder)
         self._guard_builder_ctx.__enter__()
     
-    def _exit_guard(self):
+    def _exit_guard(self, exc_type=None, exc_val=None, exc_tb=None) -> bool:
         """Exit guard region."""
         if self._guard_builder is not None:
             guard_builder_ctx = self._guard_builder_ctx
             guard_cm = self._guard_cm
+            suppressed = bool(guard_builder_ctx.__exit__(exc_type, exc_val, exc_tb))
+            if suppressed:
+                exc_type = exc_val = exc_tb = None
             try:
-                guard_builder_ctx.__exit__(None, None, None)
+                suppressed = bool(guard_cm.__exit__(exc_type, exc_val, exc_tb)) or suppressed
+                return suppressed
             finally:
                 self._guard_builder_ctx = None
                 self._guard_builder = None
-            guard_cm.__exit__(None, None, None)
+        return False
     
     def _enter_body(self):
         """Enter body region."""
@@ -106,17 +110,21 @@ class RuleContext:
         self._body_builder_ctx = BuilderContext(self._body_builder)
         self._body_builder_ctx.__enter__()
     
-    def _exit_body(self):
+    def _exit_body(self, exc_type=None, exc_val=None, exc_tb=None) -> bool:
         """Exit body region."""
         if self._body_builder is not None:
             body_builder_ctx = self._body_builder_ctx
             body_cm = self._body_cm
+            suppressed = bool(body_builder_ctx.__exit__(exc_type, exc_val, exc_tb))
+            if suppressed:
+                exc_type = exc_val = exc_tb = None
             try:
-                body_builder_ctx.__exit__(None, None, None)
+                suppressed = bool(body_cm.__exit__(exc_type, exc_val, exc_tb)) or suppressed
+                return suppressed
             finally:
                 self._body_builder_ctx = None
                 self._body_builder = None
-            body_cm.__exit__(None, None, None)
+        return False
     
     def _get_guard(self) -> Any:
         """Get guard builder (must be in guard region)."""
@@ -195,8 +203,11 @@ class RuleContext:
     
     def __exit__(self, exc_type, exc_val, exc_tb):
         # Exit body first, then guard
-        self._exit_body()
-        self._exit_guard()
+        suppressed = self._exit_body(exc_type, exc_val, exc_tb)
+        if suppressed:
+            exc_type = exc_val = exc_tb = None
+        suppressed = self._exit_guard(exc_type, exc_val, exc_tb) or suppressed
+        return suppressed
 
 
 class ValueContext:
@@ -235,16 +246,20 @@ class ValueContext:
         self._guard_builder_ctx = BuilderContext(self._guard_builder)
         self._guard_builder_ctx.__enter__()
     
-    def _exit_guard(self):
+    def _exit_guard(self, exc_type=None, exc_val=None, exc_tb=None) -> bool:
         if self._guard_builder is not None:
             guard_builder_ctx = self._guard_builder_ctx
             guard_cm = self._guard_cm
+            suppressed = bool(guard_builder_ctx.__exit__(exc_type, exc_val, exc_tb))
+            if suppressed:
+                exc_type = exc_val = exc_tb = None
             try:
-                guard_builder_ctx.__exit__(None, None, None)
+                suppressed = bool(guard_cm.__exit__(exc_type, exc_val, exc_tb)) or suppressed
+                return suppressed
             finally:
                 self._guard_builder_ctx = None
                 self._guard_builder = None
-            guard_cm.__exit__(None, None, None)
+        return False
     
     def _enter_body(self):
         self._body_cm = self._value.body()
@@ -254,16 +269,20 @@ class ValueContext:
         for arg_name, _ in self._args:
             self._arg_values[arg_name] = self._body_builder.arg(arg_name)
     
-    def _exit_body(self):
+    def _exit_body(self, exc_type=None, exc_val=None, exc_tb=None) -> bool:
         if self._body_builder is not None:
             body_builder_ctx = self._body_builder_ctx
             body_cm = self._body_cm
+            suppressed = bool(body_builder_ctx.__exit__(exc_type, exc_val, exc_tb))
+            if suppressed:
+                exc_type = exc_val = exc_tb = None
             try:
-                body_builder_ctx.__exit__(None, None, None)
+                suppressed = bool(body_cm.__exit__(exc_type, exc_val, exc_tb)) or suppressed
+                return suppressed
             finally:
                 self._body_builder_ctx = None
                 self._body_builder = None
-            body_cm.__exit__(None, None, None)
+        return False
 
     def call(self, target: Any, method_or_value: Any, *args: Any, **kwargs: Any) -> Any:
         builder = _get_current_builder()
@@ -337,8 +356,11 @@ class ValueContext:
         return self
     
     def __exit__(self, exc_type, exc_val, exc_tb):
-        self._exit_body()
-        self._exit_guard()
+        suppressed = self._exit_body(exc_type, exc_val, exc_tb)
+        if suppressed:
+            exc_type = exc_val = exc_tb = None
+        suppressed = self._exit_guard(exc_type, exc_val, exc_tb) or suppressed
+        return suppressed
 
 
 class MethodContext:
@@ -377,16 +399,20 @@ class MethodContext:
         self._guard_builder_ctx = BuilderContext(self._guard_builder)
         self._guard_builder_ctx.__enter__()
     
-    def _exit_guard(self):
+    def _exit_guard(self, exc_type=None, exc_val=None, exc_tb=None) -> bool:
         if self._guard_builder is not None:
             guard_builder_ctx = self._guard_builder_ctx
             guard_cm = self._guard_cm
+            suppressed = bool(guard_builder_ctx.__exit__(exc_type, exc_val, exc_tb))
+            if suppressed:
+                exc_type = exc_val = exc_tb = None
             try:
-                guard_builder_ctx.__exit__(None, None, None)
+                suppressed = bool(guard_cm.__exit__(exc_type, exc_val, exc_tb)) or suppressed
+                return suppressed
             finally:
                 self._guard_builder_ctx = None
                 self._guard_builder = None
-            guard_cm.__exit__(None, None, None)
+        return False
     
     def _enter_body(self):
         self._body_cm = self._method.body()
@@ -397,16 +423,20 @@ class MethodContext:
         for arg_name, _ in self._args:
             self._arg_values[arg_name] = self._body_builder.arg(arg_name)
     
-    def _exit_body(self):
+    def _exit_body(self, exc_type=None, exc_val=None, exc_tb=None) -> bool:
         if self._body_builder is not None:
             body_builder_ctx = self._body_builder_ctx
             body_cm = self._body_cm
+            suppressed = bool(body_builder_ctx.__exit__(exc_type, exc_val, exc_tb))
+            if suppressed:
+                exc_type = exc_val = exc_tb = None
             try:
-                body_builder_ctx.__exit__(None, None, None)
+                suppressed = bool(body_cm.__exit__(exc_type, exc_val, exc_tb)) or suppressed
+                return suppressed
             finally:
                 self._body_builder_ctx = None
                 self._body_builder = None
-            body_cm.__exit__(None, None, None)
+        return False
 
     def call(self, target: Any, method_or_value: Any, *args: Any, **kwargs: Any) -> Any:
         builder = _get_current_builder()
@@ -486,5 +516,8 @@ class MethodContext:
         return self
     
     def __exit__(self, exc_type, exc_val, exc_tb):
-        self._exit_body()
-        self._exit_guard()
+        suppressed = self._exit_body(exc_type, exc_val, exc_tb)
+        if suppressed:
+            exc_type = exc_val = exc_tb = None
+        suppressed = self._exit_guard(exc_type, exc_val, exc_tb) or suppressed
+        return suppressed

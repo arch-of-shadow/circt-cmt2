@@ -553,6 +553,7 @@ class RegionBuilder:
             result_types = []
             cmt2_return_types = []
             cmt2_arg_types = []
+            signature_known = False
 
             if method_builder is not None and hasattr(method_builder, "_return_types"):
                 cmt2_return_types = method_builder._return_types
@@ -561,6 +562,7 @@ class RegionBuilder:
                     # MethodBuilder stores args as [(name, type), ...].
                     if cmt2_arg_types and isinstance(cmt2_arg_types[0], tuple):
                         cmt2_arg_types = [ty for _, ty in cmt2_arg_types]
+                signature_known = True
             elif interface is not None:
                 func_builder = interface.get_function(method_name)
                 if func_builder is None:
@@ -571,6 +573,7 @@ class RegionBuilder:
                 cmt2_arg_types = getattr(func_builder, "_arg_types", [])
                 if cmt2_arg_types and isinstance(cmt2_arg_types[0], tuple):
                     cmt2_arg_types = [ty for _, ty in cmt2_arg_types]
+                signature_known = True
             elif isinstance(instance_module, ExternalModuleBuilder):
                 # Look up types from external module - try value first, then method
                 cmt2_return_types = instance_module.get_value_return_types(method_name)
@@ -578,6 +581,7 @@ class RegionBuilder:
                 if not cmt2_return_types and not cmt2_arg_types:
                     cmt2_return_types = instance_module.get_method_return_types(method_name)
                     cmt2_arg_types = instance_module.get_method_arg_types(method_name)
+                signature_known = bool(cmt2_return_types or cmt2_arg_types)
             elif instance_module is not None:
                 # Look up types from CMT2 module (ModuleBuilder)
                 # Check _values first, then _methods
@@ -587,15 +591,22 @@ class RegionBuilder:
                     cmt2_arg_types = getattr(val_builder, "_arg_types", [])
                     if cmt2_arg_types and isinstance(cmt2_arg_types[0], tuple):
                         cmt2_arg_types = [ty for _, ty in cmt2_arg_types]
+                    signature_known = True
                 elif hasattr(instance_module, "_methods") and method_name in instance_module._methods:
                     meth_builder = instance_module._methods[method_name]
                     cmt2_return_types = meth_builder._return_types
                     cmt2_arg_types = [ty for _, ty in meth_builder._arg_types]
+                    signature_known = True
 
             result_types = [
                 ty.to_firrtl_type(self._ctx.mlir_context)
                 for ty in cmt2_return_types
             ]
+
+            if signature_known and len(cmt2_arg_types) != len(args):
+                raise TypeError(
+                    f"Call to '{method_name}' expected {len(cmt2_arg_types)} args, got {len(args)}"
+                )
 
             # Convert argument widths if needed
             converted_args = list(args)
