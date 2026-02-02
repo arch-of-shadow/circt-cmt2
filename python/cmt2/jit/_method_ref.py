@@ -175,6 +175,16 @@ class SignalRef:
         # Treat module-defined values as property-like reads.
         inst_module = getattr(self._instance, "_module", None)
         if inst_module is not None and hasattr(inst_module, "_values") and name in inst_module._values:
+            # Values that take arguments are callable, not property-like reads.
+            if self._value_has_args(name):
+                if name not in self._method_cache:
+                    try:
+                        py_ref = getattr(self._instance, name)
+                    except AttributeError:
+                        py_ref = None
+                    self._method_cache[name] = MethodRef(self._instance, name, _py_ref=py_ref)
+                return self._method_cache[name]
+
             builder = _get_current_builder()
             if builder is None:
                 raise RuntimeError(
@@ -247,6 +257,10 @@ class SignalRef:
         inst_module = getattr(self._instance, "_module", None)
         if inst_module is not None:
             try:
+                if hasattr(inst_module, "_values") and name in inst_module._values:
+                    val_builder = inst_module._values[name]
+                    arg_types = getattr(val_builder, "_arg_types", [])
+                    return bool(arg_types)
                 if hasattr(inst_module, "_methods") and name in inst_module._methods:
                     meth_builder = inst_module._methods[name]
                     arg_types = getattr(meth_builder, "_arg_types", [])
@@ -254,6 +268,18 @@ class SignalRef:
             except Exception:
                 pass
 
+        return False
+
+    def _value_has_args(self, name: str) -> bool:
+        inst_module = getattr(self._instance, "_module", None)
+        if inst_module is None:
+            return False
+        try:
+            if hasattr(inst_module, "_values") and name in inst_module._values:
+                val_builder = inst_module._values[name]
+                return bool(getattr(val_builder, "_arg_types", []))
+        except Exception:
+            return False
         return False
     
     def __setattr__(self, name: str, value: Any) -> None:
@@ -334,6 +360,14 @@ class InterfaceRef:
             if func is not None:
                 # Interface values are property-like (no parentheses).
                 if name in getattr(iface, "_values", {}):
+                    # Values with arguments are callable.
+                    val_builder = getattr(iface, "_values", {}).get(name)
+                    arg_types = getattr(val_builder, "_arg_types", [])
+                    if arg_types:
+                        if name not in self._method_cache:
+                            self._method_cache[name] = MethodRef(self._decl, name)
+                        return self._method_cache[name]
+
                     builder = _get_current_builder()
                     if builder is None:
                         raise RuntimeError(

@@ -212,8 +212,11 @@ class ValueContext:
                 r.returns(count.read)
     """
     
-    def __init__(self, value: Any):
+    def __init__(self, value: Any, args: list | None = None):
         self._value = value
+        self._args = args or []
+        self._arg_names = {name for name, _ in self._args}
+        self._arg_values: dict[str, Any] = {}
         self._guard_builder: Any = None
         self._body_builder: Any = None
         self.guard = _GuardContext(self)
@@ -248,6 +251,8 @@ class ValueContext:
         self._body_builder = self._body_cm.__enter__()
         self._body_builder_ctx = BuilderContext(self._body_builder)
         self._body_builder_ctx.__enter__()
+        for arg_name, _ in self._args:
+            self._arg_values[arg_name] = self._body_builder.arg(arg_name)
     
     def _exit_body(self):
         if self._body_builder is not None:
@@ -313,7 +318,15 @@ class ValueContext:
             raise RuntimeError("Not in any region")
 
     def __getattr__(self, name: str) -> Any:
-        """Delegate unknown attributes to the active PyCMT2 builder."""
+        """Expose value arguments as attributes inside guard/body regions."""
+        if name in self._arg_names:
+            if self._guard_builder is not None:
+                return getattr(self._guard_builder, name)
+            if self._body_builder is not None:
+                return self._arg_values[name]
+            raise RuntimeError(
+                f"Cannot access value argument '{name}' outside of guard/body context."
+            )
         if self._guard_builder is not None:
             return getattr(self._guard_builder, name)
         if self._body_builder is not None:

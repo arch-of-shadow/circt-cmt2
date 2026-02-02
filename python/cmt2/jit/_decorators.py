@@ -221,12 +221,11 @@ class _ValueDef:
         arg_types, return_types = parse_typed_signature(
             func, require_return=True, definition_locals=definition_locals
         )
-        if arg_types:
-            raise TypeError("@jit.value functions cannot take arguments")
-        with self._builder.value(value_name, returns=return_types) as value:
-            ctx = ValueContext(value)
+        with self._builder.value(value_name, args=arg_types, returns=return_types) as value:
+            ctx = ValueContext(value, args=arg_types)
             with ctx:
-                func(ctx)
+                proxies = [ArgProxy(name) for name, _ in arg_types]
+                func(ctx, *proxies)
             setattr(func, "_cmt2_ref", value.ref())
             setattr(func, "_cmt2_name", value_name)
             setattr(func, "ref", lambda: getattr(func, "_cmt2_ref"))

@@ -123,6 +123,23 @@ def write(r, data: UInt[32]) -> None:
         count.write(data)
 ```
 
+### Values with arguments
+
+Values are read-only and follow the ready/data contract. Values may also take
+arguments; in that case they are called like a function (not as a property):
+
+```python
+@jit.value(m)
+def add1(r, x: UInt[8]) -> UInt[8]:
+    with r.guard:
+        r.always()
+    with r.body:
+        r.returns(x + 1)
+
+with some_rule.body:
+    y = inst.add1(j)  # callable value-with-args
+```
+
 ### Typed signatures (no `args=[("x", ...)]`)
 
 JIT never asks you to define argument/return types via string/tuple lists.
