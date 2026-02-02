@@ -74,6 +74,7 @@ EXAMPLES = [
     'test_cond_if.py',
     'test_submodule_proc_step.py',
     'timing.py',
+    'value_args.py',
     'while_loop_example.py',
 ]
 
