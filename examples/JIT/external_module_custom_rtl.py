@@ -9,8 +9,8 @@ External Module Example (custom RTL) using Cmt2 JIT stacked on PyCMT2.
 This example validates that:
 - PyCMT2 external modules (`Circuit.external_module`) can be instantiated and
   called through the JIT attribute-based API.
-- Externs not backed by ModuleLibrary can be simulated by providing RTL via
-  `SimulationWorkspace.add_external_rtl(...)`.
+- Externs not backed by ModuleLibrary can be simulated by attaching an RTL file
+  path (`rtl_path=...`) and letting `SimulationWorkspace` stage it automatically.
 
 Usage:
   PYTHONPATH=build/tools/circt/python_packages/circt_core:python \\

@@ -7,9 +7,8 @@
 External Module Example (custom RTL) using PyCMT2 EDSL
 
 This example validates user-defined `Circuit.external_module(...)` bindings by
-providing a matching SystemVerilog implementation via
-`SimulationWorkspace.add_external_rtl(...)` and running an end-to-end Verilator
-simulation with the Testbench DSL.
+attaching a matching SystemVerilog implementation via `acc.rtl_path(...)` and
+running an end-to-end Verilator simulation with the Testbench DSL.
 
 Usage:
   PYTHONPATH=build/tools/circt/python_packages/circt_core:python \\
