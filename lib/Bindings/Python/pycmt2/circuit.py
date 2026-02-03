@@ -9,6 +9,7 @@ from __future__ import annotations
 import sys
 import dis
 from contextlib import contextmanager
+from pathlib import Path
 from typing import TYPE_CHECKING, Iterator
 
 if TYPE_CHECKING:
@@ -168,7 +169,11 @@ class Circuit:
 
     @contextmanager
     def external_module(
-        self, name: str
+        self,
+        name: str,
+        *,
+        rtl: str | Path | None = None,
+        rtl_files: list[str | Path] | None = None,
     ) -> Iterator["ExternalModuleBuilder"]:
         """Create an external module binding.
 
@@ -177,6 +182,10 @@ class Circuit:
 
         Args:
             name: The external module name.
+            rtl: Optional path to a Verilog/SystemVerilog file implementing the
+                external module. When provided, SimulationWorkspace will stage
+                it into the generated workspace automatically.
+            rtl_files: Optional list of additional RTL file paths to stage.
 
         Yields:
             An ExternalModuleBuilder for defining bindings.
@@ -185,13 +194,18 @@ class Circuit:
             with circuit.external_module("Reg32") as reg:
                 reg.clock("clk")
                 reg.reset("rst")
-                reg.value("read", returns=[UInt(32)])
-                reg.method("write", args=[("data", UInt(32))])
+                reg.value("read", ready_name="read_ready", returns=[("data", UInt(32))])
+                reg.method(
+                    "write",
+                    enable_name="write_enable",
+                    ready_name="write_ready",
+                    args=[("data", UInt(32))],
+                )
                 reg.sequence_before("read", "write")
         """
         from .external_module import ExternalModuleBuilder
 
-        builder = ExternalModuleBuilder(self, name)
+        builder = ExternalModuleBuilder(self, name, rtl=rtl, rtl_files=rtl_files)
         yield builder
         builder._finalize()
         self._external_modules[name] = builder
@@ -521,37 +535,6 @@ class Circuit:
                 op.operation.clone()
 
         return new_module
-
-    def _add_firrtl_external_modules(self, mlir_module):
-        """Add FIRRTL external module declarations for CMT2 external modules.
-
-        The CMT2 to FIRRTL conversion expects FIRRTL modules to exist for
-        each external module binding. This method creates firrtl.extmodule
-        operations with the appropriate port signatures.
-        """
-        from circt.ir import InsertionPoint, StringAttr, IntegerAttr, IntegerType, ArrayAttr
-        from circt.dialects import firrtl
-        from .types import ClockType, ResetType
-
-        ctx = self._ctx.mlir_context
-
-        # Find or create the firrtl.circuit
-        firrtl_circuit = None
-        for op in mlir_module.body:
-            if op.operation.name == "firrtl.circuit":
-                firrtl_circuit = op
-                break
-
-        if firrtl_circuit is None:
-            # No FIRRTL circuit yet - it will be created by lower-cmt2-to-firrtl
-            # We need to add the external modules before running the conversion
-            # The conversion pass creates the FIRRTL circuit, so we need to
-            # add the external modules to the top-level module first
-            pass
-
-        # Create FIRRTL external modules for each CMT2 external module
-        for name, ext_mod in self._external_modules.items():
-            self._create_firrtl_extmodule(mlir_module, ext_mod)
 
     def __repr__(self) -> str:
         return f"Circuit({self.name!r})"

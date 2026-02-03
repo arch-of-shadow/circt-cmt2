@@ -103,6 +103,42 @@ class SimulationWorkspace:
         self._external_rtl[filename] = content
         return self
 
+    def add_external_rtl_file(
+        self, path: str | Path, *, dest_name: str | None = None
+    ) -> "SimulationWorkspace":
+        """Add an external RTL file to the workspace by path.
+
+        This is a convenience wrapper over `add_external_rtl()` that reads the
+        file content and stages it into `rtl/<dest_name>`.
+
+        Args:
+            path: Path to an existing RTL file (SystemVerilog/Verilog).
+            dest_name: Optional destination filename under `rtl/`. Defaults to
+                `Path(path).name`.
+
+        Returns:
+            self for chaining.
+        """
+        path = Path(path)
+        filename = dest_name if dest_name is not None else path.name
+        self._external_rtl[filename] = path.read_text()
+        return self
+
+    def _add_external_rtl_files_from_circuit(self):
+        """Stage user-provided external RTL files declared on external modules."""
+        for ext in getattr(self.circuit, "_external_modules", {}).values():
+            for rtl in getattr(ext, "_rtl_files", []) or []:
+                try:
+                    self.add_external_rtl_file(rtl)
+                except Exception as e:
+                    ext_name = getattr(ext, "_name", None) or getattr(
+                        ext, "_firrtl_module_name", None
+                    )
+                    raise RuntimeError(
+                        f"Failed to stage external RTL file {rtl!s}"
+                        + (f" for external module {ext_name!r}" if ext_name else "")
+                    ) from e
+
     def _get_top_module_name(self) -> str:
         """Get the top-level module name from the circuit.
 
@@ -421,6 +457,7 @@ class SimulationWorkspace:
             verilog = self.circuit.emit_verilog(debug_ports=self._debug_ports)
             self._last_emitted_verilog = verilog
             self._add_stl_rtl()
+            self._add_external_rtl_files_from_circuit()
             rtl_file = self.output_dir / "rtl" / f"{self._top_module}.sv"
             rtl_file.write_text(verilog)
         except Exception as e:

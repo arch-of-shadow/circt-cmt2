@@ -369,21 +369,26 @@ def create_comprehensive_example():
             data = step.call(current_data, "read")
             step.call(mag_calc, "start", data)
 
+        # Capture magnitude result from submodule and advance to stage 3.
+        with main_mod.static_step(1, "capture_mag_result") as step:
+            magnitude = step.call(mag_calc, "result")
+            step.call(magnitude_reg, "write", magnitude)
+            step.call(pipeline_stage, "write", step.const(3, 16))
+
         # Wait step (no-op, for while loops)
         with main_mod.static_step(1, "wait_step") as step:
             pass
 
-        # Inline magnitude calculation: magnitude = (data & 3) + 1
-        with main_mod.static_step(1, "calc_magnitude_inline") as step:
-            data = step.call(current_data, "read")
-            low_bits = step.bits(data, 1, 0)  # data & 3
-            low_bits_ext = step.pad(low_bits, 16)
-            magnitude = step.add(low_bits_ext, step.const(1, 16))  # + 1
-            step.call(magnitude_reg, "write", magnitude)
-
-        # Move to stage 2
+        # Move to stage 2 (wait for submodule to complete)
         with main_mod.static_step(1, "move_to_stage2") as step:
             step.call(pipeline_stage, "write", step.const(2, 16))
+
+        # Start accumulator submodule and advance to stage 4.
+        with main_mod.static_step(1, "start_accumulator") as step:
+            iters = step.call(magnitude_reg, "read")
+            data = step.call(current_data, "read")
+            step.call(accumulator, "start", iters, data)
+            step.call(pipeline_stage, "write", step.const(4, 16))
 
         # Fast path: result = data * 2
         with main_mod.static_step(1, "fast_path_compute") as step:
@@ -393,20 +398,10 @@ def create_comprehensive_example():
             step.call(result_reg, "write", doubled)
             step.call(pipeline_stage, "write", step.const(5, 16))
 
-        # Slow path: initialize result to 0
-        with main_mod.static_step(1, "slow_path_init") as step:
-            step.call(result_reg, "write", step.const(0, 32))
-
-        # Slow path: single accumulation iteration (result += data)
-        with main_mod.static_step(1, "slow_path_accumulate") as step:
-            result = step.call(result_reg, "read")
-            data = step.call(current_data, "read")
-            data_ext = step.pad(data, 32)
-            new_result = step.add(result, data_ext)
-            step.call(result_reg, "write", new_result)
-
-        # Slow path: move to done stage after accumulation
-        with main_mod.static_step(1, "slow_path_done") as step:
+        # Capture accumulator result and advance to stage 5.
+        with main_mod.static_step(1, "capture_acc_result") as step:
+            result = step.call(accumulator, "result")
+            step.call(result_reg, "write", result)
             step.call(pipeline_stage, "write", step.const(5, 16))
 
         # Conditional bonus: add 100 if result >= 500 (demonstrates if_ with condition function)
@@ -444,9 +439,9 @@ def create_comprehensive_example():
                Calculate magnitude  |
             2. Move to stage 2 (after both complete)
 
-            Demonstrates: par block - check_even_odd and calc_magnitude_inline
-            run in parallel since they both read current_data but write to
-            different registers.
+            Demonstrates: par block - check_even_odd and start_mag_calc run in
+            parallel since they both read current_data but write to different
+            registers (directly or via submodule state).
             """
             with rule.guard() as g:
                 stage = g.call(pipeline_stage, "read")
@@ -455,14 +450,26 @@ def create_comprehensive_example():
 
             with rule.control() as ctrl:
                 with ctrl.seq() as seq:
-                    # Par block: both steps read current_data, write to different regs
+                    # Par block: compute even/odd and trigger submodule proc_rule
                     with seq.par() as p:
                         p.enable(main_mod._steps["check_even_odd"].ref())
-                        p.enable(main_mod._steps["calc_magnitude_inline"].ref())
-                    # After parallel steps complete, move to next stage
+                        p.enable(main_mod._steps["start_mag_calc"].ref())
+                    # After parallel steps complete, wait for submodule completion
                     seq.enable(main_mod._steps["move_to_stage2"].ref())
 
-        # Rule 3a: Fast path for even numbers (stage 2)
+        # Rule 2b: Wait for magnitude calculation completion (stage 2)
+        with main_mod.proc_rule("stage2_wait_mag_done") as rule:
+            with rule.guard() as g:
+                stage = g.call(pipeline_stage, "read")
+                is_stage2 = g.eq(stage, g.const(2, 16))
+                done = g.call(mag_calc, "done")
+                cond = g.and_(is_stage2, done)
+                g.returns(cond)
+
+            with rule.control() as ctrl:
+                ctrl.enable(main_mod._steps["capture_mag_result"].ref())
+
+        # Rule 3a: Fast path for even numbers (stage 3)
         # Uses mutually exclusive guard with stage2_odd_slow
         with main_mod.proc_rule("stage2_even_fast") as rule:
             """
@@ -470,35 +477,43 @@ def create_comprehensive_example():
             """
             with rule.guard() as g:
                 stage = g.call(pipeline_stage, "read")
-                is_stage2 = g.eq(stage, g.const(2, 16))
+                is_stage3 = g.eq(stage, g.const(3, 16))
                 is_even = g.call(even_flag, "read")
-                cond = g.and_(is_stage2, is_even)
+                cond = g.and_(is_stage3, is_even)
                 g.returns(cond)
 
             with rule.control() as ctrl:
                 ctrl.enable(main_mod._steps["fast_path_compute"].ref())
 
-        # Rule 3b: Slow path for odd numbers (stage 2)
-        # Demonstrates: static_repeat
+        # Rule 3b: Slow path for odd numbers (stage 3)
+        # Demonstrates: triggering a submodule proc_rule + while_ loop
         with main_mod.proc_rule("stage2_odd_slow") as rule:
             """
-            Slow path for odd numbers using static_repeat.
-            Demonstrates: nested seq and static_repeat(4)
+            Slow path for odd numbers using IterativeAccumulator submodule.
             """
             with rule.guard() as g:
                 stage = g.call(pipeline_stage, "read")
-                is_stage2 = g.eq(stage, g.const(2, 16))
+                is_stage3 = g.eq(stage, g.const(3, 16))
                 is_even = g.call(even_flag, "read")
                 is_odd = g.eq(is_even, g.const(0, 1))
-                cond = g.and_(is_stage2, is_odd)
+                cond = g.and_(is_stage3, is_odd)
                 g.returns(cond)
 
             with rule.control() as ctrl:
-                with ctrl.seq() as seq:
-                    seq.enable(main_mod._steps["slow_path_init"].ref())
-                    with seq.static_repeat(4) as loop:
-                        loop.enable(main_mod._steps["slow_path_accumulate"].ref())
-                    seq.enable(main_mod._steps["slow_path_done"].ref())
+                ctrl.enable(main_mod._steps["start_accumulator"].ref())
+
+        # Rule 4: Wait for accumulator completion (stage 4)
+        with main_mod.proc_rule("stage4_wait_acc_done") as rule:
+            with rule.guard() as g:
+                stage = g.call(pipeline_stage, "read")
+                is_stage4 = g.eq(stage, g.const(4, 16))
+                done = g.call(accumulator, "done")
+                cond = g.and_(is_stage4, done)
+                g.returns(cond)
+
+            with rule.control() as ctrl:
+                ctrl.enable(main_mod._steps["capture_acc_result"].ref())
+
 
         # Rule 5: Finalize (stage 5)
         # Demonstrates: if_ with condition function (ProcCondIfOp)
@@ -572,7 +587,7 @@ def create_comprehensive_testbench(circuit):
 
     # Test cases: (data, is_even, expected_result)
     # Even: fast_path = data * 2
-    # Odd: slow_path = data * 4 (static_repeat(4))
+    # Odd: slow_path = data * magnitude, where magnitude = (data & 3) + 1
     # Bonus: if result >= 500, add 100
     test_cases = [
         (4, True, 8),       # even: 4 * 2 = 8
@@ -580,7 +595,7 @@ def create_comprehensive_testbench(circuit):
         (100, True, 200),   # even: 100 * 2 = 200
         (255, False, 1120), # odd: 255 * 4 = 1020 + 100 bonus = 1120
         (2, True, 4),       # even: 2 * 2 = 4
-        (9, False, 36),     # odd: 9 * 4 = 36 (static_repeat(4))
+        (9, False, 18),     # odd: 9 * 2 = 18
     ]
 
     # =========================================================================
@@ -668,7 +683,7 @@ def create_comprehensive_testbench(circuit):
         # Process an odd number (slow path)
         seq.comment("Process odd number to verify slow path debug ports")
         seq.wait_condition("dut->enqueue_ready", timeout=20)
-        seq.drive("enqueue_data", 5)  # odd: 5 * 4 = 20
+        seq.drive("enqueue_data", 7)  # odd: 7 * 4 = 28
         seq.drive("enqueue_enable", 1)
         seq.wait(1)
         seq.drive("enqueue_enable", 0)
@@ -677,7 +692,7 @@ def create_comprehensive_testbench(circuit):
         seq.print_rule_status("stage2_odd_slow_state0")
 
         seq.wait_condition("dut->is_valid_res0", timeout=100)
-        seq.expect("get_result_res0", 20, "5*4=20 for odd path")
+        seq.expect("get_result_res0", 28, "7*4=28 for odd path")
 
         seq.print("Debug port verification PASSED")
 
