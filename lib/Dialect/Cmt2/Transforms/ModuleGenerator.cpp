@@ -466,6 +466,8 @@ Cmt2ModuleLike ModuleGenerator::createFIFOModule(StringRef name,
 
   OpBuilder modBuilder(mod.getContext());
   modBuilder.setInsertionPointToStart(body);
+  // Leave body result names empty; Cmt2FunctionLike provides a default (resN)
+  // based on the function type when names are unspecified.
 
   // Get Reg modules from ModuleLibrary
   auto regMod = getOrCreateRegModule(dataWidth);

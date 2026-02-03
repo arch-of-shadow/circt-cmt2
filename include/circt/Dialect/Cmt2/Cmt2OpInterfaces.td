@@ -135,13 +135,13 @@ def Cmt2FunctionLike : OpInterface<"Cmt2FunctionLike"> {
       Returns the number of function arguments.
     }],
     "unsigned", "getNumArguments", (ins),
-    /*methodBody=*/[{ return $_op.getArgNames().size(); }]>,
+    /*methodBody=*/[{ return $_op.getFunctionType().getNumInputs(); }]>,
 
     InterfaceMethod<[{
       Returns the number of function results.
     }],
     "unsigned", "getNumResults", (ins),
-    /*methodBody=*/[{ return $_op.getBodyResNames().size(); }]>,
+    /*methodBody=*/[{ return $_op.getFunctionType().getNumResults(); }]>,
 
     //===------------------------------------------------------------------===//
     // Argument and result names
@@ -152,10 +152,13 @@ def Cmt2FunctionLike : OpInterface<"Cmt2FunctionLike"> {
     }],
     "std::string", "getArgumentName", (ins "unsigned":$index),
     /*methodBody=*/[{
-      if (index < $_op.getArgNames().size()) 
-        return llvm::cast<mlir::StringAttr>($_op.getArgNames()[index]).getValue().str(); 
-      else
-        return "arg" + std::to_string(index);
+      if (index < $_op.getArgNames().size()) {
+        auto name =
+            llvm::cast<mlir::StringAttr>($_op.getArgNames()[index]).getValue();
+        if (!name.empty())
+          return name.str();
+      }
+      return "arg" + std::to_string(index);
     }]>,
 
     InterfaceMethod<[{
@@ -163,10 +166,13 @@ def Cmt2FunctionLike : OpInterface<"Cmt2FunctionLike"> {
     }],
     "std::string", "getResultName", (ins "unsigned":$index),
     /*methodBody=*/[{ 
-      if (index < $_op.getBodyResNames().size()) 
-        return llvm::cast<mlir::StringAttr>($_op.getBodyResNames()[index]).getValue().str(); 
-      else
-        return "result" + std::to_string(index);
+      if (index < $_op.getBodyResNames().size()) {
+        auto name =
+            llvm::cast<mlir::StringAttr>($_op.getBodyResNames()[index]).getValue();
+        if (!name.empty())
+          return name.str();
+      }
+      return "res" + std::to_string(index);
     }]>,
 
 
@@ -187,8 +193,9 @@ def Cmt2FunctionLike : OpInterface<"Cmt2FunctionLike"> {
     "::mlir::DictionaryAttr", "getArgAttrDict", (ins "unsigned":$index),
     /*methodBody=*/[{
       auto argAttrs = $_op.getArgAttrsAttr();
-      return argAttrs ? llvm::cast<::mlir::DictionaryAttr>(argAttrs[index])
-                      : ::mlir::DictionaryAttr();
+      if (!argAttrs || index >= argAttrs.size())
+        return ::mlir::DictionaryAttr();
+      return llvm::cast<::mlir::DictionaryAttr>(argAttrs[index]);
     }]>,
 
     InterfaceMethod<[{
@@ -197,8 +204,9 @@ def Cmt2FunctionLike : OpInterface<"Cmt2FunctionLike"> {
     "::mlir::Attribute", "getArgAttr", (ins "unsigned":$index, "::mlir::StringAttr":$name),
     /*methodBody=*/[{
       auto argAttrs = $_op.getArgAttrsAttr();
-      auto argDict = argAttrs ? llvm::cast<::mlir::DictionaryAttr>(argAttrs[index])
-                              : ::mlir::DictionaryAttr();
+      if (!argAttrs || index >= argAttrs.size())
+        return nullptr;
+      auto argDict = llvm::cast<::mlir::DictionaryAttr>(argAttrs[index]);
       return argDict ? argDict.get(name) : nullptr;
     }]>,
 
@@ -219,8 +227,9 @@ def Cmt2FunctionLike : OpInterface<"Cmt2FunctionLike"> {
     "::mlir::DictionaryAttr", "getResAttrDict", (ins "unsigned":$index),
     /*methodBody=*/[{
       auto resAttrs = $_op.getResAttrsAttr();
-      return resAttrs ? llvm::cast<::mlir::DictionaryAttr>(resAttrs[index])
-                      : ::mlir::DictionaryAttr();
+      if (!resAttrs || index >= resAttrs.size())
+        return ::mlir::DictionaryAttr();
+      return llvm::cast<::mlir::DictionaryAttr>(resAttrs[index]);
     }]>,
 
     InterfaceMethod<[{
@@ -229,8 +238,9 @@ def Cmt2FunctionLike : OpInterface<"Cmt2FunctionLike"> {
     "::mlir::Attribute", "getResAttr", (ins "unsigned":$index, "::mlir::StringAttr":$name),
     /*methodBody=*/[{
       auto resAttrs = $_op.getResAttrsAttr();
-      auto resDict = resAttrs ? llvm::cast<::mlir::DictionaryAttr>(resAttrs[index])
-                              : ::mlir::DictionaryAttr();
+      if (!resAttrs || index >= resAttrs.size())
+        return nullptr;
+      auto resDict = llvm::cast<::mlir::DictionaryAttr>(resAttrs[index]);
       return resDict ? resDict.get(name) : nullptr;
     }]>,
 

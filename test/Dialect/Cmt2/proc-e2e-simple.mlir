@@ -42,6 +42,7 @@ builtin.module {
         }
 
         // CHECK-LABEL: firrtl.module @SimpleProc
+        // CHECK-NOT: ResultOutOfBound
         // CHECK-ACTION-LABEL: cmt2.module @SimpleProc
         cmt2.module @SimpleProc(%clk: !firrtl.clock, %rst: !firrtl.uint<1>) {
             cmt2.instance @r = @reg (%clk, %rst) : !firrtl.clock, !firrtl.uint<1>
