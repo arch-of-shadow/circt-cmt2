@@ -107,6 +107,14 @@ ws = SimulationWorkspace(circuit, "sim")
 ws.add_external_rtl("CustomALU.sv", "module CustomALU(...); /* ... */ endmodule")
 ```
 
+Alternatively, you can attach an RTL file path directly to the external module
+builder and let `SimulationWorkspace` stage it automatically:
+
+```python
+with circuit.external_module("CustomALU") as alu:
+    alu.rtl_path("path/to/CustomALU.sv")
+```
+
 End-to-end reference: `examples/PyCMT2/external_module_custom_rtl.py`.
 
 ---

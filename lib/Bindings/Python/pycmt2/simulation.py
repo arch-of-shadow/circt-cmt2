@@ -338,6 +338,31 @@ class SimulationWorkspace:
             if filename not in self._external_rtl:
                 self.add_external_rtl(filename, verilog_content)
 
+    def _add_user_external_module_rtl(self) -> None:
+        """Stage user-provided RTL for custom external modules.
+
+        External modules can optionally register one or more RTL files via
+        `ExternalModuleBuilder.rtl_path(...)`. Those files are copied into the
+        workspace so Verilator can elaborate the design.
+        """
+        from pathlib import Path
+
+        for ext in getattr(self.circuit, "_external_modules", {}).values():
+            rtl_files = getattr(ext, "_rtl_files", None)
+            if not isinstance(rtl_files, dict) or not rtl_files:
+                continue
+            for filename, path in rtl_files.items():
+                if filename in self._external_rtl:
+                    continue
+                p = Path(path)
+                try:
+                    content = p.read_text()
+                except Exception as e:
+                    raise RuntimeError(
+                        f"Failed to read external RTL file for extern '{getattr(ext, 'name', '<ext>')}': {p}"
+                    ) from e
+                self.add_external_rtl(filename, content)
+
     @staticmethod
     def _extract_defined_modules(verilog: str) -> set[str]:
         return set(
@@ -595,7 +620,7 @@ class SimulationWorkspace:
                 verilog = self.circuit.emit_verilog(debug_ports=self._debug_ports)
             self._last_emitted_verilog = verilog
             self._add_stl_rtl()
-            self._add_external_rtl_files_from_circuit()
+            self._add_user_external_module_rtl()
             rtl_file = self.output_dir / "rtl" / f"{self._top_module}.sv"
             rtl_file.write_text(verilog)
         except Exception as e:

@@ -150,13 +150,14 @@ class ExternalModuleBuilder:
         # FIRRTL module name (defaults to same as CMT2 module name)
         self._firrtl_module_name: str | None = None
 
-        # Optional external RTL file(s) implementing the FIRRTL external module.
-        # These can be staged into a SimulationWorkspace automatically.
-        self._rtl_files: list[Path] = []
+        # Optional user-provided RTL files for simulation.
+        # Maps "workspace filename" -> absolute path on disk.
+        self._rtl_files: dict[str, str] = {}
         if rtl is not None:
-            self._rtl_files.append(Path(rtl))
+            self.rtl_path(rtl)
         if rtl_files:
-            self._rtl_files.extend(Path(p) for p in rtl_files)
+            for p in rtl_files:
+                self.rtl_path(p)
 
         # Pending method bindings (added at finalize time)
         self._pending_values: list[dict] = []  # {name, ready_name, args, returns}
@@ -189,6 +190,31 @@ class ExternalModuleBuilder:
             self for chaining.
         """
         self._firrtl_module_name = name
+        return self
+
+    def rtl_path(self, path: str | Path, *, filename: str | None = None) -> ExternalModuleBuilder:
+        """Register an RTL file implementing this external module.
+
+        This is intended for external modules which are *not* backed by
+        ModuleLibrary. SimulationWorkspace will stage these files into the
+        generated workspace automatically.
+
+        Args:
+            path: Path to a Verilog/SystemVerilog file.
+            filename: Optional name to use inside the simulation workspace `rtl/`
+                directory. Defaults to the basename of `path`.
+
+        Returns:
+            self for chaining.
+        """
+        p = Path(path)
+        if filename is None:
+            filename = p.name
+        try:
+            resolved = str(p.resolve(strict=True))
+        except FileNotFoundError as e:
+            raise FileNotFoundError(f"External module RTL file not found: {p}") from e
+        self._rtl_files[str(filename)] = resolved
         return self
 
     def clock(self, name: str = "clk") -> ExternalModuleBuilder:

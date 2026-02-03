@@ -111,8 +111,11 @@ For an end-to-end reference, see `examples/JIT/interface_hello.py`.
 ### External modules (ExtModuleFirrtl bindings)
 
 External modules are **owned by PyCMT2** and are defined at circuit scope via
-`Circuit.external_module(...)`. JIT can instantiate and call them like any
-other instance (including values-with-args and action methods).
+`Circuit.external_module(...)`. JIT also provides a thin wrapper
+`jit.external_module(...)` for name inference and attaching RTL paths.
+
+JIT can instantiate and call external modules like any other instance
+(including values-with-args and action methods).
 
 If an external module is **not backed by ModuleLibrary** (i.e. it is a truly
 custom extern), you must provide its RTL when running simulation by staging a

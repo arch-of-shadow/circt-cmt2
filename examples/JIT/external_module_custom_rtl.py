@@ -30,37 +30,12 @@ from circt.pycmt2.simulation import SimulationWorkspace
 from circt.pycmt2.testbench import Testbench
 
 
-ACCUM32_SV = r"""
-module Accum32(
-  input  logic        clk,
-  input  logic        rst,
-  output logic        read_ready,
-  output logic [31:0] read_data,
-  input  logic        add_enable,
-  output logic        add_ready,
-  input  logic [31:0] add_data
-);
-  logic [31:0] sum;
-
-  assign read_ready = 1'b1;
-  assign add_ready  = 1'b1;
-  assign read_data  = sum;
-
-  always_ff @(posedge clk) begin
-    if (rst) begin
-      sum <= '0;
-    end else if (add_enable) begin
-      sum <= sum + add_data;
-    end
-  end
-endmodule
-"""
-
-
 def create_circuit() -> Circuit:
     circuit = Circuit("ExternalModuleCustomRTLJIT")
 
-    with circuit.external_module("Accum32") as acc:
+    rtl_path = Path(__file__).resolve().parents[1] / "rtl" / "Accum32.sv"
+
+    with jit.external_module(circuit, "Accum32", rtl_path=rtl_path) as acc:
         acc.clock("clk")
         acc.reset("rst")
         acc.value(
@@ -76,7 +51,7 @@ def create_circuit() -> Circuit:
         )
         acc.sequence_before("read", "add")
 
-    accum_mod = circuit._external_modules["Accum32"]
+    accum_mod = circuit._external_modules[acc.name]
 
     with jit.module(circuit, "Top") as m:
         clk = m.clock()
@@ -129,7 +104,6 @@ def run_sim() -> int:
     tb = create_testbench(circuit)
 
     ws = SimulationWorkspace(circuit, sim_dir, debug_ports=False)
-    ws.add_external_rtl("Accum32.sv", ACCUM32_SV)
     ws.generate_with_testbench(tb)
 
     if not ws.build():
@@ -146,4 +120,3 @@ def run_sim() -> int:
 
 if __name__ == "__main__":
     sys.exit(run_sim())
-

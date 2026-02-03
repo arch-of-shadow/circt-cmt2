@@ -39,6 +39,7 @@ from __future__ import annotations
 
 from ._decorators import Elaborated, elaborate, handles, method, rule, value
 from ._dataflow import dataflow, DataflowContext
+from ._external_module import external_module
 from ._module import module, ModuleContext
 from ._method_ref import SignalRef, MethodRef, InterfaceRef, wrap_instance, wrap_interface
 from ._context import RuleContext, MethodContext, ValueContext
@@ -52,6 +53,8 @@ __all__ = [
     "method", 
     "value",
     "dataflow",
+    # External modules
+    "external_module",
     # Module
     "module",
     "ModuleContext",
