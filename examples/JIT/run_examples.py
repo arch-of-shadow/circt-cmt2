@@ -53,6 +53,7 @@ EXAMPLES = [
     'diagnostics.py',
     'division_pipeline.py',
     'dynamic_pipeline_fifo.py',
+    'external_module_custom_rtl.py',
     'gcd.py',
     'interpret.py',
     'interface_hello.py',

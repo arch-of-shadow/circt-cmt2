@@ -96,6 +96,19 @@ with circuit.external_module("CustomALU") as alu:
               returns=[("diff", UInt(32))])
 ```
 
+**Simulation note:** external modules only define *bindings* (port contracts).
+If the extern is not backed by ModuleLibrary, you must provide its RTL when
+building a simulation workspace:
+
+```python
+from circt.pycmt2.simulation import SimulationWorkspace
+
+ws = SimulationWorkspace(circuit, "sim")
+ws.add_external_rtl("CustomALU.sv", "module CustomALU(...); /* ... */ endmodule")
+```
+
+End-to-end reference: `examples/PyCMT2/external_module_custom_rtl.py`.
+
 ---
 
 ## Rules

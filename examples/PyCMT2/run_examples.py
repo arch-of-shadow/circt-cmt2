@@ -56,6 +56,7 @@ EXAMPLES = [
     "debug_testbench_example.py",
     "division_pipeline.py",
     "dynamic_pipeline_fifo.py",
+    "external_module_custom_rtl.py",
     "gcd.py",
     "li_token_pipeline.py",
     "memory_proc.py",

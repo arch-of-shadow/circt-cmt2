@@ -108,6 +108,35 @@ writer.store(data)             # method (callable)
 
 For an end-to-end reference, see `examples/JIT/interface_hello.py`.
 
+### External modules (ExtModuleFirrtl bindings)
+
+External modules are **owned by PyCMT2** and are defined at circuit scope via
+`Circuit.external_module(...)`. JIT can instantiate and call them like any
+other instance (including values-with-args and action methods).
+
+If an external module is **not backed by ModuleLibrary** (i.e. it is a truly
+custom extern), you must provide its RTL when running simulation by staging a
+matching Verilog/SystemVerilog module in the simulation workspace:
+
+```python
+from circt.pycmt2 import Circuit, UInt
+from circt.pycmt2.simulation import SimulationWorkspace
+
+circuit = Circuit("Top")
+with circuit.external_module("Accum32") as acc:
+    acc.clock("clk")
+    acc.reset("rst")
+    acc.value("read", ready_name="read_ready", returns=[("read_data", UInt(32))])
+    acc.method("add", enable_name="add_enable", ready_name="add_ready", args=[("add_data", UInt(32))])
+
+ws = SimulationWorkspace(circuit, "sim")
+ws.add_external_rtl("Accum32.sv", "module Accum32(...); /* ... */ endmodule")
+```
+
+End-to-end references:
+- `examples/PyCMT2/external_module_custom_rtl.py`
+- `examples/JIT/external_module_custom_rtl.py`
+
 ### Methods (action methods with arguments)
 
 JIT exposes method arguments as attributes on the context *inside* `guard`/`body`
