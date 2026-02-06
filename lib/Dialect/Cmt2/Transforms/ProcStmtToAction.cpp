@@ -21,6 +21,8 @@
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/IRMapping.h"
 #include "mlir/Pass/Pass.h"
+#include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/StringMap.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/MathExtras.h"
@@ -272,7 +274,6 @@ void ProcStmtToActionPass::generateStateRules(
       auto stateAttr = dict.getAs<IntegerAttr>("state");
       if (stepRef && stateAttr) {
         uint64_t state = stateAttr.getInt();
-        stepToStates[stepRef.getValue()].push_back(state);
 
         // TL2: Extract timing information
         StepTimingInfo timing;
@@ -288,7 +289,20 @@ void ProcStmtToActionPass::generateStateRules(
         if (auto isStaticAttr = dict.getAs<BoolAttr>("is_static"))
           timing.isStatic = isStaticAttr.getValue();
 
-        stepStateTiming[{stepRef.getValue(), state}] = timing;
+        // For static steps, TDCC provides an enable with an [start, end) window.
+        // We expand that window so we can clone scheduled operations in each
+        // cycle of the static step, based on `state_assignments` computed by
+        // StaticFSMAllocation.
+        if (timing.isStatic && timing.endState > timing.startState + 1) {
+          for (uint64_t activeState = timing.startState;
+               activeState < timing.endState; ++activeState) {
+            stepToStates[stepRef.getValue()].push_back(activeState);
+            stepStateTiming[{stepRef.getValue(), activeState}] = timing;
+          }
+        } else {
+          stepToStates[stepRef.getValue()].push_back(state);
+          stepStateTiming[{stepRef.getValue(), state}] = timing;
+        }
       }
     }
   }
@@ -827,9 +841,181 @@ void ProcStmtToActionPass::generateStateRules(
         // See docs/Cmt2/features/Lowering.md for lowering overview and pointers.
 
         if (bodyRegion && !bodyRegion->empty()) {
-          for (auto &op : bodyRegion->front()) {
-            if (!isa<ProcStepDoneOp>(op)) {
+          if (auto staticStep = dyn_cast<ProcStaticStepOp>(stepOp)) {
+            // Static step: clone only operations scheduled for this cycle.
+            //
+            // StaticFSMAllocation annotates the step with:
+            //   state_assignments = [[local_state, call_idx...], ...]
+            // where call_idx refers to the i-th CallOp in the step body.
+            //
+            // We compute local_state = (global_state - step_enable_start_state)
+            // using the TDCC timing information expanded above.
+            auto timingIt =
+                stepStateTiming.find({staticStep.getSymName(), state});
+
+            uint64_t localState = 0;
+            if (timingIt != stepStateTiming.end())
+              localState = state - timingIt->second.startState;
+
+            DenseSet<int64_t> activeCallIndices;
+            if (auto assignments =
+                    staticStep->getAttrOfType<ArrayAttr>("state_assignments")) {
+              for (auto entryAttr : assignments) {
+                auto entry = cast<ArrayAttr>(entryAttr);
+                if (entry.empty())
+                  continue;
+                auto stAttr = dyn_cast<IntegerAttr>(entry[0]);
+                if (!stAttr)
+                  continue;
+                if (static_cast<uint64_t>(stAttr.getInt()) != localState)
+                  continue;
+                for (size_t i = 1; i < entry.size(); ++i) {
+                  if (auto idxAttr = dyn_cast<IntegerAttr>(entry[i]))
+                    activeCallIndices.insert(idxAttr.getInt());
+                }
+                break;
+              }
+            } else {
+              // No scheduling info available: fall back to cloning the full body
+              // in the first cycle only.
+              if (localState == 0) {
+                for (auto &op : bodyRegion->front()) {
+                  if (!isa<ProcStepDoneOp>(op))
+                    bodyBuilder.clone(op, bodyMapping);
+                }
+              }
+              continue;
+            }
+
+            if (activeCallIndices.empty())
+              continue;
+
+            Block &stepBlock = bodyRegion->front();
+
+            // Map each CallOp in the step body to its call index, matching the
+            // indexing used by `state_assignments`.
+            DenseMap<Operation *, int64_t> callOpToIndex;
+            int64_t totalCalls = 0;
+            for (auto &op : stepBlock) {
+              if (auto call = dyn_cast<CallOp>(op))
+                callOpToIndex[call.getOperation()] = totalCalls++;
+            }
+
+            auto checkCrossCycleDependencies =
+                [&](CallOp consumerCall,
+                    int64_t consumerCallIdx) -> LogicalResult {
+              // Walk the consumer's operand definitions inside the static_step
+              // body. Any dependency on a CallOp that is not scheduled in this
+              // local cycle would require cross-cycle storage, which must be
+              // made explicit (e.g., via a Reg).
+              SmallVector<Value, 8> worklist(consumerCall.getOperands().begin(),
+                                             consumerCall.getOperands().end());
+              DenseSet<Value> visited;
+
+              while (!worklist.empty()) {
+                Value v = worklist.pop_back_val();
+                if (!v)
+                  continue;
+                if (!visited.insert(v).second)
+                  continue;
+                if (isa<BlockArgument>(v))
+                  continue;
+
+                Operation *defOp = v.getDefiningOp();
+                if (!defOp)
+                  continue;
+                if (defOp->getBlock() != &stepBlock)
+                  continue;
+
+                if (auto producerCall = dyn_cast<CallOp>(defOp)) {
+                  auto it = callOpToIndex.find(defOp);
+                  if (it != callOpToIndex.end()) {
+                    int64_t producerIdx = it->second;
+                    if (!activeCallIndices.contains(producerIdx)) {
+                      std::string msg;
+                      llvm::raw_string_ostream os(msg);
+                      os << "cross-cycle dependency on call result in "
+                            "proc.static_step @"
+                         << staticStep.getSymName() << ": call #"
+                         << consumerCallIdx
+                         << " uses value defined by call #" << producerIdx
+                         << " which is not scheduled in local cycle "
+                         << localState;
+
+                      (void)Cmt2Diagnostic::error(consumerCall.getOperation(),
+                                                  os.str())
+                          .note(producerCall.getLoc(),
+                                "producer call is scheduled in a different "
+                                "cycle of this static_step")
+                          .hint("insert explicit state (e.g. a Reg) to carry "
+                                "the value across cycles, or adjust call "
+                                "timing so the producer is active in the same "
+                                "cycle as the consumer")
+                          .withPythonSource()
+                          .emit();
+                      return failure();
+                    }
+                  }
+                }
+
+                for (Value operand : defOp->getOperands())
+                  worklist.push_back(operand);
+              }
+
+              return success();
+            };
+
+            // Clone dependencies for operands on-demand before cloning a call.
+            std::function<Value(Value)> cloneDef;
+            cloneDef = [&](Value v) -> Value {
+              if (!v)
+                return nullptr;
+              if (auto mapped = bodyMapping.lookupOrNull(v))
+                return mapped;
+              if (auto defOp = v.getDefiningOp()) {
+                // Only clone defs that are local to this step body; leave
+                // externally-defined values as-is.
+                if (defOp->getBlock() != &stepBlock)
+                  return v;
+                for (Value operand : defOp->getOperands())
+                  (void)cloneDef(operand);
+                bodyBuilder.clone(*defOp, bodyMapping);
+                return bodyMapping.lookup(v);
+              }
+              // Block argument (shouldn't happen for static_step bodies).
+              return v;
+            };
+
+            // Clone active calls (and required defs) for this localState.
+            int64_t callIdx = 0;
+            for (auto &op : stepBlock) {
+              if (isa<ProcStepDoneOp>(op))
+                continue;
+              auto call = dyn_cast<CallOp>(op);
+              if (!call)
+                continue;
+              if (!activeCallIndices.contains(callIdx)) {
+                ++callIdx;
+                continue;
+              }
+
+              if (failed(checkCrossCycleDependencies(call, callIdx))) {
+                signalPassFailure();
+                return;
+              }
+
+              for (Value operand : call->getOperands())
+                (void)cloneDef(operand);
+
               bodyBuilder.clone(op, bodyMapping);
+              ++callIdx;
+            }
+          } else {
+            // Dynamic step: clone full body (excluding step_done).
+            for (auto &op : bodyRegion->front()) {
+              if (!isa<ProcStepDoneOp>(op)) {
+                bodyBuilder.clone(op, bodyMapping);
+              }
             }
           }
         }

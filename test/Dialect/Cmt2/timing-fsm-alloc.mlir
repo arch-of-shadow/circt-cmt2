@@ -1,5 +1,6 @@
 // RUN: circt-opt %s -cmt2-timing-inference -cmt2-static-fsm-allocation | FileCheck %s --check-prefix=ALLOC
 // RUN: circt-opt %s -cmt2-timing-inference -cmt2-static-fsm-allocation -cmt2-compile-static | FileCheck %s --check-prefix=COMPILE
+// RUN: circt-opt %s -cmt2-timing-inference -cmt2-static-fsm-allocation -cmt2-compile-static -cmt2-tdcc -cmt2-proc-stmt-to-action | FileCheck %s --check-prefix=STMT
 
 // Tests for StaticFSMAllocation and CompileStatic passes.
 
@@ -98,6 +99,18 @@ builtin.module {
         // COMPILE-SAME: fsm_guard_expr = "fsm >= 0 && fsm < 5"
         // COMPILE: cmt2.call @mult_unit @multiply
         // COMPILE-SAME: fsm_guard_expr = "fsm >= 3 && fsm < 8"
+        // STMT-LABEL: cmt2.module @PipelinedFSM
+        // STMT: cmt2.rule @run_state0() -> ()
+        // STMT: cmt2.call @mult_unit @multiply
+        // STMT-SAME: fsm_start_state = 0
+        // STMT: cmt2.rule @run_state3() -> ()
+        // STMT: cmt2.call @mult_unit @multiply
+        // STMT-SAME: fsm_start_state = 0
+        // STMT: cmt2.call @mult_unit @multiply
+        // STMT-SAME: fsm_start_state = 3
+        // STMT: cmt2.rule @run_state7() -> ()
+        // STMT: cmt2.call @mult_unit @multiply
+        // STMT-SAME: fsm_start_state = 3
         cmt2.module @PipelinedFSM(%clk: !firrtl.clock, %rst: !firrtl.uint<1>) {
             cmt2.instance @mult_unit = @mult (%clk) : !firrtl.clock
 
