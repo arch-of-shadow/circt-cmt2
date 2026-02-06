@@ -315,25 +315,123 @@ void CompileStaticPass::annotateFSMRegisterInfo(ProcStaticStepOp step,
 
 Operation *CompileStaticPass::findRegisterModule(CircuitOp circuit,
                                                   unsigned width) {
-  // Look for existing register module in circuit
+  MLIRContext *ctx = circuit.getContext();
+  Location loc = circuit.getLoc();
+
+  // Prefer a dedicated FSM register module, using the same naming convention as
+  // ProcStmtToAction and the ModuleLibrary.
+  std::string symName = "__FSMReg_" + std::to_string(width);
+
+  // 1) If we already created the desired width, reuse it.
   for (auto &op : circuit.getBodyRegion().front()) {
     if (auto extMod = dyn_cast<ExtModuleFirrtlOp>(op)) {
-      // Look for module with read/write methods
-      bool hasRead = false, hasWrite = false;
-      for (auto &bodyOp : extMod.getBody().front()) {
-        if (auto bindValue = dyn_cast<BindValueOp>(bodyOp)) {
-          if (bindValue.getSymName() == "read")
-            hasRead = true;
-        } else if (auto bindMethod = dyn_cast<BindMethodOp>(bodyOp)) {
-          if (bindMethod.getSymName() == "write")
-            hasWrite = true;
-        }
-      }
-      if (hasRead && hasWrite)
+      if (extMod.getSymName() == symName)
         return extMod;
     }
   }
-  return nullptr;
+
+  // 2) Otherwise, look for any existing extern register module with matching
+  // read/write widths.
+  for (auto &op : circuit.getBodyRegion().front()) {
+    auto extMod = dyn_cast<ExtModuleFirrtlOp>(op);
+    if (!extMod || extMod.getBody().empty())
+      continue;
+
+    bool hasRead = false, hasWrite = false;
+    unsigned readWidth = 0, writeWidth = 0;
+
+    for (auto &bodyOp : extMod.getBody().front()) {
+      if (auto bindValue = dyn_cast<BindValueOp>(bodyOp)) {
+        if (bindValue.getSymName() == "read") {
+          hasRead = true;
+          auto returnTypes = bindValue.getResultTypes();
+          if (returnTypes.size() == 1) {
+            if (auto uintType = dyn_cast<firrtl::UIntType>(returnTypes[0])) {
+              if (uintType.getWidth().has_value())
+                readWidth = uintType.getWidth().value();
+            }
+          }
+        }
+      } else if (auto bindMethod = dyn_cast<BindMethodOp>(bodyOp)) {
+        if (bindMethod.getSymName() == "write") {
+          hasWrite = true;
+          auto argTypes = bindMethod.getArgumentTypes();
+          if (argTypes.size() == 1) {
+            if (auto uintType = dyn_cast<firrtl::UIntType>(argTypes[0])) {
+              if (uintType.getWidth().has_value())
+                writeWidth = uintType.getWidth().value();
+            }
+          }
+        }
+      }
+    }
+
+    if (hasRead && hasWrite && readWidth == width && writeWidth == width)
+      return extMod;
+  }
+
+  // 3) Create a new FSM register module with the requested width.
+  OpBuilder builder(ctx);
+  OpBuilder::InsertionGuard guard(builder);
+  builder.setInsertionPointToStart(&circuit.getBodyRegion().front());
+
+  std::string firrtlName = "Reg_width" + std::to_string(width) + "_init0";
+  SmallVector<Attribute> argNameAttrs = {
+      builder.getStringAttr("clk"),
+      builder.getStringAttr("rst")};
+
+  auto extMod = builder.create<ExtModuleFirrtlOp>(
+      loc,
+      builder.getStringAttr(symName),
+      FlatSymbolRefAttr::get(ctx, firrtlName),
+      builder.getArrayAttr(argNameAttrs));
+
+  auto clockType = firrtl::ClockType::get(ctx);
+  auto resetType = firrtl::UIntType::get(ctx, 1);
+  auto dataType = firrtl::UIntType::get(ctx, width);
+
+  Block *body = new Block();
+  body->addArguments({clockType, resetType}, {loc, loc});
+  extMod.getBody().push_back(body);
+
+  OpBuilder bodyBuilder(body, body->begin());
+
+  bodyBuilder.create<BindBareOp>(
+      loc, body->getArgument(0), FlatSymbolRefAttr::get(ctx, "clk"));
+  bodyBuilder.create<BindBareOp>(
+      loc, body->getArgument(1), FlatSymbolRefAttr::get(ctx, "rst"));
+
+  auto readFuncType = builder.getFunctionType({}, {dataType});
+  bodyBuilder.create<BindValueOp>(
+      loc,
+      builder.getStringAttr("read"),
+      TypeAttr::get(readFuncType),
+      builder.getStringAttr("read_ready"),
+      builder.getArrayAttr({}),
+      builder.getArrayAttr({builder.getStringAttr("read_data")}),
+      ArrayAttr(),
+      ArrayAttr());
+
+  auto writeFuncType = builder.getFunctionType({dataType}, {});
+  bodyBuilder.create<BindMethodOp>(
+      loc,
+      builder.getStringAttr("write"),
+      TypeAttr::get(writeFuncType),
+      builder.getStringAttr("write_enable"),
+      builder.getStringAttr("write_ready"),
+      builder.getArrayAttr({builder.getStringAttr("write_data")}),
+      builder.getArrayAttr({}),
+      ArrayAttr(),
+      ArrayAttr());
+
+  // read must sequence before write for this register module.
+  SmallVector<Attribute> seqPair = {
+      FlatSymbolRefAttr::get(ctx, "read"),
+      FlatSymbolRefAttr::get(ctx, "write")};
+  extMod->setAttr("sequenceBefore",
+                  builder.getArrayAttr({builder.getArrayAttr(seqPair)}));
+
+  return extMod;
 }
 
 //===----------------------------------------------------------------------===//
@@ -402,12 +500,18 @@ void CompileStaticPass::createFSMTickRule(OpBuilder &builder, Location loc,
   // Compute next state
   Value nextState;
   if (isOneHot) {
-    // One-hot: shift left by 1
+    // One-hot: shift left by 1, but keep the FSM register width constant.
+    //
+    // NOTE: `firrtl.dshl` widens the result (width = a.width + b.maxValue),
+    // so we truncate back down to `fsmWidth` to match the register type.
     auto shiftAmt = bodyBuilder.create<firrtl::ConstantOp>(
         loc, firrtl::UIntType::get(builder.getContext(), 1),
         llvm::APInt(1, 1));
-    nextState = bodyBuilder.create<firrtl::DShlPrimOp>(
+    auto shifted = bodyBuilder.create<firrtl::DShlPrimOp>(
         loc, fsmReadCall2.getResult(0), shiftAmt.getResult()).getResult();
+    nextState = bodyBuilder
+                    .create<firrtl::BitsPrimOp>(loc, shifted, fsmWidth - 1, 0)
+                    .getResult();
   } else {
     // Binary: increment by 1
     auto oneConst = bodyBuilder.create<firrtl::ConstantOp>(
@@ -719,6 +823,13 @@ void CompileStaticPass::processStaticStep(ProcStaticStepOp step,
     }
 
     annotateCallWithStateGuard(call, startState, endState, config->isOneHot);
+    // After we've consumed call-site timing to derive FSM guards, drop the
+    // timing attributes. Subsequent procedural lowering clones calls out of
+    // the `cmt2.proc.static_step` body; keeping arg_timing/result_timing would
+    // make those cloned calls illegal (CallOp verifier requires timing attrs
+    // to appear only inside ProcStaticStepOp).
+    call->removeAttr("arg_timing");
+    call->removeAttr("result_timing");
     ++callIdx;
   });
 
