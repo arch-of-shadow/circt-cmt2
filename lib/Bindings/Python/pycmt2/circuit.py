@@ -276,19 +276,28 @@ class Circuit:
         # Clone the module to preserve original
         cloned = self._clone_module()
 
-        # Run CMT2 to FIRRTL pipeline
-        # CMT2 passes operate on cmt2.circuit, conversion operates on builtin.module
+        # Run CMT2 to FIRRTL pipeline.
+        #
+        # Note: `cmt2-compile-static` is required to legalize call-site timing
+        # attributes (`arg_timing` / `result_timing`) inside `cmt2.proc.static_step`
+        # before procedural lowering clones calls out of the step body.
         pm = PassManager.parse(
             "builtin.module("
             "cmt2.circuit("
             "cmt2-compile-invoke,"
             "cmt2-tdcc,"
+            "cmt2-static-inference,"
+            "cmt2-static-promotion,"
+            "cmt2-timing-inference,"
+            "cmt2-timing-validation,"
+            "cmt2-static-fsm-allocation,"
+            "cmt2-compile-static,"
             "cmt2-proc-stmt-to-action,"
             "cmt2-proc-to-gaa"
             "),"
             "lower-cmt2-to-firrtl"
             ")",
-            context=self._ctx.mlir_context
+            context=self._ctx.mlir_context,
         )
         pm.run(cloned.operation)
 
@@ -323,6 +332,12 @@ class Circuit:
             "cmt2-token-lowering",
             "cmt2-token-rtl-gen",
             "cmt2-tdcc",
+            "cmt2-static-inference",
+            "cmt2-static-promotion",
+            "cmt2-timing-inference",
+            "cmt2-timing-validation",
+            "cmt2-static-fsm-allocation",
+            "cmt2-compile-static",
             "cmt2-proc-stmt-to-action",
             "cmt2-proc-to-gaa",
         ]
@@ -451,6 +466,12 @@ class Circuit:
                 "cmt2-token-rtl-gen",
                 # Procedural control passes
                 "cmt2-tdcc",
+                "cmt2-static-inference",
+                "cmt2-static-promotion",
+                "cmt2-timing-inference",
+                "cmt2-timing-validation",
+                "cmt2-static-fsm-allocation",
+                "cmt2-compile-static",
                 "cmt2-proc-stmt-to-action",
                 "cmt2-proc-to-gaa",
             ]
