@@ -4,6 +4,7 @@ CMT2 supports **multi-cycle operations** through procedural control constructs. 
 
 **Related Examples:**
 - Proc control: `examples/PyCMT2/proc.py`, `examples/PyCMT2/proc_testbench.py`, `examples/PyCMT2/timing.py`
+- Call-site timing windows (arg_timing/result_timing inside static_step): `examples/PyCMT2/static_step_call_timing_window.py`
 - Dataflow/Pipeline: `examples/PyCMT2/comprehensive_dataflow_example.py`, `examples/PyCMT2/dataflow_forkjoin.py`
 - Comprehensive: `examples/PyCMT2/comprehensive_example.py`
 
@@ -89,6 +90,11 @@ with m.static_step(4, "multiply") as step:
     product = step.mul(a, b)
     step.call(reg_result, "write", product)
 ```
+
+**How multi-cycle execution works:** a `static_step(L)` lowers to an FSM segment with **L cycles**. Operations in the step body are **scheduled to specific cycles** within that segment.
+
+- By default, a `step.call(...)` is enabled only for the **first cycle** of the step (`[0, 1)`), and the remaining cycles simply advance the step latency.
+- `arg_timing` / `result_timing` on `step.call(...)` can **shift** and/or **extend** the cycles in which the call is enabled, which changes the emitted SV enable gating. See: `examples/PyCMT2/static_step_call_timing_window.py`.
 
 ### Pipelined Static Steps
 
@@ -791,16 +797,17 @@ error: result timing [1, 2) before method output latency 3
 
 ### Timing in Procedural Lowering Pipeline
 
-**Critical Limitation:** Timing attributes on CallOps (`arg_timing`, `result_timing`) are **not preserved** through the procedural lowering pipeline (TDCC → ProcStmtToAction → ProcToGAA).
+`arg_timing` / `result_timing` are **only legal inside** `cmt2.proc.static_step`. They are **consumed** by `cmt2-compile-static` to derive per-cycle enable guards and scheduling information; after that, timing becomes **implicit** in the FSM state structure and the attributes are dropped.
 
 | Pass | Timing Support |
 |------|----------------|
-| `CompileStatic` | ✓ Uses timing for hardware generation |
-| `TDCC` | ✗ Ignores timing - FSM based on control flow only |
-| `ProcStmtToAction` | ✗ Creates CallOps with empty timing arrays |
-| `ProcToGAA` | ✗ No timing propagation |
+| `CompileStatic` | ✓ Consumes `arg_timing`/`result_timing` and derives FSM guards |
+| `TDCC` | ✗ Control-flow FSM only (does not reschedule calls) |
+| `StaticFSMAllocation` | ✓ Computes `state_assignments` for per-cycle call cloning |
+| `ProcStmtToAction` | ✓ Clones scheduled calls per FSM cycle (timing is now implicit) |
+| `ProcToGAA` | ✓ Preserves behavior via per-state rules (no timing attrs needed) |
 
-**Workaround:** Use `static_step` with inline calls for timing-critical operations. The timing within static steps is preserved by the `CompileStatic` pass.
+**Practical guidance:** for cycle-precise call behavior, put the call inside a `static_step` and use `arg_timing` / `result_timing` on `step.call(...)`. For an E2E demo (SV + simulation), see `examples/PyCMT2/static_step_call_timing_window.py`.
 
 ```python
 # WORKS: Timing preserved in static_step
@@ -809,7 +816,7 @@ with m.static_step(4, "timed_mult") as step:
                       arg_timing=[(0, 1), (0, 1)],
                       result_timing=[(3, 4)])
 
-# LIMITATION: Timing in proc.step bodies may be lost during TDCC lowering
+# LIMITATION: Timing in proc.step bodies is not currently supported
 with m.step("dynamic_op") as step:
     result = step.call(mult, "multiply", a, b,
                       arg_timing=[(0, 1), (0, 1)])  # Timing may be ignored

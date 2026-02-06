@@ -14,10 +14,11 @@ The timing passes (cmt2-timing-inference, cmt2-static-fsm-allocation,
 cmt2-compile-static) analyze and validate timing, then generate FSM
 control logic.
 
-Note: Full timing annotation (static_latency on methods, arg_timing and
-result_timing on calls) is not yet exposed in the Python API but is
-available at the MLIR level. This example shows the static_step feature
-which is available in Python.
+Note: Call-site timing annotation (`arg_timing` / `result_timing`) is
+available via `step.call(...)` in the Python API. This example mostly
+focuses on static_step latency behavior; see
+`examples/PyCMT2/static_step_call_timing_window.py` for an E2E timing-window
+demo with simulation validation.
 
 Includes E2E simulation for a simplified timing example.
 
