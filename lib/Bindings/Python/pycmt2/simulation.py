@@ -725,9 +725,12 @@ VERILATOR ?= verilator
 # Many compiler-generated internal signals use '_' prefixes to avoid name
 # collisions, so enable tracing underscores by default for debuggability.
 VERILATOR_TRACE_UNDERSCORE ?= 1
+VERILATOR_HAS_TRACE_UNDERSCORE := $(shell $(VERILATOR) --help 2>&1 | grep -q -- '--trace-underscore' && echo 1 || echo 0)
 VERILATOR_TRACE_UNDERSCORE_FLAG :=
 ifeq ($(VERILATOR_TRACE_UNDERSCORE),1)
+ifeq ($(VERILATOR_HAS_TRACE_UNDERSCORE),1)
 VERILATOR_TRACE_UNDERSCORE_FLAG := --trace-underscore
+endif
 endif
 
 VERILATOR_FLAGS = --cc --exe --build -j 0 \\
