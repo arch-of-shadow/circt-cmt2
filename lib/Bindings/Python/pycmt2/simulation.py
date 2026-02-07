@@ -601,13 +601,17 @@ int main(int argc, char** argv) {{
 static V{top}* dut;
 static int cycle;
 static uint64_t cycle_count;
+static VerilatedVcdC* tfp;
+static uint64_t sim_time;
 
 // Helper functions
 void tick() {{
     dut->clk = 0;
     dut->eval();
+    if (tfp) tfp->dump(sim_time++);
     dut->clk = 1;
     dut->eval();
+    if (tfp) tfp->dump(sim_time++);
     cycle++;
     cycle_count++;
 }}
@@ -644,14 +648,16 @@ int main(int argc, char** argv) {{
 
     dut = new V{top}();
 
-    auto tfp = std::make_unique<VerilatedVcdC>();
-    dut->trace(tfp.get(), 99);
+    auto tfp_owner = std::make_unique<VerilatedVcdC>();
+    tfp = tfp_owner.get();
+    dut->trace(tfp, 99);
     tfp->open("waves/{top}.vcd");
 
     dut->clk = 0;
     dut->rst = 0;
     cycle = 0;
     cycle_count = 0;
+    sim_time = 0;
 
     std::cout << "Running test sequences..." << std::endl;
 
@@ -659,6 +665,7 @@ int main(int argc, char** argv) {{
     run_all_sequences();
 
     tfp->close();
+    tfp = nullptr;
     delete dut;
 
     if (check_passed) {{

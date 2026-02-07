@@ -1,0 +1,5 @@
+# RUN: cd %S && PYTHONPATH=%circt_build_path/tools/circt/python_packages/circt_core %python %S/pycmt2-simworkspace-vcd-dump-test.py | FileCheck %s
+#
+# CHECK: HAS_DUMP: 1
+# CHECK: OK
+
