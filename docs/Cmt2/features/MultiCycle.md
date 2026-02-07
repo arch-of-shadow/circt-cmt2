@@ -4,7 +4,7 @@ CMT2 supports **multi-cycle operations** through procedural control constructs. 
 
 **Related Examples:**
 - Proc control: `examples/PyCMT2/proc.py`, `examples/PyCMT2/proc_testbench.py`, `examples/PyCMT2/timing.py`
-- Call-site timing windows (arg_timing/result_timing inside static_step): `examples/PyCMT2/static_step_call_timing_window.py`
+- Call-site timing (call_timing/arg_timing/result_timing inside static_step): `examples/PyCMT2/static_step_call_timing_window.py`
 - Dataflow/Pipeline: `examples/PyCMT2/comprehensive_dataflow_example.py`, `examples/PyCMT2/dataflow_forkjoin.py`
 - Comprehensive: `examples/PyCMT2/comprehensive_example.py`
 
@@ -94,7 +94,7 @@ with m.static_step(4, "multiply") as step:
 **How multi-cycle execution works:** a `static_step(L)` lowers to an FSM segment with **L cycles**. Operations in the step body are **scheduled to specific cycles** within that segment.
 
 - By default, a `step.call(...)` is enabled only for the **first cycle** of the step (`[0, 1)`), and the remaining cycles simply advance the step latency.
-- `arg_timing` / `result_timing` on `step.call(...)` can **shift** and/or **extend** the cycles in which the call is enabled, which changes the emitted SV enable gating. See: `examples/PyCMT2/static_step_call_timing_window.py`.
+- `call_timing` controls when a call is **issued** (enable pulse), `arg_timing` specifies when arguments are **valid**, and `result_timing` specifies when results are **captured**. Multicycle calls are issued once and observed later; they are not repeatedly invoked. See: `examples/PyCMT2/static_step_call_timing_window.py`.
 
 ### Pipelined Static Steps
 
@@ -597,10 +597,11 @@ Initiation interval:
 
 ### Call-Site Timing
 
-Specify when arguments are driven and results captured:
+Specify when a call is issued, when arguments are valid, and when results are captured:
 
 ```mlir
 cmt2.call @mem @read(%addr) {
+    call_timing = #cmt2.timing<[0, 1]>,     // Issue call at cycle 0
     arg_timing = [#cmt2.timing<[0, 1]>],    // Drive addr at cycle 0
     result_timing = [#cmt2.timing<[2, 3]>]  // Capture result at cycle 2
 } : (!firrtl.uint<8>) -> !firrtl.uint<32>
@@ -797,22 +798,28 @@ error: result timing [1, 2) before method output latency 3
 
 ### Timing in Procedural Lowering Pipeline
 
-`arg_timing` / `result_timing` are **only legal inside** `cmt2.proc.static_step`. They are **consumed** by `cmt2-compile-static` to derive per-cycle enable guards and scheduling information; after that, timing becomes **implicit** in the FSM state structure and the attributes are dropped.
+`call_timing` / `arg_timing` / `result_timing` are **only legal inside** `cmt2.proc.static_step`. They are **consumed** by the static-step lowering pipeline to derive per-cycle scheduling actions (issue vs capture); after that, timing becomes **implicit** in the FSM state structure and the attributes are dropped. Per-cycle call clones are tagged with `call_ty = "Enable"|"GetRes"` so SV lowering can avoid re-issuing multicycle calls.
 
 | Pass | Timing Support |
 |------|----------------|
-| `CompileStatic` | ✓ Consumes `arg_timing`/`result_timing` and derives FSM guards |
+| `CompileStatic` | ✓ Consumes `call_timing`/`arg_timing`/`result_timing` and drops them after legalization |
 | `TDCC` | ✗ Control-flow FSM only (does not reschedule calls) |
-| `StaticFSMAllocation` | ✓ Computes `state_assignments` for per-cycle call cloning |
-| `ProcStmtToAction` | ✓ Clones scheduled calls per FSM cycle (timing is now implicit) |
+| `StaticFSMAllocation` | ✓ Computes `state_assignments` for per-cycle call actions (Enable/GetRes) |
+| `ProcStmtToAction` | ✓ Clones scheduled calls per FSM cycle and tags clones with `call_ty` |
 | `ProcToGAA` | ✓ Preserves behavior via per-state rules (no timing attrs needed) |
 
-**Practical guidance:** for cycle-precise call behavior, put the call inside a `static_step` and use `arg_timing` / `result_timing` on `step.call(...)`. For an E2E demo (SV + simulation), see `examples/PyCMT2/static_step_call_timing_window.py`.
+**Current restrictions (documented for future relaxation):**
+- `call_timing` must be a single-cycle interval.
+- `arg_timing[i]` must match `call_timing` (no implicit “hold regs”).
+- `result_timing` must be a single-cycle interval shared by all results, and must match the callee’s declared static latency from the call start (no implicit “stable-until-next-call” modeling).
+
+**Practical guidance:** for cycle-precise call behavior, put the call inside a `static_step` and use `call_timing` (issue), `arg_timing` (arg validity), and `result_timing` (capture). For an E2E demo (SV + simulation), see `examples/PyCMT2/static_step_call_timing_window.py`.
 
 ```python
 # WORKS: Timing preserved in static_step
 with m.static_step(4, "timed_mult") as step:
     result = step.call(mult, "multiply", a, b,
+                      call_timing=(0, 1),
                       arg_timing=[(0, 1), (0, 1)],
                       result_timing=[(3, 4)])
 

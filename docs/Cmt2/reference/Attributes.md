@@ -15,10 +15,11 @@ Half-open cycle interval `[start, end)`.
 #cmt2.timing<[2, 5]>   // Cycles 2, 3, 4
 ```
 
-**Usage:** Specifies when arguments are driven or results are captured.
+**Usage:** Specifies when a call is issued, when arguments are valid, and when results are captured.
 
 ```mlir
 cmt2.call @mem @read(%addr) {
+    call_timing = #cmt2.timing<[0, 1]>,      // Issue call at cycle 0
     arg_timing = [#cmt2.timing<[0, 1]>],     // Drive addr at cycle 0
     result_timing = [#cmt2.timing<[2, 3]>]   // Capture result at cycle 2
 } : ...
@@ -153,6 +154,16 @@ with m.method("pipelined", ..., static_latency=8, interval=2) as meth:
 
 ## Call Attributes
 
+### call_timing
+
+Timing interval for when the call is issued (start pulse), relative to the enclosing static step.
+
+```mlir
+cmt2.call @inst @method(%a) {
+    call_timing = #cmt2.timing<[0, 1]>
+} : ...
+```
+
 ### arg_timing
 
 Timing intervals for call arguments.
@@ -176,6 +187,14 @@ cmt2.call @inst @method(%a) {
 ```
 
 Specifies when each result is captured relative to the enclosing static step.
+
+### call_ty
+
+Lowering-only tag used on per-cycle clones of `cmt2.call` to distinguish the issue cycle
+from result-capture cycles.
+
+- `"Enable"`: drives enable high for this cycle (issues the call)
+- `"GetRes"`: drives enable low for this cycle (captures/reads results only)
 
 ---
 
@@ -340,8 +359,10 @@ Marker attributes indicating compilation status.
 | `#cmt2.port<kind, lat?>` | PortTimingAttr | Port kind with latency |
 | `static_latency` | I64Attr | Method total latency |
 | `interval` | IntervalAttr | Method/step II |
+| `call_timing` | TimingIntervalAttr | Call issue timing (static_step only) |
 | `arg_timing` | TimingArrayAttr | Call argument timing |
 | `result_timing` | TimingArrayAttr | Call result timing |
+| `call_ty` | StringAttr | Lowering-only call clone tag ("Enable"/"GetRes") |
 | `sequenceBefore` | ArrayAttr | Ordering constraints |
 | `conflict` | ArrayAttr | Mutual exclusion |
 | `conflictFree` | ArrayAttr | No conflict |
