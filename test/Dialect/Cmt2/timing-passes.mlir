@@ -98,7 +98,11 @@ builtin.module {
                 %r1 = cmt2.call @mult_unit @multiply(%c1, %c2) {arg_timing = [#cmt2.timing<[0, 1]>, #cmt2.timing<[0, 1]>], result_timing = [#cmt2.timing<[4, 5]>]} : (!firrtl.uint<32>, !firrtl.uint<32>) -> !firrtl.uint<32>
 
                 // Second call at cycle 3 (spacing = 3 >= II = 3, OK)
-                %r2 = cmt2.call @mult_unit @multiply(%c3, %c4) {arg_timing = [#cmt2.timing<[3, 4]>, #cmt2.timing<[3, 4]>], result_timing = [#cmt2.timing<[7, 8]>]} : (!firrtl.uint<32>, !firrtl.uint<32>) -> !firrtl.uint<32>
+                %r2 = cmt2.call @mult_unit @multiply(%c3, %c4) {
+                    call_timing = #cmt2.timing<[3, 4]>,
+                    arg_timing = [#cmt2.timing<[3, 4]>, #cmt2.timing<[3, 4]>],
+                    result_timing = [#cmt2.timing<[7, 8]>]
+                } : (!firrtl.uint<32>, !firrtl.uint<32>) -> !firrtl.uint<32>
             }
 
             cmt2.proc.rule @run_pipeline() -> () {

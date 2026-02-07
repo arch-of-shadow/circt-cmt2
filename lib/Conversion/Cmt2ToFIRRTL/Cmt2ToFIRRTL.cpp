@@ -1554,10 +1554,15 @@ LogicalResult LowerCmt2ToFIRRTLPass::connectMethodCall(
     StringAttr enablePortName = builder.getStringAttr(enableAttr.value());
     if (auto enablePortIdx =
             getPortIndex(firrtlInst, enablePortName.getValue().str())) {
-      Value one = builder.create<ConstantOp>(
-          callOp.getLoc(), UIntType::get(builder.getContext(), 1), APInt(1, 1));
+      bool isGetRes = false;
+      if (auto callTy = callOp->getAttrOfType<StringAttr>("call_ty"))
+        isGetRes = callTy.getValue() == "GetRes";
+
+      Value en = builder.create<ConstantOp>(
+          callOp.getLoc(), UIntType::get(builder.getContext(), 1),
+          APInt(1, isGetRes ? 0 : 1));
       builder.create<ConnectOp>(callOp.getLoc(),
-                                firrtlInst.getResult(*enablePortIdx), one);
+                                firrtlInst.getResult(*enablePortIdx), en);
     } else {
       return callOp.emitError("Enable port not found: ") << enablePortName;
     }

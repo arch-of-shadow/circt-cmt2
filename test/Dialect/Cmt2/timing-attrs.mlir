@@ -124,7 +124,11 @@ builtin.module {
 
                 // Second multiply: cycles 3-6 (pipelined, II=3)
                 // CHECK: arg_timing = [#cmt2.timing<[3, 4]>
-                %r2 = cmt2.call @mult_unit @multiply(%c3, %c4) {arg_timing = [#cmt2.timing<[3, 4]>, #cmt2.timing<[3, 4]>], result_timing = [#cmt2.timing<[7, 8]>]} : (!firrtl.uint<32>, !firrtl.uint<32>) -> !firrtl.uint<32>
+                %r2 = cmt2.call @mult_unit @multiply(%c3, %c4) {
+                    call_timing = #cmt2.timing<[3, 4]>,
+                    arg_timing = [#cmt2.timing<[3, 4]>, #cmt2.timing<[3, 4]>],
+                    result_timing = [#cmt2.timing<[7, 8]>]
+                } : (!firrtl.uint<32>, !firrtl.uint<32>) -> !firrtl.uint<32>
             }
 
             cmt2.proc.rule @run_pipeline() -> () {

@@ -42,7 +42,10 @@ builtin.module {
       // Producer result is available only in cycle 0, but consumed at cycle 3.
       cmt2.proc.static_step @bad_step <6> {
         %x = cmt2.call @reg_a @read() : () -> !firrtl.uint<32>
-        cmt2.call @reg_b @write(%x) {arg_timing = [#cmt2.timing<[3, 4]>]} : (!firrtl.uint<32>) -> ()
+        cmt2.call @reg_b @write(%x) {
+          call_timing = #cmt2.timing<[3, 4]>,
+          arg_timing = [#cmt2.timing<[3, 4]>]
+        } : (!firrtl.uint<32>) -> ()
       }
 
       cmt2.proc.rule @run() -> () {

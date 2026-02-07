@@ -104,6 +104,7 @@ builtin.module {
 
                 // Second call at cycle 3 (spacing = 3 = II, valid!)
                 %r2 = cmt2.call @mult_unit @multiply(%c3, %c4) {
+                    call_timing = #cmt2.timing<[3, 4]>,
                     arg_timing = [#cmt2.timing<[3, 4]>, #cmt2.timing<[3, 4]>],
                     result_timing = [#cmt2.timing<[7, 8]>]
                 } : (!firrtl.uint<32>, !firrtl.uint<32>) -> !firrtl.uint<32>

@@ -857,7 +857,7 @@ void ProcStmtToActionPass::generateStateRules(
             if (timingIt != stepStateTiming.end())
               localState = state - timingIt->second.startState;
 
-            DenseSet<int64_t> activeCallIndices;
+            DenseMap<int64_t, StringRef> activeCallTypes;
             if (auto assignments =
                     staticStep->getAttrOfType<ArrayAttr>("state_assignments")) {
               for (auto entryAttr : assignments) {
@@ -870,8 +870,22 @@ void ProcStmtToActionPass::generateStateRules(
                 if (static_cast<uint64_t>(stAttr.getInt()) != localState)
                   continue;
                 for (size_t i = 1; i < entry.size(); ++i) {
-                  if (auto idxAttr = dyn_cast<IntegerAttr>(entry[i]))
-                    activeCallIndices.insert(idxAttr.getInt());
+                  // Legacy format: integers are treated as "Enable".
+                  if (auto idxAttr = dyn_cast<IntegerAttr>(entry[i])) {
+                    activeCallTypes[idxAttr.getInt()] = "Enable";
+                    continue;
+                  }
+
+                  // New format: [call_idx, "Enable"/"GetRes"].
+                  if (auto pairAttr = dyn_cast<ArrayAttr>(entry[i])) {
+                    if (pairAttr.size() != 2)
+                      continue;
+                    auto idxAttr = dyn_cast<IntegerAttr>(pairAttr[0]);
+                    auto tyAttr = dyn_cast<StringAttr>(pairAttr[1]);
+                    if (!idxAttr || !tyAttr)
+                      continue;
+                    activeCallTypes[idxAttr.getInt()] = tyAttr.getValue();
+                  }
                 }
                 break;
               }
@@ -887,7 +901,7 @@ void ProcStmtToActionPass::generateStateRules(
               continue;
             }
 
-            if (activeCallIndices.empty())
+            if (activeCallTypes.empty())
               continue;
 
             Block &stepBlock = bodyRegion->front();
@@ -902,8 +916,14 @@ void ProcStmtToActionPass::generateStateRules(
             }
 
             auto checkCrossCycleDependencies =
-                [&](CallOp consumerCall,
-                    int64_t consumerCallIdx) -> LogicalResult {
+                [&](CallOp consumerCall, int64_t consumerCallIdx,
+                    StringRef callTy) -> LogicalResult {
+              // For GetRes clones, we intentionally ignore operand dependencies:
+              // the per-cycle clone will substitute dummy operands so we don't
+              // re-execute operand-producing calls in the capture cycle.
+              if (callTy == "GetRes")
+                return success();
+
               // Walk the consumer's operand definitions inside the static_step
               // body. Any dependency on a CallOp that is not scheduled in this
               // local cycle would require cross-cycle storage, which must be
@@ -931,7 +951,7 @@ void ProcStmtToActionPass::generateStateRules(
                   auto it = callOpToIndex.find(defOp);
                   if (it != callOpToIndex.end()) {
                     int64_t producerIdx = it->second;
-                    if (!activeCallIndices.contains(producerIdx)) {
+                    if (!activeCallTypes.contains(producerIdx)) {
                       std::string msg;
                       llvm::raw_string_ostream os(msg);
                       os << "cross-cycle dependency on call result in "
@@ -994,20 +1014,52 @@ void ProcStmtToActionPass::generateStateRules(
               auto call = dyn_cast<CallOp>(op);
               if (!call)
                 continue;
-              if (!activeCallIndices.contains(callIdx)) {
+              auto callTyIt = activeCallTypes.find(callIdx);
+              if (callTyIt == activeCallTypes.end()) {
                 ++callIdx;
                 continue;
               }
 
-              if (failed(checkCrossCycleDependencies(call, callIdx))) {
+              StringRef callTy = callTyIt->second;
+              if (failed(checkCrossCycleDependencies(call, callIdx, callTy))) {
                 signalPassFailure();
                 return;
               }
 
-              for (Value operand : call->getOperands())
-                (void)cloneDef(operand);
+              if (callTy == "GetRes") {
+                // Create a capture-only call clone which does not depend on the
+                // original operands. This avoids re-running operand
+                // computations (which may contain other calls) in the capture
+                // cycle.
+                SmallVector<Value> dummyOperands;
+                dummyOperands.reserve(call.getNumOperands());
+                for (Value operand : call->getOperands()) {
+                  dummyOperands.push_back(
+                      bodyBuilder.create<firrtl::InvalidValueOp>(
+                          loc, operand.getType())
+                          .getResult());
+                }
 
-              bodyBuilder.clone(op, bodyMapping);
+                auto clonedCall = bodyBuilder.create<CallOp>(
+                    loc, call.getResultTypes(), dummyOperands,
+                    call.getCalleeAttr(), call.getMethodOrValueAttr(),
+                    call.getArgAttrsAttr(), call.getResAttrsAttr(),
+                    /*call_timing=*/nullptr, /*arg_timing=*/nullptr,
+                    /*result_timing=*/nullptr, /*call_ty=*/nullptr);
+                clonedCall->setAttr("call_ty",
+                                    bodyBuilder.getStringAttr(callTy));
+                for (auto [origRes, newRes] :
+                     llvm::zip(call.getResults(), clonedCall.getResults()))
+                  bodyMapping.map(origRes, newRes);
+              } else {
+                for (Value operand : call->getOperands())
+                  (void)cloneDef(operand);
+                Operation *cloned = bodyBuilder.clone(op, bodyMapping);
+                if (cloned) {
+                  OpBuilder attrBuilder(cloned);
+                  cloned->setAttr("call_ty", attrBuilder.getStringAttr(callTy));
+                }
+              }
               ++callIdx;
             }
           } else {
@@ -2431,8 +2483,10 @@ LogicalResult ProcStmtToActionPass::processDataflowTaskRule(RuleOp rule,
   // Simple increment for next state (will be refined based on transitions)
   auto oneConst = tickBodyBuilder.create<firrtl::ConstantOp>(
       loc, fsmType, APInt(fsmWidth, 1));
-  auto incrementedState = tickBodyBuilder.create<firrtl::AddPrimOp>(
+  auto incrementedWide = tickBodyBuilder.create<firrtl::AddPrimOp>(
       loc, currentState, oneConst);
+  auto incrementedState = tickBodyBuilder.create<firrtl::BitsPrimOp>(
+      loc, incrementedWide, fsmWidth - 1, 0);
 
   // Mux: if at done, stay at done; else increment
   nextState = tickBodyBuilder.create<firrtl::MuxPrimOp>(

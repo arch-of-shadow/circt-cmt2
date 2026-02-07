@@ -47,8 +47,8 @@ namespace {
 /// Information about a call's FSM state requirements.
 struct CallStateInfo {
   CallOp call;
-  int64_t startState;
-  int64_t endState;
+  int64_t enableState;
+  std::optional<int64_t> getResState;
 };
 
 /// FSM allocation result for a static step.
@@ -219,45 +219,33 @@ StaticFSMAllocationPass::allocateStates(ProcStaticStepOp step) {
                           << info.bitwidth << " bits ("
                           << (info.isOneHot ? "one-hot" : "binary") << ")\n");
 
-  // Walk calls and extract their state ranges from timing
+  // Walk calls and extract their per-cycle actions from timing.
   step.getBody().walk([&](CallOp call) {
-    // Extract arg timing to determine start state
-    int64_t startState = 0;
-    if (auto argTiming = call.getArgTiming()) {
-      for (auto attr : *argTiming) {
-        if (auto timing = dyn_cast<TimingIntervalAttr>(attr)) {
-          startState = std::min(startState, timing.getStart());
-          if (startState == 0)
-            startState = timing.getStart();
-          else
-            startState = std::min(startState, timing.getStart());
-        }
-      }
-      // Re-compute to get the minimum
-      startState = INT64_MAX;
-      for (auto attr : *argTiming) {
-        if (auto timing = dyn_cast<TimingIntervalAttr>(attr)) {
-          startState = std::min(startState, timing.getStart());
-        }
-      }
-      if (startState == INT64_MAX)
-        startState = 0;
-    }
+    int64_t enableState = 0;
+    if (auto callTiming = call.getCallTiming())
+      enableState = callTiming->getStart();
 
-    // Extract result timing to determine end state
-    int64_t endState = startState + 1;
-    if (auto resultTiming = call.getResultTiming()) {
-      for (auto attr : *resultTiming) {
-        if (auto timing = dyn_cast<TimingIntervalAttr>(attr)) {
-          endState = std::max(endState, timing.getEnd());
+    std::optional<int64_t> getResState;
+    if (!call.getOutputs().empty()) {
+      if (auto resultTiming = call.getResultTiming()) {
+        if (!resultTiming->empty()) {
+          if (auto timing = dyn_cast<TimingIntervalAttr>((*resultTiming)[0]))
+            getResState = timing.getStart();
         }
+      } else {
+        // No result timing: treat as same-cycle availability.
+        getResState = enableState;
       }
     }
 
-    info.callStates.push_back({call, startState, endState});
+    info.callStates.push_back({call, enableState, getResState});
 
-    LLVM_DEBUG(llvm::dbgs() << "    Call: states [" << startState << ", "
-                            << endState << ")\n");
+    LLVM_DEBUG({
+      llvm::dbgs() << "    Call: enable@" << enableState;
+      if (getResState)
+        llvm::dbgs() << ", getres@" << *getResState;
+      llvm::dbgs() << "\n";
+    });
   });
 
   return info;
@@ -362,25 +350,27 @@ void StaticFSMAllocationPass::annotateStep(ProcStaticStepOp step,
     step->setAttr("fsm_shared_id", builder.getI64IntegerAttr(info.sharedFSMId));
   }
 
-  // state_assignments: Map from state to which calls are active
-  // This is stored as an array of arrays: [[state, call_indices...], ...]
+  // state_assignments: Map from local state to scheduled call actions.
+  // Stored as: [[local_state, [call_idx, "Enable"], [call_idx, "GetRes"], ...], ...]
+  // Legacy readers may also accept integers after local_state (treated as Enable).
   SmallVector<Attribute> stateAssignments;
   for (int64_t state = 0; state < info.numStates; ++state) {
-    SmallVector<int64_t> activeCallIndices;
+    SmallVector<Attribute> stateEntry;
+    stateEntry.push_back(builder.getI64IntegerAttr(state));
     for (size_t i = 0; i < info.callStates.size(); ++i) {
       const auto &callInfo = info.callStates[i];
-      if (state >= callInfo.startState && state < callInfo.endState) {
-        activeCallIndices.push_back(i);
+      if (state == callInfo.enableState) {
+        stateEntry.push_back(builder.getArrayAttr(
+            {builder.getI64IntegerAttr(i), builder.getStringAttr("Enable")}));
+      }
+      if (callInfo.getResState && state == *callInfo.getResState &&
+          state != callInfo.enableState) {
+        stateEntry.push_back(builder.getArrayAttr(
+            {builder.getI64IntegerAttr(i), builder.getStringAttr("GetRes")}));
       }
     }
-    if (!activeCallIndices.empty()) {
-      SmallVector<Attribute> stateEntry;
-      stateEntry.push_back(builder.getI64IntegerAttr(state));
-      for (int64_t idx : activeCallIndices) {
-        stateEntry.push_back(builder.getI64IntegerAttr(idx));
-      }
+    if (stateEntry.size() > 1)
       stateAssignments.push_back(builder.getArrayAttr(stateEntry));
-    }
   }
   step->setAttr("state_assignments", builder.getArrayAttr(stateAssignments));
 

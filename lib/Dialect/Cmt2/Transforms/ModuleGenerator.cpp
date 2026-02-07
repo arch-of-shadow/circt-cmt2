@@ -308,8 +308,7 @@ cmt2::ModuleOp ModuleGenerator::createShiftRegModule(StringRef name,
         FlatSymbolRefAttr::get(bodyBuilder.getContext(),
                                lastValidInst.getSymName()),
         FlatSymbolRefAttr::get(bodyBuilder.getContext(), "read"),
-        /*arg_attrs=*/nullptr, /*res_attrs=*/nullptr, /*arg_timing=*/nullptr,
-        /*result_timing=*/nullptr);
+        /*arg_attrs=*/ArrayAttr(), /*res_attrs=*/ArrayAttr());
     bodyBuilder.create<ReturnOp>(loc, callOp.getOutputs());
   }
 
@@ -344,8 +343,7 @@ cmt2::ModuleOp ModuleGenerator::createShiftRegModule(StringRef name,
         FlatSymbolRefAttr::get(bodyBuilder.getContext(),
                                lastDataInst.getSymName()),
         FlatSymbolRefAttr::get(bodyBuilder.getContext(), "read"),
-        /*arg_attrs=*/nullptr, /*res_attrs=*/nullptr, /*arg_timing=*/nullptr,
-        /*result_timing=*/nullptr);
+        /*arg_attrs=*/ArrayAttr(), /*res_attrs=*/ArrayAttr());
     bodyBuilder.create<ReturnOp>(loc, callOp.getOutputs());
   }
 
@@ -385,8 +383,7 @@ cmt2::ModuleOp ModuleGenerator::createShiftRegModule(StringRef name,
         FlatSymbolRefAttr::get(bodyBuilder.getContext(),
                                firstDataInst.getSymName()),
         FlatSymbolRefAttr::get(bodyBuilder.getContext(), "write"),
-        /*arg_attrs=*/nullptr, /*res_attrs=*/nullptr, /*arg_timing=*/nullptr,
-        /*result_timing=*/nullptr);
+        /*arg_attrs=*/ArrayAttr(), /*res_attrs=*/ArrayAttr());
 
     // Set first valid to true
     auto trueVal =
@@ -397,8 +394,7 @@ cmt2::ModuleOp ModuleGenerator::createShiftRegModule(StringRef name,
         FlatSymbolRefAttr::get(bodyBuilder.getContext(),
                                firstValidInst.getSymName()),
         FlatSymbolRefAttr::get(bodyBuilder.getContext(), "write"),
-        /*arg_attrs=*/nullptr, /*res_attrs=*/nullptr, /*arg_timing=*/nullptr,
-        /*result_timing=*/nullptr);
+        /*arg_attrs=*/ArrayAttr(), /*res_attrs=*/ArrayAttr());
 
     bodyBuilder.create<ReturnOp>(loc, ValueRange{});
   }
@@ -512,8 +508,7 @@ Cmt2ModuleLike ModuleGenerator::createFIFOModule(StringRef name,
         loc, TypeRange{resultTy}, ValueRange{},
         FlatSymbolRefAttr::get(b.getContext(), inst.getSymName()),
         FlatSymbolRefAttr::get(b.getContext(), "read"),
-        /*arg_attrs=*/nullptr, /*res_attrs=*/nullptr, /*arg_timing=*/nullptr,
-        /*result_timing=*/nullptr);
+        /*arg_attrs=*/ArrayAttr(), /*res_attrs=*/ArrayAttr());
     return callOp.getOutputs()[0];
   };
 
@@ -522,8 +517,7 @@ Cmt2ModuleLike ModuleGenerator::createFIFOModule(StringRef name,
         loc, TypeRange{}, ValueRange{v},
         FlatSymbolRefAttr::get(b.getContext(), inst.getSymName()),
         FlatSymbolRefAttr::get(b.getContext(), "write"),
-        /*arg_attrs=*/nullptr, /*res_attrs=*/nullptr, /*arg_timing=*/nullptr,
-        /*result_timing=*/nullptr);
+        /*arg_attrs=*/ArrayAttr(), /*res_attrs=*/ArrayAttr());
   };
 
   // Helper: build a boolean (UInt<1>) for notEmpty and notFull.
@@ -884,8 +878,7 @@ ModuleGenerator::createStorageCall(Location loc, InstanceOp instance,
         loc, TypeRange(resultTypes), args,
         FlatSymbolRefAttr::get(builder.getContext(), instance.getSymName()),
         FlatSymbolRefAttr::get(builder.getContext(), methodName),
-        /*arg_attrs=*/nullptr, /*res_attrs=*/nullptr, /*arg_timing=*/nullptr,
-        /*result_timing=*/nullptr);
+        /*arg_attrs=*/ArrayAttr(), /*res_attrs=*/ArrayAttr());
 
     return SmallVector<Value>(callOp.getOutputs());
   }
@@ -916,8 +909,7 @@ ModuleGenerator::createStorageCall(Location loc, InstanceOp instance,
         loc, TypeRange(resultTypes), args,
         FlatSymbolRefAttr::get(builder.getContext(), instance.getSymName()),
         FlatSymbolRefAttr::get(builder.getContext(), methodName),
-        /*arg_attrs=*/nullptr, /*res_attrs=*/nullptr, /*arg_timing=*/nullptr,
-        /*result_timing=*/nullptr);
+        /*arg_attrs=*/ArrayAttr(), /*res_attrs=*/ArrayAttr());
 
     return SmallVector<Value>(callOp.getOutputs());
   }

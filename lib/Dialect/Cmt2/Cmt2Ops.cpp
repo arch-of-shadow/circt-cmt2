@@ -1292,6 +1292,13 @@ LogicalResult MethodOp::verify() {
 //===----------------------------------------------------------------------===//
 
 LogicalResult CallOp::verify() {
+  // Verify call_ty if present (used by lowering to distinguish per-cycle clones).
+  if (auto callTy = (*this)->getAttrOfType<StringAttr>("call_ty")) {
+    StringRef v = callTy.getValue();
+    if (v != "Enable" && v != "GetRes")
+      return emitOpError("call_ty must be one of \"Enable\" or \"GetRes\"");
+  }
+
   // Verify arg_timing array size matches inputs
   if (auto argTiming = getArgTiming()) {
     if (argTiming->size() != getInputs().size()) {
@@ -1334,20 +1341,43 @@ LogicalResult CallOp::verify() {
 
   // Timing attributes are only meaningful inside ProcStaticStepOp.
   // If specified elsewhere, emit a warning (timing will be ignored).
-  bool hasTimingAttrs = getArgTiming() || getResultTiming();
+  bool hasTimingAttrs = getCallTiming() || getArgTiming() || getResultTiming();
   auto staticStep = getOperation()->getParentOfType<ProcStaticStepOp>();
 
   if (hasTimingAttrs && !staticStep) {
     // Timing specified outside static step - this is likely an error.
     // The timing will be ignored during lowering.
-    return emitOpError("timing attributes (arg_timing/result_timing) are only "
-                       "valid inside cmt2.proc.static_step; timing on this "
-                       "call will be ignored during lowering");
+    return emitOpError(
+        "timing attributes (call_timing/arg_timing/result_timing) are only "
+        "valid inside cmt2.proc.static_step; timing on this call will be "
+        "ignored during lowering");
   }
 
   // If inside a static step, verify timing is within step bounds
   if (staticStep) {
     int64_t stepLatency = staticStep.getLatency();
+
+    if (auto callTy = (*this)->getAttrOfType<StringAttr>("call_ty")) {
+      return emitOpError(
+          "call_ty is a lowering-only tag and must not appear inside "
+          "cmt2.proc.static_step");
+    }
+
+    // Default call_timing is [0, 1).
+    TimingIntervalAttr callTiming =
+        getCallTiming().value_or(TimingIntervalAttr::get(getContext(), 0, 1));
+
+    if (callTiming.getStart() < 0)
+      return emitOpError("call_timing start (")
+             << callTiming.getStart() << ") must be non-negative";
+    if (callTiming.getEnd() > stepLatency)
+      return emitOpError("call_timing end (")
+             << callTiming.getEnd() << ") exceeds step latency (" << stepLatency
+             << ")";
+    // Restriction (initial): call_timing is a single-cycle issue point.
+    if (callTiming.getEnd() != callTiming.getStart() + 1)
+      return emitOpError("call_timing must be a single-cycle interval; got [")
+             << callTiming.getStart() << ", " << callTiming.getEnd() << ")";
 
     if (auto argTiming = getArgTiming()) {
       for (size_t i = 0; i < argTiming->size(); ++i) {
@@ -1357,17 +1387,45 @@ LogicalResult CallOp::verify() {
                    << i << "] end (" << timing.getEnd()
                    << ") exceeds step latency (" << stepLatency << ")";
           }
+          // Restriction (initial): arguments must be valid at call issue time.
+          if (timing.getStart() != callTiming.getStart() ||
+              timing.getEnd() != callTiming.getEnd()) {
+            return emitOpError("arg_timing[")
+                   << i << "] must match call_timing ["
+                   << callTiming.getStart() << ", " << callTiming.getEnd()
+                   << "); got [" << timing.getStart() << ", " << timing.getEnd()
+                   << ")";
+          }
         }
       }
     }
 
     if (auto resultTiming = getResultTiming()) {
+      TimingIntervalAttr common;
+      bool haveCommon = false;
       for (size_t i = 0; i < resultTiming->size(); ++i) {
         if (auto timing = dyn_cast<TimingIntervalAttr>((*resultTiming)[i])) {
           if (timing.getEnd() > stepLatency) {
             return emitOpError("result_timing[")
                    << i << "] end (" << timing.getEnd()
                    << ") exceeds step latency (" << stepLatency << ")";
+          }
+          // Restriction (initial): results are captured in a single cycle.
+          if (timing.getEnd() != timing.getStart() + 1) {
+            return emitOpError("result_timing[")
+                   << i << "] must be a single-cycle interval; got ["
+                   << timing.getStart() << ", " << timing.getEnd() << ")";
+          }
+          // Restriction (initial): all results share the same capture time.
+          if (!haveCommon) {
+            common = timing;
+            haveCommon = true;
+          } else if (timing.getStart() != common.getStart() ||
+                     timing.getEnd() != common.getEnd()) {
+            return emitOpError("result_timing[")
+                   << i << "] must match result_timing[0] ["
+                   << common.getStart() << ", " << common.getEnd() << "); got ["
+                   << timing.getStart() << ", " << timing.getEnd() << ")";
           }
         }
       }

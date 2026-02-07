@@ -93,7 +93,8 @@ LogicalResult TimingValidationPass::validateStrictTiming(ProcStaticStepOp step) 
 
   step.getBody().walk([&](CallOp call) {
     // In strict mode, all calls must have explicit timing
-    if (!call.getArgTiming() && !call.getResultTiming()) {
+    if (!call.getCallTiming() || !call.getArgTiming() ||
+        (!call.getOutputs().empty() && !call.getResultTiming())) {
       call.emitOpError("call in static step must have explicit timing "
                        "annotations (strict mode enabled)");
       result = failure();
@@ -138,15 +139,10 @@ LogicalResult TimingValidationPass::validatePipelinedCalls(
     // Extract start times from calls
     SmallVector<std::pair<int64_t, CallOp>> startTimes;
     for (auto call : calls) {
-      auto argTiming = call.getArgTiming();
-      if (!argTiming || argTiming->empty())
-        continue;
-
-      auto timing = dyn_cast<TimingIntervalAttr>((*argTiming)[0]);
-      if (!timing)
-        continue;
-
-      startTimes.emplace_back(timing.getStart(), call);
+      int64_t start = 0;
+      if (auto callTiming = call.getCallTiming())
+        start = callTiming->getStart();
+      startTimes.emplace_back(start, call);
     }
 
     // Sort by start time

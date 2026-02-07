@@ -162,6 +162,7 @@ builtin.module {
 
                 // Multiply starts at cycle 2 (after read result is ready)
                 %mult_r = cmt2.call @mult_unit @multiply(%mem_data, %const) {
+                    call_timing = #cmt2.timing<[2, 3]>,
                     arg_timing = [#cmt2.timing<[2, 3]>, #cmt2.timing<[2, 3]>],
                     result_timing = [#cmt2.timing<[5, 6]>]
                 } : (!firrtl.uint<32>, !firrtl.uint<32>) -> !firrtl.uint<32>
@@ -212,6 +213,7 @@ builtin.module {
 
                 // Add at cycle 3 (after mult completes, uses mult result + mem result)
                 %add_r = cmt2.call @adder_unit @add(%mult_r, %mem_data) {
+                    call_timing = #cmt2.timing<[3, 4]>,
                     arg_timing = [#cmt2.timing<[3, 4]>, #cmt2.timing<[3, 4]>],
                     result_timing = [#cmt2.timing<[4, 5]>]
                 } : (!firrtl.uint<32>, !firrtl.uint<32>) -> !firrtl.uint<32>

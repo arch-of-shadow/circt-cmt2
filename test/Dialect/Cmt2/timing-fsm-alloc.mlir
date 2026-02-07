@@ -92,25 +92,26 @@ builtin.module {
         // Test 3: Pipelined calls with overlapping state ranges
         // ALLOC-LABEL: cmt2.module @PipelinedFSM
         // ALLOC: cmt2.proc.static_step @pipe_step<10>
-        // ALLOC: state_assignments = {{.*}}[3, 0, 1]{{.*}}[4, 0, 1]
+        // ALLOC: state_assignments = {{.*}}[0, [0, "Enable"]]{{.*}}[3, [1, "Enable"]]{{.*}}[4, [0, "GetRes"]]{{.*}}[7, [1, "GetRes"]]
         // COMPILE-LABEL: cmt2.module @PipelinedFSM
         // COMPILE: cmt2.proc.static_step @pipe_step<10>
         // COMPILE: cmt2.call @mult_unit @multiply
-        // COMPILE-SAME: fsm_guard_expr = "fsm >= 0 && fsm < 5"
+        // COMPILE-SAME: fsm_guard_expr = "fsm == 0"
         // COMPILE: cmt2.call @mult_unit @multiply
-        // COMPILE-SAME: fsm_guard_expr = "fsm >= 3 && fsm < 8"
+        // COMPILE-SAME: fsm_guard_expr = "fsm == 3"
         // STMT-LABEL: cmt2.module @PipelinedFSM
         // STMT: cmt2.rule @run_state0() -> ()
         // STMT: cmt2.call @mult_unit @multiply
-        // STMT-SAME: fsm_start_state = 0
+        // STMT-SAME: call_ty = "Enable"
+        // STMT: cmt2.rule @run_state4() -> ()
+        // STMT: cmt2.call @mult_unit @multiply
+        // STMT-SAME: call_ty = "GetRes"
         // STMT: cmt2.rule @run_state3() -> ()
         // STMT: cmt2.call @mult_unit @multiply
-        // STMT-SAME: fsm_start_state = 0
-        // STMT: cmt2.call @mult_unit @multiply
-        // STMT-SAME: fsm_start_state = 3
+        // STMT-SAME: call_ty = "Enable"
         // STMT: cmt2.rule @run_state7() -> ()
         // STMT: cmt2.call @mult_unit @multiply
-        // STMT-SAME: fsm_start_state = 3
+        // STMT-SAME: call_ty = "GetRes"
         cmt2.module @PipelinedFSM(%clk: !firrtl.clock, %rst: !firrtl.uint<1>) {
             cmt2.instance @mult_unit = @mult (%clk) : !firrtl.clock
 
@@ -121,11 +122,13 @@ builtin.module {
                 %c4 = firrtl.constant 4 : !firrtl.uint<32>
                 // First call at cycle 0
                 %r1 = cmt2.call @mult_unit @multiply(%c1, %c2) {
+                    call_timing = #cmt2.timing<[0, 1]>,
                     arg_timing = [#cmt2.timing<[0, 1]>, #cmt2.timing<[0, 1]>],
                     result_timing = [#cmt2.timing<[4, 5]>]
                 } : (!firrtl.uint<32>, !firrtl.uint<32>) -> !firrtl.uint<32>
                 // Second call at cycle 3
                 %r2 = cmt2.call @mult_unit @multiply(%c3, %c4) {
+                    call_timing = #cmt2.timing<[3, 4]>,
                     arg_timing = [#cmt2.timing<[3, 4]>, #cmt2.timing<[3, 4]>],
                     result_timing = [#cmt2.timing<[7, 8]>]
                 } : (!firrtl.uint<32>, !firrtl.uint<32>) -> !firrtl.uint<32>

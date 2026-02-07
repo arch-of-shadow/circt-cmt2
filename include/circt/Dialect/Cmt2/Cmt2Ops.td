@@ -813,8 +813,10 @@ def CallOp : Cmt2Op<
       - `methodOrValue`: The symbol name of the method or value being called.
 
     Timing attributes (optional, for cycle-precise static steps):
+      - `call_timing`: Timing interval for when the call is issued (start pulse).
       - `arg_timing`: Array of timing intervals for when each argument is driven.
       - `result_timing`: Array of timing intervals for when each result is captured.
+      - `call_ty`: Lowering-only tag for per-cycle clones ("Enable" vs "GetRes").
 
     Results:
       - `outputs`: The list of output signals (values) returned by the method or value being called.
@@ -827,7 +829,8 @@ def CallOp : Cmt2Op<
 
     // Static call with timing guards (inside a static_step)
     %r = cmt2.call @mult @multiply(%a, %b) : (!firrtl.uint<32>, !firrtl.uint<32>) -> !firrtl.uint<32>
-        {arg_timing = [#cmt2.timing<[0, 1]>, #cmt2.timing<[0, 1]>],
+        {call_timing = #cmt2.timing<[0, 1]>,
+         arg_timing = [#cmt2.timing<[0, 1]>, #cmt2.timing<[0, 1]>],
          result_timing = [#cmt2.timing<[4, 5]>]}
     ```
   }];
@@ -837,9 +840,13 @@ def CallOp : Cmt2Op<
     SymbolRefAttr:$methodOrValue,
     OptionalAttr<ArrayAttr>:$arg_attrs,
     OptionalAttr<ArrayAttr>:$res_attrs,
+    // Call issue time (static_step only)
+    OptionalAttr<Cmt2_TimingIntervalAttr>:$call_timing,
     // Timing guards for cycle-precise static steps
     OptionalAttr<Cmt2_TimingArrayAttr>:$arg_timing,
-    OptionalAttr<Cmt2_TimingArrayAttr>:$result_timing
+    OptionalAttr<Cmt2_TimingArrayAttr>:$result_timing,
+    // Lowering-only tag for per-cycle clones
+    OptionalAttr<StrAttr>:$call_ty
   );
   let results = (outs Variadic<FIRRTLBaseType>:$outputs);
   let assemblyFormat = [{
@@ -855,7 +862,8 @@ def CallOp : Cmt2Op<
                    "::mlir::ArrayAttr":$arg_attrs,
                    "::mlir::ArrayAttr":$res_attrs), [{
       build($_builder, $_state, resultTypes, inputs, callee, methodOrValue,
-            arg_attrs, res_attrs, /*arg_timing=*/nullptr, /*result_timing=*/nullptr);
+            arg_attrs, res_attrs, /*call_timing=*/nullptr, /*arg_timing=*/nullptr,
+            /*result_timing=*/nullptr, /*call_ty=*/nullptr);
     }]>
   ];
 
@@ -867,7 +875,8 @@ def CallOp : Cmt2Op<
 
     /// Returns true if this call has timing guards
     bool hasTiming() {
-      return getArgTiming().has_value() || getResultTiming().has_value();
+      return getCallTiming().has_value() || getArgTiming().has_value() ||
+             getResultTiming().has_value();
     }
 
     /// Get timing for a specific argument, or nullptr

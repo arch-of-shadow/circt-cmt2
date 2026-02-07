@@ -100,22 +100,26 @@ void TimingInferencePass::inferTimingForCall(CallOp call, cmt2::ModuleOp module,
 
   OpBuilder builder(call);
   int64_t methodLatency = *methodTiming->latency;
+  int64_t callStart = 0;
+  if (auto callTiming = call.getCallTiming())
+    callStart = callTiming->getStart();
 
   // Infer default arg timing: args provided at cycle 0
   SmallVector<Attribute> argTimingAttrs;
   for (size_t i = 0; i < call.getInputs().size(); ++i) {
-    // Default: arg is stable at cycle 0
+    // Default: arg is stable at call issue cycle
     argTimingAttrs.push_back(
-        TimingIntervalAttr::get(builder.getContext(), 0, 1));
+        TimingIntervalAttr::get(builder.getContext(), callStart,
+                                callStart + 1));
   }
 
   // Infer default result timing: results available at method latency
   SmallVector<Attribute> resultTimingAttrs;
   for (size_t i = 0; i < call.getOutputs().size(); ++i) {
-    // Default: result available at method latency, stable for 1 cycle
+    // Default: result available at (call_start + method latency), stable for 1 cycle
     resultTimingAttrs.push_back(
-        TimingIntervalAttr::get(builder.getContext(), methodLatency,
-                                methodLatency + 1));
+        TimingIntervalAttr::get(builder.getContext(), callStart + methodLatency,
+                                callStart + methodLatency + 1));
   }
 
   // Set the inferred timing attributes
@@ -126,8 +130,11 @@ void TimingInferencePass::inferTimingForCall(CallOp call, cmt2::ModuleOp module,
 
   LLVM_DEBUG(llvm::dbgs() << "  Inferred timing for call to "
                           << call.getCallee() << "." << call.getMethodOrValueAttr()
-                          << ": args@[0,1), results@[" << methodLatency
-                          << "," << methodLatency + 1 << ")\n");
+                          << ": call@" << callStart << ", args@["
+                          << callStart << "," << callStart + 1
+                          << "), results@["
+                          << callStart + methodLatency << ","
+                          << callStart + methodLatency + 1 << ")\n");
 }
 
 //===----------------------------------------------------------------------===//

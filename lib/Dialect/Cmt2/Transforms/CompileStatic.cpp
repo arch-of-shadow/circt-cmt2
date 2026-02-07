@@ -201,15 +201,13 @@ CompileStaticPass::analyzeEarlyReset(ProcStaticStepOp step,
   int64_t maxEndState = 0;
 
   step.getBody().walk([&](CallOp call) {
+    if (auto callTiming = call.getCallTiming())
+      maxEndState = std::max(maxEndState, callTiming->getEnd());
+    else
+      maxEndState = std::max<int64_t>(maxEndState, 1);
+
     if (auto resultTiming = call.getResultTiming()) {
       for (auto attr : *resultTiming) {
-        if (auto timing = dyn_cast<TimingIntervalAttr>(attr)) {
-          maxEndState = std::max(maxEndState, timing.getEnd());
-        }
-      }
-    } else if (auto argTiming = call.getArgTiming()) {
-      // If no result timing, use arg timing + 1 as end
-      for (auto attr : *argTiming) {
         if (auto timing = dyn_cast<TimingIntervalAttr>(attr)) {
           maxEndState = std::max(maxEndState, timing.getEnd());
         }
@@ -516,8 +514,13 @@ void CompileStaticPass::createFSMTickRule(OpBuilder &builder, Location loc,
     // Binary: increment by 1
     auto oneConst = bodyBuilder.create<firrtl::ConstantOp>(
         loc, fsmType, llvm::APInt(fsmWidth, 1));
-    nextState = bodyBuilder.create<firrtl::AddPrimOp>(
+    auto incrementedWide = bodyBuilder.create<firrtl::AddPrimOp>(
         loc, fsmReadCall2.getResult(0), oneConst.getResult()).getResult();
+    // Truncate back to the FSM register width (add widens by 1).
+    nextState = bodyBuilder
+                    .create<firrtl::BitsPrimOp>(loc, incrementedWide,
+                                                fsmWidth - 1, 0)
+                    .getResult();
   }
 
   // Write next state
@@ -791,46 +794,22 @@ void CompileStaticPass::processStaticStep(ProcStaticStepOp step,
   annotateFSMRegisterInfo(step, *config, earlyReset);
 
   // Walk calls and annotate with state guards
-  int64_t callIdx = 0;
   step.getBody().walk([&](CallOp call) {
-    // Get timing info from the call
     int64_t startState = 0;
-    int64_t endState = 1;
+    if (auto callTiming = call.getCallTiming())
+      startState = callTiming->getStart();
 
-    // Try to get start state from arg_timing
-    if (auto argTiming = call.getArgTiming()) {
-      int64_t minStart = INT64_MAX;
-      for (auto attr : *argTiming) {
-        if (auto timing = dyn_cast<TimingIntervalAttr>(attr)) {
-          minStart = std::min(minStart, timing.getStart());
-        }
-      }
-      if (minStart != INT64_MAX)
-        startState = minStart;
-    }
+    annotateCallWithStateGuard(call, startState, startState + 1,
+                               config->isOneHot);
 
-    // Try to get end state from result_timing
-    if (auto resultTiming = call.getResultTiming()) {
-      int64_t maxEnd = 0;
-      for (auto attr : *resultTiming) {
-        if (auto timing = dyn_cast<TimingIntervalAttr>(attr)) {
-          maxEnd = std::max(maxEnd, timing.getEnd());
-        }
-      }
-      endState = maxEnd;
-    } else {
-      endState = startState + 1;
-    }
-
-    annotateCallWithStateGuard(call, startState, endState, config->isOneHot);
-    // After we've consumed call-site timing to derive FSM guards, drop the
-    // timing attributes. Subsequent procedural lowering clones calls out of
-    // the `cmt2.proc.static_step` body; keeping arg_timing/result_timing would
-    // make those cloned calls illegal (CallOp verifier requires timing attrs
-    // to appear only inside ProcStaticStepOp).
+    // After we've consumed call-site timing, drop the timing attributes.
+    // Subsequent procedural lowering clones calls out of the
+    // `cmt2.proc.static_step` body; keeping call-site timing would make those
+    // clones illegal (CallOp verifier requires timing attrs only inside
+    // ProcStaticStepOp).
+    call->removeAttr("call_timing");
     call->removeAttr("arg_timing");
     call->removeAttr("result_timing");
-    ++callIdx;
   });
 
   // Transform to wrapper with internal FSM
