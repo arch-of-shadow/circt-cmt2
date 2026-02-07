@@ -51,6 +51,22 @@ builtin.module {
                 %result = cmt2.call @mult_unit @multiply(%c10, %c20) : (!firrtl.uint<32>, !firrtl.uint<32>) -> !firrtl.uint<32>
             }
 
+            // Static step with partial timing: arg_timing present but
+            // result_timing omitted. Inference should fill in result_timing.
+            // INFER: cmt2.proc.static_step @infer_partial_step<10>
+            // INFER: %{{.*}} = cmt2.call @mult_unit @multiply
+            // INFER-SAME: arg_timing = [#cmt2.timing<[3, 4]>, #cmt2.timing<[3, 4]>]
+            // INFER-SAME: call_timing = #cmt2.timing<[3, 4]>
+            // INFER-SAME: result_timing = [#cmt2.timing<[7, 8]>]
+            cmt2.proc.static_step @infer_partial_step <10> {
+                %c1 = firrtl.constant 1 : !firrtl.uint<32>
+                %c2 = firrtl.constant 2 : !firrtl.uint<32>
+                %result = cmt2.call @mult_unit @multiply(%c1, %c2) {
+                    call_timing = #cmt2.timing<[3, 4]>,
+                    arg_timing = [#cmt2.timing<[3, 4]>, #cmt2.timing<[3, 4]>]
+                } : (!firrtl.uint<32>, !firrtl.uint<32>) -> !firrtl.uint<32>
+            }
+
             cmt2.proc.rule @compute() -> () {
                 %c1 = firrtl.constant 1 : !firrtl.uint<1>
                 cmt2.return %c1 : !firrtl.uint<1>

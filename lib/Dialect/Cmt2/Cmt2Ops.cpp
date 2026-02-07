@@ -1340,7 +1340,7 @@ LogicalResult CallOp::verify() {
   }
 
   // Timing attributes are only meaningful inside ProcStaticStepOp.
-  // If specified elsewhere, emit a warning (timing will be ignored).
+  // If specified elsewhere, treat this as an error.
   bool hasTimingAttrs = getCallTiming() || getArgTiming() || getResultTiming();
   auto staticStep = getOperation()->getParentOfType<ProcStaticStepOp>();
 

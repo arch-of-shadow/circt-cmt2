@@ -83,8 +83,11 @@ private:
 
 void TimingInferencePass::inferTimingForCall(CallOp call, cmt2::ModuleOp module,
                                               TimingAnalysis &analysis) {
-  // Skip calls that already have timing annotations
-  if (call.getArgTiming() || call.getResultTiming())
+  // Infer only the missing timing pieces. This intentionally supports partial
+  // user annotations (e.g. arg_timing present but result_timing omitted).
+  bool needArgTiming = !call.getArgTiming();
+  bool needResultTiming = !call.getResultTiming() && !call.getOutputs().empty();
+  if (!needArgTiming && !needResultTiming)
     return;
 
   // Look up the method timing
@@ -104,28 +107,32 @@ void TimingInferencePass::inferTimingForCall(CallOp call, cmt2::ModuleOp module,
   if (auto callTiming = call.getCallTiming())
     callStart = callTiming->getStart();
 
-  // Infer default arg timing: args provided at cycle 0
+  // Infer default arg timing: args are stable at the call issue cycle.
   SmallVector<Attribute> argTimingAttrs;
-  for (size_t i = 0; i < call.getInputs().size(); ++i) {
-    // Default: arg is stable at call issue cycle
-    argTimingAttrs.push_back(
-        TimingIntervalAttr::get(builder.getContext(), callStart,
-                                callStart + 1));
+  if (needArgTiming) {
+    for (size_t i = 0; i < call.getInputs().size(); ++i) {
+      argTimingAttrs.push_back(
+          TimingIntervalAttr::get(builder.getContext(), callStart,
+                                  callStart + 1));
+    }
   }
 
   // Infer default result timing: results available at method latency
   SmallVector<Attribute> resultTimingAttrs;
-  for (size_t i = 0; i < call.getOutputs().size(); ++i) {
-    // Default: result available at (call_start + method latency), stable for 1 cycle
-    resultTimingAttrs.push_back(
-        TimingIntervalAttr::get(builder.getContext(), callStart + methodLatency,
-                                callStart + methodLatency + 1));
+  if (needResultTiming) {
+    for (size_t i = 0; i < call.getOutputs().size(); ++i) {
+      // Default: result available at (call_start + method latency), stable for 1
+      // cycle.
+      resultTimingAttrs.push_back(TimingIntervalAttr::get(
+          builder.getContext(), callStart + methodLatency,
+          callStart + methodLatency + 1));
+    }
   }
 
   // Set the inferred timing attributes
-  if (!argTimingAttrs.empty())
+  if (needArgTiming && !argTimingAttrs.empty())
     call.setArgTimingAttr(builder.getArrayAttr(argTimingAttrs));
-  if (!resultTimingAttrs.empty())
+  if (needResultTiming && !resultTimingAttrs.empty())
     call.setResultTimingAttr(builder.getArrayAttr(resultTimingAttrs));
 
   LLVM_DEBUG(llvm::dbgs() << "  Inferred timing for call to "
@@ -158,8 +165,11 @@ TimingInferencePass::computeRequiredLatency(ProcStaticStepOp step,
           parentModule, call.getCallee(), call.getMethodOrValueAttr());
       if (methodTiming && methodTiming->isStatic() &&
           !call.getOutputs().empty()) {
-        // Need at least method latency to get results
-        maxCycle = std::max(maxCycle, *methodTiming->latency);
+        int64_t callStart = 0;
+        if (auto callTiming = call.getCallTiming())
+          callStart = callTiming->getStart();
+        // Need enough room to capture the results (single-cycle interval).
+        maxCycle = std::max(maxCycle, callStart + *methodTiming->latency + 1);
       }
     }
   });
