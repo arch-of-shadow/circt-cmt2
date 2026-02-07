@@ -721,8 +721,17 @@ int main(int argc, char** argv) {{
 
 # Verilator configuration
 VERILATOR ?= verilator
+# NOTE: Verilator does not trace signals with a leading '_' by default.
+# Many compiler-generated internal signals use '_' prefixes to avoid name
+# collisions, so enable tracing underscores by default for debuggability.
+VERILATOR_TRACE_UNDERSCORE ?= 1
+VERILATOR_TRACE_UNDERSCORE_FLAG :=
+ifeq ($(VERILATOR_TRACE_UNDERSCORE),1)
+VERILATOR_TRACE_UNDERSCORE_FLAG := --trace-underscore
+endif
+
 VERILATOR_FLAGS = --cc --exe --build -j 0 \\
-    --trace --trace-structs \\
+    --trace --trace-structs $(VERILATOR_TRACE_UNDERSCORE_FLAG) \\
     -Wall -Wno-fatal \\
     --top-module {top}
 
