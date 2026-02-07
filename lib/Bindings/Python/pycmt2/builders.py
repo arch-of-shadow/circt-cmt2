@@ -474,6 +474,7 @@ class RegionBuilder:
         target,
         method_or_value,
         *args: Signal,
+        call_timing: tuple[int, int] | None = None,
         arg_timing: list[tuple[int, int]] | None = None,
         result_timing: list[tuple[int, int]] | None = None,
     ) -> tuple[Signal, ...] | Signal | None:
@@ -483,6 +484,10 @@ class RegionBuilder:
             target: The instance to call on (Instance object), or None for @this.
             method_or_value: A MethodRef, ValueRef, or string method name.
             *args: Arguments to pass.
+            call_timing: Optional (start, end) cycle timing for when the call is
+                         issued (start pulse). This is separate from argument
+                         and result validity. Example: (0, 1) issues the call
+                         at cycle 0.
             arg_timing: Optional list of (start, end) cycle timing for each argument.
                         Each tuple specifies a half-open interval [start, end).
                         Example: [(0, 1), (0, 1)] means both args driven at cycle 0.
@@ -496,6 +501,7 @@ class RegionBuilder:
         Example with timing (for static steps):
             with mod.static_step(6, "compute") as step:
                 result = step.call(mult, "multiply", a, b,
+                    call_timing=(0, 1),              # issue at cycle 0
                     arg_timing=[(0, 1), (0, 1)],   # args at cycle 0
                     result_timing=[(4, 5)])        # result at cycle 4
         """
@@ -575,6 +581,14 @@ class RegionBuilder:
 
             # Build timing attributes if provided
             call_attrs = {}
+            if call_timing is not None:
+                from circt.ir import Attribute
+
+                start, end = call_timing
+                attr_str = f"#cmt2.timing<[{start}, {end}]>"
+                call_attrs["call_timing"] = Attribute.parse(
+                    attr_str, self._ctx.mlir_context
+                )
             if arg_timing is not None:
                 from circt.ir import ArrayAttr, Attribute
                 timing_attrs = []
