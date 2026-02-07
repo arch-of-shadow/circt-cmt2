@@ -1549,15 +1549,36 @@ LogicalResult LowerCmt2ToFIRRTLPass::connectMethodCall(
     CallOp callOp, BindMethodOp bindMethod, firrtl::InstanceOp firrtlInst,
     ModuleConversionContext &ctx, ImplicitLocOpBuilder &builder) {
 
+  bool isGetRes = false;
+  if (auto callTy = callOp->getAttrOfType<StringAttr>("call_ty"))
+    isGetRes = callTy.getValue() == "GetRes";
+
+  auto createSafeDontCareForPortType = [&](Type portType) -> Value {
+    // For GetRes clones we intentionally do not want to drive unknown/X values
+    // onto the callee's argument ports since some implementations may not
+    // strictly guard internal combinational logic behind enable. Use a typed
+    // zero constant for common scalar int ports; fall back to invalid for
+    // aggregate/unsupported types.
+    if (auto uintTy = dyn_cast<UIntType>(portType)) {
+      auto width = uintTy.getBitWidthOrSentinel();
+      if (width >= 0)
+        return builder.create<ConstantOp>(callOp.getLoc(), uintTy,
+                                          APInt(width, 0));
+    }
+    if (auto sintTy = dyn_cast<SIntType>(portType)) {
+      auto width = sintTy.getBitWidthOrSentinel();
+      if (width >= 0)
+        return builder.create<ConstantOp>(callOp.getLoc(), sintTy,
+                                          APInt(width, 0));
+    }
+    return builder.create<InvalidValueOp>(callOp.getLoc(), portType);
+  };
+
   // Drive enable signal to 1
   if (auto enableAttr = bindMethod.getEnableName()) {
     StringAttr enablePortName = builder.getStringAttr(enableAttr.value());
     if (auto enablePortIdx =
             getPortIndex(firrtlInst, enablePortName.getValue().str())) {
-      bool isGetRes = false;
-      if (auto callTy = callOp->getAttrOfType<StringAttr>("call_ty"))
-        isGetRes = callTy.getValue() == "GetRes";
-
       Value en = builder.create<ConstantOp>(
           callOp.getLoc(), UIntType::get(builder.getContext(), 1),
           APInt(1, isGetRes ? 0 : 1));
@@ -1583,14 +1604,19 @@ LogicalResult LowerCmt2ToFIRRTLPass::connectMethodCall(
       return callOp.emitError("Input port not found: ") << portAttr;
     }
 
-    Value mappedOperand = ctx.getIRMapping().lookupOrDefault(operand);
-    if (!mappedOperand) {
-      return callOp.emitError(
-          "Call operand was not properly mapped to FIRRTL context");
+    Value portValue = firrtlInst.getResult(*portIdx);
+    Value mappedOperand;
+    if (isGetRes) {
+      mappedOperand = createSafeDontCareForPortType(portValue.getType());
+    } else {
+      mappedOperand = ctx.getIRMapping().lookupOrDefault(operand);
+      if (!mappedOperand) {
+        return callOp.emitError(
+            "Call operand was not properly mapped to FIRRTL context");
+      }
     }
 
-    builder.create<ConnectOp>(callOp.getLoc(), firrtlInst.getResult(*portIdx),
-                              mappedOperand);
+    builder.create<ConnectOp>(callOp.getLoc(), portValue, mappedOperand);
   }
 
   // Read output results
