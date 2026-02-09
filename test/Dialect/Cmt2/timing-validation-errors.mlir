@@ -122,7 +122,6 @@ builtin.module {
             // Dynamic step (no fixed latency)
             cmt2.proc.step @dynamic_step {
                 %c1 = firrtl.constant 1 : !firrtl.uint<1>
-                cmt2.proc.step_done %c1 : !firrtl.uint<1>
             }
 
             // Declared as static, but uses dynamic step

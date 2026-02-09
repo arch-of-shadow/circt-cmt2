@@ -234,7 +234,6 @@ builtin.module {
                 cmt2.call @y0 @write(%r0) : (!firrtl.uint<32>) -> ()
                 cmt2.call @y1 @write(%r1) : (!firrtl.uint<32>) -> ()
                 %done = firrtl.constant 1 : !firrtl.uint<1>
-                cmt2.proc.step_done %done : !firrtl.uint<1>
             }
 
             // Main compute rule: Static kernel + dynamic post-processing

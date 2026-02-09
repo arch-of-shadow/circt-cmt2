@@ -58,7 +58,6 @@ builtin.module {
                 %c100 = firrtl.constant 100 : !firrtl.uint<32>
                 cmt2.call @result @write(%c100) : (!firrtl.uint<32>) -> ()
                 %c1 = firrtl.constant 1 : !firrtl.uint<1>
-                cmt2.proc.step_done %c1 : !firrtl.uint<1>
             }
 
             // Step for else branch: write 200
@@ -66,7 +65,6 @@ builtin.module {
                 %c200 = firrtl.constant 200 : !firrtl.uint<32>
                 cmt2.call @result @write(%c200) : (!firrtl.uint<32>) -> ()
                 %c1 = firrtl.constant 1 : !firrtl.uint<1>
-                cmt2.proc.step_done %c1 : !firrtl.uint<1>
             }
 
             // If/else rule: if selector != 0, set 100; else set 200
@@ -131,7 +129,6 @@ builtin.module {
                 %trunc = firrtl.bits %new_val 31 to 0 : (!firrtl.uint<33>) -> !firrtl.uint<32>
                 cmt2.call @result @write(%trunc) : (!firrtl.uint<32>) -> ()
                 %done = firrtl.constant 1 : !firrtl.uint<1>
-                cmt2.proc.step_done %done : !firrtl.uint<1>
             }
 
             // If only: increment if condition is true

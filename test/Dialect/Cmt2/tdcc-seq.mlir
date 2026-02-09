@@ -42,14 +42,12 @@ builtin.module {
             cmt2.proc.step @load {
                 %a = cmt2.call @reg_a @read() : () -> !firrtl.uint<32>
                 %c1 = firrtl.constant 1 : !firrtl.uint<1>
-                cmt2.proc.step_done %c1 : !firrtl.uint<1>
             }
 
             cmt2.proc.step @store {
                 %c42 = firrtl.constant 42 : !firrtl.uint<32>
                 cmt2.call @reg_b @write(%c42) : (!firrtl.uint<32>) -> ()
                 %c1 = firrtl.constant 1 : !firrtl.uint<1>
-                cmt2.proc.step_done %c1 : !firrtl.uint<1>
             }
 
             // Sequential control: load then store

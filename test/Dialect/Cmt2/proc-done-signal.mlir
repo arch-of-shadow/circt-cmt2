@@ -1,9 +1,9 @@
 // RUN: circt-opt %s -cmt2-tdcc | FileCheck %s --check-prefix=TDCC
 // RUN: circt-opt %s -cmt2-tdcc -cmt2-proc-stmt-to-action | FileCheck %s --check-prefix=STMT
 
-// Test done signal integration for dynamic steps:
-// - Dynamic steps should have done_step attribute in transitions
-// - ProcStmtToAction should generate done-guarded transitions
+// Test dynamic proc.step semantics:
+// - No explicit step-local done op / transition guards
+// - Steps advance to NEXT when the state rule fires (ready==1)
 
 builtin.module {
     firrtl.circuit "TestReg" {
@@ -36,29 +36,24 @@ builtin.module {
             sequenceBefore = [[@read, @write]]
         }
 
-        // Test: Dynamic step with done signal should have done_step in transition
+        // Test: Dynamic step does not use done_step guards in TDCC transitions
         // TDCC-LABEL: cmt2.module @TestDynamicDone
         // TDCC: cmt2.proc.rule @dynamic_rule
         // TDCC-SAME: tdcc.transitions
-        // Check that dynamic step exit has done_step attribute
-        // TDCC-SAME: done_step = "write_step"
+        // TDCC-NOT: done_step
 
         // STMT-LABEL: cmt2.module @TestDynamicDone
         // STMT: cmt2.rule @dynamic_rule_state
-        // STMT: firrtl.mux
         cmt2.module @TestDynamicDone(%clk: !firrtl.clock, %rst: !firrtl.uint<1>) {
             cmt2.instance @counter = @reg (%clk, %rst) : !firrtl.clock, !firrtl.uint<1>
 
-            // Dynamic step with computed done signal
+            // Dynamic step (single-fire)
             cmt2.proc.step @write_step {
                 %val = cmt2.call @counter @read() : () -> !firrtl.uint<32>
                 %c1 = firrtl.constant 1 : !firrtl.uint<32>
                 %new_val = firrtl.add %val, %c1 : (!firrtl.uint<32>, !firrtl.uint<32>) -> !firrtl.uint<33>
                 %trunc = firrtl.bits %new_val 31 to 0 : (!firrtl.uint<33>) -> !firrtl.uint<32>
                 cmt2.call @counter @write(%trunc) : (!firrtl.uint<32>) -> ()
-                // Done signal: constant 1 (always done in 1 cycle)
-                %done = firrtl.constant 1 : !firrtl.uint<1>
-                cmt2.proc.step_done %done : !firrtl.uint<1>
             }
 
             // Rule with dynamic step
@@ -83,7 +78,6 @@ builtin.module {
                 %trunc = firrtl.bits %new_val 31 to 0 : (!firrtl.uint<33>) -> !firrtl.uint<32>
                 cmt2.call @counter @write(%trunc) : (!firrtl.uint<32>) -> ()
                 %done = firrtl.constant 1 : !firrtl.uint<1>
-                cmt2.proc.step_done %done : !firrtl.uint<1>
             }
 
             cmt2.proc.step @step_b {
@@ -93,11 +87,10 @@ builtin.module {
                 %trunc = firrtl.bits %new_val 31 to 0 : (!firrtl.uint<33>) -> !firrtl.uint<32>
                 cmt2.call @counter @write(%trunc) : (!firrtl.uint<32>) -> ()
                 %done = firrtl.constant 1 : !firrtl.uint<1>
-                cmt2.proc.step_done %done : !firrtl.uint<1>
             }
 
             // Sequential: step_a then step_b
-            // Both should have done_step guards on their exit transitions
+            // Both steps advance on fire (no done guards)
             cmt2.proc.rule @seq_dynamic_rule() -> () {
                 %c1 = firrtl.constant 1 : !firrtl.uint<1>
                 cmt2.return %c1 : !firrtl.uint<1>
@@ -115,18 +108,16 @@ builtin.module {
         cmt2.module @TestMixedStaticDynamic(%clk: !firrtl.clock, %rst: !firrtl.uint<1>) {
             cmt2.instance @counter = @reg (%clk, %rst) : !firrtl.clock, !firrtl.uint<1>
 
-            // Static step (2 cycles) - no done_step needed
+            // Static step (2 cycles)
             cmt2.proc.static_step @static_step <2> {
                 %c10 = firrtl.constant 10 : !firrtl.uint<32>
                 cmt2.call @counter @write(%c10) : (!firrtl.uint<32>) -> ()
             }
 
-            // Dynamic step - needs done_step
+            // Dynamic step
             cmt2.proc.step @dynamic_step {
                 %c20 = firrtl.constant 20 : !firrtl.uint<32>
                 cmt2.call @counter @write(%c20) : (!firrtl.uint<32>) -> ()
-                %done = firrtl.constant 1 : !firrtl.uint<1>
-                cmt2.proc.step_done %done : !firrtl.uint<1>
             }
 
             // Sequence: static then dynamic

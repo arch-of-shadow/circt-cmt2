@@ -55,7 +55,6 @@ builtin.module {
                 %c100 = firrtl.constant 100 : !firrtl.uint<32>
                 cmt2.call @regA @write(%c100) : (!firrtl.uint<32>) -> ()
                 %done = firrtl.constant 1 : !firrtl.uint<1>
-                cmt2.proc.step_done %done : !firrtl.uint<1>
             }
 
             // Step to write to regB
@@ -63,7 +62,6 @@ builtin.module {
                 %c200 = firrtl.constant 200 : !firrtl.uint<32>
                 cmt2.call @regB @write(%c200) : (!firrtl.uint<32>) -> ()
                 %done = firrtl.constant 1 : !firrtl.uint<1>
-                cmt2.proc.step_done %done : !firrtl.uint<1>
             }
 
             // Parallel rule: execute both writes concurrently
@@ -122,21 +120,18 @@ builtin.module {
                 %c1 = firrtl.constant 1 : !firrtl.uint<32>
                 cmt2.call @regA @write(%c1) : (!firrtl.uint<32>) -> ()
                 %done = firrtl.constant 1 : !firrtl.uint<1>
-                cmt2.proc.step_done %done : !firrtl.uint<1>
             }
 
             cmt2.proc.step @step_b {
                 %c2 = firrtl.constant 2 : !firrtl.uint<32>
                 cmt2.call @regB @write(%c2) : (!firrtl.uint<32>) -> ()
                 %done = firrtl.constant 1 : !firrtl.uint<1>
-                cmt2.proc.step_done %done : !firrtl.uint<1>
             }
 
             cmt2.proc.step @step_c {
                 %c3 = firrtl.constant 3 : !firrtl.uint<32>
                 cmt2.call @regC @write(%c3) : (!firrtl.uint<32>) -> ()
                 %done = firrtl.constant 1 : !firrtl.uint<1>
-                cmt2.proc.step_done %done : !firrtl.uint<1>
             }
 
             // Par (a, b) then seq c

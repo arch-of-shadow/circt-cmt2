@@ -54,7 +54,6 @@ builtin.module {
             cmt2.proc.step @dynamic_step {
                 %a = cmt2.call @reg_a @read() : () -> !firrtl.uint<32>
                 %c1 = firrtl.constant 1 : !firrtl.uint<1>
-                cmt2.proc.step_done %c1 : !firrtl.uint<1>
             }
 
             // Test 4: Rule with static_repeat - should be marked promotable
