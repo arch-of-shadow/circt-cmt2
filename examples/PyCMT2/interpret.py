@@ -305,7 +305,6 @@ def test_proc_rule() -> bool:
         with m.step("incr_step") as step:
             val = step.call(counter, "read")
             step.call(counter, "write", step.bits(step.add(val, step.const(1, 32)), 31, 0))
-            step.done(step.const(1, 1))  # Always done after one cycle
 
         # Proc rule that runs the step
         with m.proc_rule("incr_proc") as proc:
@@ -357,7 +356,6 @@ def test_proc_conflict() -> bool:
         with m.step("incr_step") as step:
             val = step.call(counter, "read")
             step.call(counter, "write", step.bits(step.add(val, step.const(1, 32)), 31, 0))
-            step.done(step.const(1, 1))  # Always done after one cycle
 
         # Proc rule for increment loop
         with m.proc_rule("incr_loop") as proc:
@@ -645,7 +643,6 @@ def test_while_loop() -> bool:
         with m.step("incr_step") as incr:
             val = incr.call(counter, "read")
             incr.call(counter, "write", incr.bits(incr.add(val, incr.const(1, 32)), 31, 0))
-            incr.done(incr.const(1, 1))
 
         # Proc rule with while loop (condition=0 means no iterations for testing)
         with m.proc_rule("while_test") as proc:
@@ -757,7 +754,6 @@ def test_static_repeat() -> bool:
         with m.step("incr") as incr:
             val = incr.call(counter, "read")
             incr.call(counter, "write", incr.bits(incr.add(val, incr.const(1, 32)), 31, 0))
-            incr.done(incr.const(1, 1))
 
         # Proc rule: repeat 4 times
         with m.proc_rule("repeat_4") as proc:
@@ -817,19 +813,16 @@ def test_static_if() -> bool:
         with m.step("add_1") as add1:
             val = add1.call(result, "read")
             add1.call(result, "write", add1.bits(add1.add(val, add1.const(1, 32)), 31, 0))
-            add1.done(add1.const(1, 1))
 
         # Step: add 10
         with m.step("add_10") as add10:
             val = add10.call(result, "read")
             add10.call(result, "write", add10.bits(add10.add(val, add10.const(10, 32)), 31, 0))
-            add10.done(add10.const(1, 1))
 
         # Step: increment counter
         with m.step("incr_counter") as incr:
             val = incr.call(counter, "read")
             incr.call(counter, "write", incr.bits(incr.add(val, incr.const(1, 32)), 31, 0))
-            incr.done(incr.const(1, 1))
 
         # Proc rule: if condition is true, add 1; else add 10
         with m.proc_rule("conditional") as proc:

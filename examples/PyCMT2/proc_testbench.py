@@ -133,7 +133,6 @@ def create_proc_testable_circuit():
                     # Clear busy flag (dynamic step)
                     with mult_mod.step("clear_mult_busy") as clr_step:
                         clr_step.call(busy, "write", clr_step.const(0, 1))
-                        clr_step.done(clr_step.const(1, 1))
                     seq.enable(clr_step.ref())
 
     with circuit.module("ProcALU") as m:
@@ -168,12 +167,10 @@ def create_proc_testable_circuit():
         # Step: load_a - Load value into reg_a
         with m.step("load_a") as step:
             val = step.call(reg_a, "read")
-            step.done(step.const(1, 1))
 
         # Step: load_b - Load value into reg_b
         with m.step("load_b") as step:
             val = step.call(reg_b, "read")
-            step.done(step.const(1, 1))
 
         # Step: compute_add - Add reg_a and reg_b, store in reg_result
         with m.step("compute_add") as step:
@@ -181,7 +178,6 @@ def create_proc_testable_circuit():
             b = step.call(reg_b, "read")
             result = step.add(a, b)
             step.call(reg_result, "write", result)
-            step.done(step.const(1, 1))
 
         # Step: compute_sub - Subtract reg_b from reg_a
         with m.step("compute_sub") as step:
@@ -189,34 +185,28 @@ def create_proc_testable_circuit():
             b = step.call(reg_b, "read")
             result = step.sub(a, b)
             step.call(reg_result, "write", result)
-            step.done(step.const(1, 1))
 
         # Step: increment_counter - Increment the counter
         with m.step("increment_counter") as step:
             count = step.call(reg_counter, "read")
             new_count = step.add(count, step.const(1, 8))
             step.call(reg_counter, "write", new_count)
-            step.done(step.const(1, 1))
 
         # Step: set_done_flag - Set the done flag
         with m.step("set_done_flag") as step:
             step.call(reg_done, "write", step.const(1, 1))
-            step.done(step.const(1, 1))
 
         # Step: clear_done_flag - Clear the done flag
         with m.step("clear_done_flag") as step:
             step.call(reg_done, "write", step.const(0, 1))
-            step.done(step.const(1, 1))
 
         # Step: set_busy - Set busy flag
         with m.step("set_busy") as step:
             step.call(reg_busy, "write", step.const(1, 1))
-            step.done(step.const(1, 1))
 
         # Step: clear_busy - Clear busy flag
         with m.step("clear_busy") as step:
             step.call(reg_busy, "write", step.const(0, 1))
-            step.done(step.const(1, 1))
 
         # =====================================================================
         # Static Steps (fixed latency)
@@ -267,18 +257,11 @@ def create_proc_testable_circuit():
             # Call multiply - this triggers the computation in mult_unit
             # The method sets busy=1 and stores operands
             step.call(mult_unit, "multiply", a, b)
-            step.done(step.const(1, 1))
-
-        # Step: check_mult_busy - Check if mult_unit is still busy
-        with m.step("check_mult_busy") as step:
-            is_busy = step.call(mult_unit, "is_busy")
-            step.done(step.not_(is_busy))  # Done when not busy
 
         # Step: copy_mult_result - Copy result from mult_unit to reg_result
         with m.step("copy_mult_result") as step:
             result = step.call(mult_unit, "get_result")
             step.call(reg_result, "write", result)
-            step.done(step.const(1, 1))
 
         # =====================================================================
         # Proc Rule 1: Simple Sequential (seq_add_sub)
@@ -511,8 +494,7 @@ def create_proc_testable_circuit():
                     def mult_busy_cond(b):
                         return b.call(mult_unit, "is_busy")
                     with seq.while_(mult_busy_cond) as loop:
-                        # Just wait - check_mult_busy step completes when not busy
-                        loop.enable(m._steps["check_mult_busy"].ref())
+                        pass
                     # Copy result from mult_unit to reg_result
                     seq.enable(m._steps["copy_mult_result"].ref())
                     seq.enable(m._steps["set_done_flag"].ref())

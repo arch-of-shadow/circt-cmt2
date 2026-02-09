@@ -60,44 +60,37 @@ def create_proc_comprehensive_circuit():
         reg_flag = m.instance(reg1, "reg_flag", clk=clk, rst=rst)
 
         # =====================================================================
-        # Dynamic Steps (explicit done signal based on method call readiness)
+        # Dynamic Steps
         # =====================================================================
 
         # Step: read_a - Read from reg_a (dynamic, depends on read method ready)
         with m.step("read_a") as step:
             val = step.call(reg_a, "read")
-            # Done when the read succeeds
-            step.done(step.const(1, 1))
 
         # Step: write_result - Write to reg_result (dynamic)
         with m.step("write_result") as step:
             val = step.call(reg_a, "read")
             step.call(reg_result, "write", val)
-            step.done(step.const(1, 1))
 
         # Step: increment_counter - Increment counter (dynamic)
         with m.step("increment_counter") as step:
             count = step.call(reg_counter, "read")
             new_count = step.add(count, step.const(1, 32))
             step.call(reg_counter, "write", new_count)
-            step.done(step.const(1, 1))
 
         # Step: decrement_counter - Decrement counter (dynamic)
         with m.step("decrement_counter") as step:
             count = step.call(reg_counter, "read")
             new_count = step.sub(count, step.const(1, 32))
             step.call(reg_counter, "write", new_count)
-            step.done(step.const(1, 1))
 
         # Step: set_flag - Set the flag register (dynamic)
         with m.step("set_flag") as step:
             step.call(reg_flag, "write", step.const(1, 1))
-            step.done(step.const(1, 1))
 
         # Step: clear_flag - Clear the flag register (dynamic)
         with m.step("clear_flag") as step:
             step.call(reg_flag, "write", step.const(0, 1))
-            step.done(step.const(1, 1))
 
         # =====================================================================
         # Static Steps (fixed latency, no explicit done needed)
@@ -548,7 +541,6 @@ def main():
         ("proc.if", "cmt2.proc.if"),
         ("proc.while", "cmt2.proc.while"),
         ("proc.enable", "cmt2.proc.enable"),
-        ("proc.step_done", "cmt2.proc.step_done"),
         ("proc.control_end", "cmt2.proc.control_end"),
     ]
 

@@ -74,19 +74,16 @@ def create_parallel_test(circuit: Circuit, width: int = 32):
             cnt = step1.call(counter1, "read")
             next_cnt = step1.add(cnt, step1.const(1, width))
             step1.call(counter1, "write", step1.bits(next_cnt, width-1, 0))
-            step1.done(step1.const(1, 1))
 
         # Step: incr2 - increment counter2
         with harness.step("incr2") as step2:
             cnt = step2.call(counter2, "read")
             next_cnt = step2.add(cnt, step2.const(1, width))
             step2.call(counter2, "write", step2.bits(next_cnt, width-1, 0))
-            step2.done(step2.const(1, 1))
 
         # Step: mark_done
         with harness.step("mark_done") as done_step:
             done_step.call(done_reg, "write", done_step.const(1, 1))
-            done_step.done(done_step.const(1, 1))
 
         # Procedural rule: main with parallel execution
         with harness.proc_rule("main") as main:

@@ -128,11 +128,10 @@ def create_static_proc_circuit():
 
         # =================================================================
         # DYNAMIC STEP: finish
-        # Demonstrates: dynamic step with explicit done signal
+        # Demonstrates: dynamic step (single-fire)
         # =================================================================
         with m.step("finish_step") as step:
             step.call(busy, "write", step.const(0, 1))
-            step.done(step.const(1, 1))
 
         # =================================================================
         # METHOD: start

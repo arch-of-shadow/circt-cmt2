@@ -204,7 +204,7 @@ def create_test_harness(circuit: Circuit, pipeline_mod, width: int, num_stages: 
             _ = wait_static.const(0, 1)  # Dummy operation to ensure non-empty body
 
         # ==== DYNAMIC STEPS for while loop ====
-        # Dynamic steps use done signals, needed for loops with conditions
+        # Dynamic steps fire once per enable; looping is expressed via proc.while.
 
         # Dynamic step: push_item - for while loop
         with harness.step("push_item") as push_step:
@@ -214,7 +214,6 @@ def create_test_harness(circuit: Circuit, pipeline_mod, width: int, num_stages: 
             push_step.call(in_counter, "write", push_step.bits(next_cnt, width-1, 0))
             pcnt = push_step.call(push_cnt, "read")
             push_step.call(push_cnt, "write", push_step.bits(push_step.add(pcnt, push_step.const(1, width)), width-1, 0))
-            push_step.done(push_step.const(1, 1))
 
         # Dynamic step: pop_item - for while loop
         with harness.step("pop_item") as pop_step:
@@ -224,12 +223,10 @@ def create_test_harness(circuit: Circuit, pipeline_mod, width: int, num_stages: 
             pop_step.call(out_sum, "write", pop_step.bits(new_sum, width-1, 0))
             pcnt = pop_step.call(pop_cnt, "read")
             pop_step.call(pop_cnt, "write", pop_step.bits(pop_step.add(pcnt, pop_step.const(1, width)), width-1, 0))
-            pop_step.done(pop_step.const(1, 1))
 
         # Step: mark_done
         with harness.step("mark_done") as done_step:
             done_step.call(done_reg, "write", done_step.const(1, 1))
-            done_step.done(done_step.const(1, 1))
 
         # Procedural rule: main with parallel push/pop
         # Structure:

@@ -80,12 +80,10 @@ def create_while_loop_circuit():
             val = inc_step.call(cnt, "read")
             new_val = inc_step.add(val, inc_step.const(1, width))
             inc_step.call(cnt, "write", inc_step.bits(new_val, width-1, 0))
-            inc_step.done(inc_step.const(1, 1))
 
         # Step to mark done
         with counter.step("mark_done") as done_step:
             done_step.call(done_reg, "write", done_step.const(1, 1))
-            done_step.done(done_step.const(1, 1))
 
         # Procedural rule with while loop
         # The condition function has access to cmt2.call
