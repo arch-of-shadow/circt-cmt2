@@ -208,9 +208,10 @@ For operations spanning multiple cycles, use **procedural control**:
 Operations with runtime-determined completion:
 
 ```python
-with m.step("wait_for_data") as step:
-    data_ready = step.call(fifo, "has_data")
-    step.done(data_ready)  # Complete when data available
+with m.step("dequeue_when_ready") as step:
+    # If `dequeue` is not ready, the step doesn't fire and the FSM stays put.
+    data = step.call(fifo, "dequeue")
+    step.call(result_reg, "write", data)
 ```
 
 ### Static Control

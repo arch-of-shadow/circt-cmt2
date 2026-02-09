@@ -20,7 +20,7 @@ FSM-based control flow for sequential, parallel, and looping operations:
 
 | Mode | Latency | Done Signal | Use Case |
 |------|---------|-------------|----------|
-| **Dynamic** | Runtime | Explicit | Variable-length operations |
+| **Dynamic** | Runtime | Implicit (advance-on-fire) | Variable readiness / backpressure |
 | **Static** | Compile-time | Implicit | Fixed-latency pipelines |
 
 ### Dataflow/Pipeline (proc.dataflow)
@@ -66,14 +66,14 @@ Proc control overview: `docs/Cmt2/features/Proc.md`.
 
 ### Dynamic Steps
 
-Dynamic steps have **runtime-determined completion**:
+Dynamic steps have **runtime-determined readiness**: a step may stall for an
+arbitrary number of cycles until its internal calls are ready; once the step
+fires, it completes in that cycle and the proc FSM advances unconditionally.
 
 ```python
-with m.step("wait_for_data") as step:
-    data_ready = step.call(fifo, "has_data")
-    step.done(data_ready)  # Complete when data available
-
-    # Actions when enabled
+with m.step("dequeue_when_ready") as step:
+    # If `dequeue` is not ready, the step simply doesn't fire and the FSM stays
+    # in this state.
     data = step.call(fifo, "dequeue")
     step.call(result_reg, "write", data)
 ```
@@ -117,7 +117,6 @@ with m.static_step(8, "pipelined_mult", interval=2) as step:
 
 | Method | Description |
 |--------|-------------|
-| `step.done(cond)` | Signal completion when `cond` is true (dynamic only) |
 | `step.call(inst, method, *args)` | Call method on instance |
 | `step.const(value, width)` | Create constant |
 | `step.add/sub/mul/...` | Arithmetic operations |
@@ -648,7 +647,6 @@ with circuit.module("DotProduct") as m:
     # Dynamic step: finish
     with m.step("finish") as step:
         step.call(busy, "write", step.const(0, 1))
-        step.done(step.const(1, 1))
 
     # Procedural rule with static control
     with m.proc_rule("compute") as rule:
@@ -827,7 +825,6 @@ with m.static_step(4, "timed_mult") as step:
 with m.step("dynamic_op") as step:
     result = step.call(mult, "multiply", a, b,
                       arg_timing=[(0, 1), (0, 1)])  # Timing may be ignored
-    step.done(...)
 ```
 
 **Future Work:** Timing preservation and richer scheduling contracts are ongoing; track current status in the source tree (passes + TODOs).

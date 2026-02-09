@@ -209,13 +209,13 @@ cmt2.bind.method @write static<4> : (!firrtl.uint<32>) -> ()[
 
 ### cmt2.proc.step
 
-Dynamic step with go-done interface.
+Dynamic step (single-fire).
 
 ```mlir
 cmt2.proc.step @wait_data {
-    %ready = cmt2.call @fifo @has_data() : () -> !firrtl.uint<1>
-    cmt2.proc.step_done %ready : !firrtl.uint<1>
-    // Actions when enabled...
+    // If `dequeue` is not ready, the proc FSM simply remains in this state.
+    %data = cmt2.call @fifo @dequeue() : () -> !firrtl.uint<32>
+    cmt2.call @result_reg @write(%data) : (!firrtl.uint<32>) -> ()
 }
 ```
 
@@ -231,14 +231,6 @@ cmt2.proc.static_step @compute<4> {
     %prod = firrtl.mul %a, %b : ...
     cmt2.call @result @write(%prod) : ...
 } {interval = #cmt2.interval<2>}  // Optional pipelining
-```
-
-### cmt2.proc.step_done
-
-Signal step completion.
-
-```mlir
-cmt2.proc.step_done %condition : !firrtl.uint<1>
 ```
 
 ### cmt2.proc.assign
@@ -444,7 +436,7 @@ cmt2.interface.decl @my_iface : @MyInterface
 | **Instances** | instance, call |
 | **Control** | if, yield, return |
 | **Binding** | bind.bare, bind.value, bind.method |
-| **Proc Steps** | proc.step, proc.static_step, proc.step_done, proc.assign |
+| **Proc Steps** | proc.step, proc.static_step, proc.assign |
 | **Proc Control** | proc.seq, proc.par, proc.if, proc.while, proc.static_repeat, proc.static_if, proc.enable, proc.invoke, proc.control_end |
 | **Proc Functions** | proc.rule, proc.method |
 | **Interfaces** | interface, interface.def, interface.decl |
