@@ -23,20 +23,19 @@ if TYPE_CHECKING:
 class StepBuilder(RegionBuilder):
     """Builder for procedural steps.
 
-    Groups are execution units with a go-done interface. They bundle
-    operations that execute atomically when activated.
+    Steps bundle operations that execute atomically when enabled by procedural
+    control. A dynamic step completes when its enabled state rule fires
+    (ready==1); there is no step-local done protocol.
 
     Example:
         with mod.step("load") as load:
             val = load.call(input_reg, input_reg.read)
             load.call(reg_a, reg_a.write, val)
-            load.done(load.const(1, 1))
     """
 
     def __init__(self, module: ModuleBuilder, name: str | None):
         self._module = module
         self._name = name
-        self._done_set = False
         self._op = None
 
         # Capture Python source location for debugging
@@ -85,31 +84,13 @@ class StepBuilder(RegionBuilder):
                 self._name = f"group_{id(self):x}"
         return self._name
 
-    def done(self, condition: Signal) -> None:
-        """Signal that the step is done.
-
-        Args:
-            condition: Boolean condition indicating completion.
-        """
-        from circt.ir import InsertionPoint
-        from circt.dialects import cmt2
-
-        if not isinstance(condition.type, UInt) or condition.type.width != 1:
-            raise TypeError("Done condition must be Bool (UInt<1>)")
-
-        with InsertionPoint(self._block):
-            cmt2.ProcStepDoneOp(condition.value, loc=self._loc)
-
-        self._done_set = True
-
     def ref(self) -> StepRef:
         """Get a reference to this step for control flow."""
         return StepRef(self, self.name)
 
     def _finalize(self):
         """Finalize step construction."""
-        if not self._done_set:
-            raise ValueError(f"Step '{self.name}' must call done()")
+        return
 
 
 class StaticStepBuilder(RegionBuilder):
