@@ -2070,23 +2070,16 @@ bool Cmt2Interpreter::executeProcStep(StringRef stepName) {
       Block &block = body.front();
       valueMap_.clear();
 
-      bool stepDone = false;
       for (Operation &op : block) {
-        if (auto doneOp = dyn_cast<ProcStepDoneOp>(op)) {
-          // Evaluate the done condition
-          InterpValue doneVal = getValue(doneOp.getDone());
-          stepDone = doneVal != 0;
-          break;
-        }
         executeOp(&op);
       }
-
-      if (stepDone) {
-        stepsDoneThisCycle_.insert(stepName);
-      }
-      return stepDone;
     }
-    return true;  // Empty body means done
+
+    // Unlike older versions of CMT2, dynamic proc steps have no explicit
+    // step-local "done" protocol. A step fires when its state rule is ready and
+    // transitions unconditionally to the next state in the same cycle.
+    stepsDoneThisCycle_.insert(stepName);
+    return true;
   }
 
   // Try to find in proc.static_step
@@ -2103,8 +2096,6 @@ bool Cmt2Interpreter::executeProcStep(StringRef stepName) {
       valueMap_.clear();
 
       for (Operation &op : block) {
-        if (isa<ProcStepDoneOp>(op))
-          break;
         executeOp(&op);
       }
     }

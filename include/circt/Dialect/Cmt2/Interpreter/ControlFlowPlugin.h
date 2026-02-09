@@ -77,9 +77,8 @@ public:
 /// Plugin for dynamic control (proc.step, proc.while, proc.if).
 ///
 /// Handles:
-/// - ProcStepOp: Execute step body, check done condition
+/// - ProcStepOp: Execute step body (single-fire)
 /// - ProcEnableOp: Enable a step for execution
-/// - ProcStepDoneOp: Signal step completion
 ///
 class DynamicControlPlugin : public ControlFlowPlugin {
 public:
@@ -91,19 +90,6 @@ public:
   void tick() override;
   void commit() override;
   void reset() override;
-
-  //===--------------------------------------------------------------------===//
-  // Step Management
-  //===--------------------------------------------------------------------===//
-
-  /// Check if a step is done (completed this cycle).
-  bool isStepDone(llvm::StringRef stepName) const;
-
-  /// Mark a step as done for this cycle.
-  void markStepDone(llvm::StringRef stepName);
-
-  /// Clear step done status (called at cycle start).
-  void clearStepsDone();
 
   /// Set the operation handler registry for dispatch.
   void setRegistry(OpHandlerRegistry *registry) { registry_ = registry; }
@@ -123,9 +109,6 @@ private:
 
   /// Step definitions keyed by name.
   llvm::StringMap<ProcStepOp> steps_;
-
-  /// Steps marked as done this cycle.
-  llvm::StringSet<> stepsDone_;
 };
 
 //===----------------------------------------------------------------------===//

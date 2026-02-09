@@ -1132,15 +1132,17 @@ def ProcStepOp : Cmt2Op<
     NoTerminator,
     NoRegionArguments
   ]> {
-  let summary = "Dynamic step with go-done interface";
+  let summary = "Dynamic step (single-fire)";
   let description = [{
-    A step bundles operations that execute atomically when activated.
-    Interface:
-    - `go` signal (input): When high, step activates
-    - `done` signal (output): High when step has completed (via step_done)
+    A dynamic step bundles operations that execute atomically when enabled by
+    procedural control. The step executes when the corresponding state rule
+    fires (i.e. when the rule is ready), and the proc FSM transitions to the
+    next state in the same cycle.
 
-    Groups are the execution units in the procedural layer. Each group
-    has an implicit go-done protocol that coordinates with the FSM.
+    Unlike older versions of CMT2, dynamic steps do not use an explicit
+    `step_done` signal. Runtime waiting/looping is expressed via explicit
+    control flow (`proc.while`, `proc.cond_if`) rather than step-local done
+    conditions.
 
     Assembly format:
     ```mlir
@@ -1149,7 +1151,6 @@ def ProcStepOp : Cmt2Op<
       %b = cmt2.call @reg_b @read() : () -> !firrtl.uint<32>
       %sum = firrtl.add %a, %b : (!firrtl.uint<32>, !firrtl.uint<32>) -> !firrtl.uint<33>
       cmt2.call @reg_out @write(%sum) : (!firrtl.uint<33>) -> ()
-      cmt2.proc.step_done %true : !firrtl.uint<1>
     }
     ```
   }];
@@ -1252,29 +1253,6 @@ def ProcAssignOp : Cmt2Op<
   );
   let assemblyFormat = [{
     $dest `=` $guard `?` $src `:` qualified(type($dest)) `,` qualified(type($guard)) `,` qualified(type($src)) attr-dict
-  }];
-}
-
-def ProcStepDoneOp : Cmt2Op<
-  "proc.step_done", [
-    HasParent<"ProcStepOp">
-  ]> {
-  let summary = "Signal step completion";
-  let description = [{
-    Signals that a step has completed execution. The done signal
-    is a 1-bit value that becomes true when the group's work is done.
-
-    For single-cycle groups, this is typically a constant true.
-    For multi-cycle groups, this depends on external completion signals.
-
-    Assembly format:
-    ```mlir
-    cmt2.proc.step_done %done : !firrtl.uint<1>
-    ```
-  }];
-  let arguments = (ins FIRRTLBaseType:$done);
-  let assemblyFormat = [{
-    $done `:` qualified(type($done)) attr-dict
   }];
 }
 
@@ -1656,10 +1634,11 @@ def ProcEnableOp : Cmt2Op<
   "proc.enable", [
     ParentOneOf<["ProcRuleOp", "ProcMethodOp", "ProcSeqOp", "ProcParOp", "ProcIfOp", "ProcCondIfOp", "ProcWhileOp", "ProcStaticRepeatOp", "ProcStaticIfOp", "DataflowTaskOp"]>
   ]> {
-  let summary = "Enable a group";
+  let summary = "Enable a step";
   let description = [{
     Activates a step. Gets a unique NODE_ID during TDCC.
-    Generates: group[go] = (fsm == NODE_ID) & !group[done]
+    A dynamic step completes when its enabled state rule fires; there is no
+    step-local done protocol.
 
     Assembly format:
     ```mlir

@@ -312,14 +312,12 @@ void ProcStmtToActionPass::generateStateRules(
     uint64_t toState;
     int64_t guardOpId;   // -1 means unconditional
     bool guardInverted;  // true for else branches
-    StringRef doneStep;  // non-empty means guarded by step's done signal
     SmallVector<std::string> parJoinBranches;  // non-empty means parallel join guard
   };
 
   // Structure to hold parallel branch info
   struct ParBranchInfo {
     std::string name;
-    StringRef doneStep;
     uint64_t exitState;
     uint64_t firstState;
     uint64_t lastState;
@@ -351,9 +349,6 @@ void ProcStmtToActionPass::generateStateRules(
           auto brDict = cast<DictionaryAttr>(branchAttr);
           ParBranchInfo brInfo;
           brInfo.name = brDict.getAs<StringAttr>("name").getValue().str();
-          brInfo.doneStep = "";
-          if (auto doneStepAttr = brDict.getAs<StringAttr>("done_step"))
-            brInfo.doneStep = doneStepAttr.getValue();
           brInfo.exitState = 0;
           if (auto exitStateAttr = brDict.getAs<IntegerAttr>("exit_state"))
             brInfo.exitState = exitStateAttr.getInt();
@@ -421,11 +416,6 @@ void ProcStmtToActionPass::generateStateRules(
         }
       }
 
-      // Check for done signal guard (dynamic step exits)
-      if (auto doneStepAttr = dict.getAs<StringAttr>("done_step")) {
-        trans.doneStep = doneStepAttr.getValue();
-      }
-
       // Check for parallel join guard (AND of all branch completions)
       if (auto parJoinAttr = dict.getAs<ArrayAttr>("par_join_branches")) {
         for (auto branchAttr : parJoinAttr) {
@@ -490,30 +480,6 @@ void ProcStmtToActionPass::generateStateRules(
   };
   collectCondOps(&procRule.getControl());
 
-  // Identify branch states that should be skipped in generateStateRules
-  // For simple parallel blocks: branch first states are merged into fork state handling
-  // For complex parallel blocks (per-branch FSM): branch states are in separate FSMs,
-  //   but fork/join states in the main FSM still need rules (don't skip them)
-  DenseSet<uint64_t> branchStatesToSkip;
-  for (auto &parBlock : parBlocks) {
-    if (!parBlock.needsPerBranchFsm) {
-      // Simple parallel: skip only the first branch states (merged into fork state)
-      auto forkTransIt = stateTransitions.find(parBlock.forkState);
-      if (forkTransIt != stateTransitions.end()) {
-        for (auto &trans : forkTransIt->second) {
-          // All unconditional transitions from fork are to branch states
-          if (trans.guardOpId < 0 && trans.doneStep.empty() && trans.parJoinBranches.empty()) {
-            branchStatesToSkip.insert(trans.toState);
-          }
-        }
-      }
-    }
-    // For per-branch FSM blocks, we DON'T skip any main FSM states.
-    // The fork state (parBlock.forkState) needs a rule to initialize branch FSMs.
-    // The join state (parBlock.joinState) needs a rule to check branch completion.
-    // Branch states are in separate FSMs handled by generateBranchFsmRules.
-  }
-
   // For parallel blocks with nested control, identify which states belong to which branch
   // NOTE: For per-branch FSM blocks, branch execution states are NOT in the main FSM.
   //       They have their own separate FSMs handled by generateBranchFsmRules.
@@ -523,12 +489,8 @@ void ProcStmtToActionPass::generateStateRules(
   // For per-branch FSM blocks, we leave stateToBranch empty since branch execution
   // states are not in the main FSM at all.
 
-  // For each state, generate a rule
+  // For each state, generate a rule.
   for (uint64_t state : allStates) {
-    // Skip branch states that are merged into fork state handling
-    if (branchStatesToSkip.contains(state))
-      continue;
-
     auto transIt = stateTransitions.find(state);
     auto stepsIt = stateToSteps.find(state);
     bool hasSteps = stepsIt != stateToSteps.end() && !stepsIt->second.empty();
@@ -684,9 +646,6 @@ void ProcStmtToActionPass::generateStateRules(
     // Mapping to track cloned operations (shared across all steps in this state)
     IRMapping bodyMapping;
 
-    // For fork states, we need to enable all branch steps
-    SmallVector<std::pair<StringRef, Value>> branchDoneSignals;  // (stepName, doneValue)
-
     if (isForkState) {
       // Fork state: handle parallel block entry
       auto *parBlock = forkIt->second;
@@ -768,60 +727,11 @@ void ProcStmtToActionPass::generateStateRules(
           }
         }
         // Main FSM stays at fork state - transition handled separately
-      } else {
-        // Simple parallel: enable all branch steps from the fork state (old behavior)
-        for (auto &trans : stateTransitions[state]) {
-          if (trans.guardOpId < 0 && trans.doneStep.empty() && trans.parJoinBranches.empty()) {
-            uint64_t branchState = trans.toState;
-            auto branchStepsIt = stateToSteps.find(branchState);
-            if (branchStepsIt != stateToSteps.end()) {
-              for (auto *stepOp : branchStepsIt->second) {
-                Region *bodyRegion = nullptr;
-                StringRef stepName;
-                if (auto step = dyn_cast<ProcStepOp>(stepOp)) {
-                  bodyRegion = &step.getBody();
-                  stepName = step.getSymName();
-                } else if (auto staticStep = dyn_cast<ProcStaticStepOp>(stepOp)) {
-                  bodyRegion = &staticStep.getBody();
-                  stepName = staticStep.getSymName();
-                }
-
-                if (bodyRegion && !bodyRegion->empty()) {
-                  IRMapping stepMapping;
-                  for (auto &op : bodyRegion->front()) {
-                    if (auto stepDone = dyn_cast<ProcStepDoneOp>(op)) {
-                      // Clone done signal computation and save it
-                      Value doneValue = stepMapping.lookupOrNull(stepDone.getDone());
-                      if (!doneValue && stepDone.getDone().getDefiningOp()) {
-                        std::function<Value(Value)> cloneDef;
-                        cloneDef = [&](Value v) -> Value {
-                          if (!v) return nullptr;
-                          if (auto mapped = stepMapping.lookupOrNull(v))
-                            return mapped;
-                          if (auto defOp = v.getDefiningOp()) {
-                            for (Value operand : defOp->getOperands())
-                              cloneDef(operand);
-                            bodyBuilder.clone(*defOp, stepMapping);
-                            return stepMapping.lookup(v);
-                          }
-                          return v;
-                        };
-                        doneValue = cloneDef(stepDone.getDone());
-                      }
-                      if (doneValue)
-                        branchDoneSignals.push_back({stepName, doneValue});
-                    } else {
-                      bodyBuilder.clone(op, stepMapping);
-                    }
-                  }
-                }
-              }
-            }
-          }
-        }
       }
-    } else if (hasSteps) {
-      // Normal state: clone step bodies
+    }
+
+    if (hasSteps) {
+      // Clone step bodies for this state.
       for (auto *stepOp : stepsIt->second) {
         Region *bodyRegion = nullptr;
         StringRef stepName;
@@ -894,8 +804,7 @@ void ProcStmtToActionPass::generateStateRules(
               // in the first cycle only.
               if (localState == 0) {
                 for (auto &op : bodyRegion->front()) {
-                  if (!isa<ProcStepDoneOp>(op))
-                    bodyBuilder.clone(op, bodyMapping);
+                  bodyBuilder.clone(op, bodyMapping);
                 }
               }
               continue;
@@ -1009,8 +918,6 @@ void ProcStmtToActionPass::generateStateRules(
             // Clone active calls (and required defs) for this localState.
             int64_t callIdx = 0;
             for (auto &op : stepBlock) {
-              if (isa<ProcStepDoneOp>(op))
-                continue;
               auto call = dyn_cast<CallOp>(op);
               if (!call)
                 continue;
@@ -1063,11 +970,9 @@ void ProcStmtToActionPass::generateStateRules(
               ++callIdx;
             }
           } else {
-            // Dynamic step: clone full body (excluding step_done).
+            // Dynamic step: clone full body.
             for (auto &op : bodyRegion->front()) {
-              if (!isa<ProcStepDoneOp>(op)) {
-                bodyBuilder.clone(op, bodyMapping);
-              }
+              bodyBuilder.clone(op, bodyMapping);
             }
           }
         }
@@ -1079,12 +984,12 @@ void ProcStmtToActionPass::generateStateRules(
     Value nextStateValue;
     std::string transitionDesc;
 
-    // Special handling for fork states: transition when all branches are done
-    if (isForkState) {
+    // Special handling for per-branch-FSM fork states: transition when all
+    // branch FSMs reach their done state.
+    if (isForkState && forkIt->second->needsPerBranchFsm) {
       auto *parBlock = forkIt->second;
       uint64_t joinState = parBlock->joinState;
 
-      if (parBlock->needsPerBranchFsm) {
         // Per-branch FSM mode: check if ALL branch FSMs are at their "done" state
         // Branch state values:
         // - 0 = idle (not started)
@@ -1145,124 +1050,33 @@ void ProcStmtToActionPass::generateStateRules(
           }
         }
 
-        if (allBranchesDone) {
-          // All branches done -> transition to join
-          auto joinConst = bodyBuilder.create<firrtl::ConstantOp>(
-              loc, fsmType, llvm::APInt(fsmWidth, joinState)).getResult();
-          auto stayConst = bodyBuilder.create<firrtl::ConstantOp>(
-              loc, fsmType, llvm::APInt(fsmWidth, state)).getResult();
-          nextStateValue = bodyBuilder.create<firrtl::MuxPrimOp>(
-              loc, allBranchesDone, joinConst, stayConst).getResult();
-          transitionDesc = "all_branches_done ? " + std::to_string(joinState) +
-                           " : " + std::to_string(state) + " (per-branch FSM fork-join)";
-        } else {
-          // Stay at fork state (branches still running or need initialization)
-          nextStateValue = bodyBuilder.create<firrtl::ConstantOp>(
-              loc, fsmType, llvm::APInt(fsmWidth, state)).getResult();
-          transitionDesc = std::to_string(state) + " (branches running)";
-        }
-      } else if (!branchDoneSignals.empty()) {
-        // Simple parallel mode: AND all branch done signals
-        Value allDone = branchDoneSignals[0].second;
-        for (size_t i = 1; i < branchDoneSignals.size(); ++i) {
-          allDone = bodyBuilder.create<firrtl::AndPrimOp>(
-              loc, allDone, branchDoneSignals[i].second).getResult();
-        }
+        if (!allBranchesDone)
+          allBranchesDone = bodyBuilder.create<firrtl::ConstantOp>(
+              loc, boolType, llvm::APInt(1, 1))
+                               .getResult();
 
-        // Generate: next_state = allDone ? joinState : forkState
+        // Generate: next_state = allBranchesDone ? joinState : forkState
         auto joinConst = bodyBuilder.create<firrtl::ConstantOp>(
             loc, fsmType, llvm::APInt(fsmWidth, joinState)).getResult();
         auto stayConst = bodyBuilder.create<firrtl::ConstantOp>(
             loc, fsmType, llvm::APInt(fsmWidth, state)).getResult();
         nextStateValue = bodyBuilder.create<firrtl::MuxPrimOp>(
-            loc, allDone, joinConst, stayConst).getResult();
-        transitionDesc = "all_done ? " + std::to_string(joinState) + " : " +
-                         std::to_string(state) + " (fork-join)";
-      } else {
-        // No branch signals, just stay at fork state
-        nextStateValue = bodyBuilder.create<firrtl::ConstantOp>(
-            loc, fsmType, llvm::APInt(fsmWidth, state)).getResult();
-        transitionDesc = std::to_string(state) + " (empty fork)";
-      }
+            loc, allBranchesDone, joinConst, stayConst).getResult();
+        transitionDesc = "all_branches_done ? " + std::to_string(joinState) +
+                         " : " + std::to_string(state) + " (per-branch FSM fork-join)";
     } else if (hasTransitions) {
       auto &transitions = transIt->second;
 
       // Check if single transition with no condition guard
       bool singleUnguarded = (transitions.size() == 1 && transitions[0].guardOpId < 0);
-      bool hasDoneGuard = (transitions.size() == 1 && !transitions[0].doneStep.empty());
       bool hasParJoinGuard = (transitions.size() == 1 && !transitions[0].parJoinBranches.empty());
 
-      if (singleUnguarded && !hasDoneGuard && !hasParJoinGuard) {
-        // Single unconditional transition (no condition, no done signal, no par join)
+      if (singleUnguarded && !hasParJoinGuard) {
+        // Single unconditional transition (no condition, no par join)
         uint64_t nextState = transitions[0].toState;
         nextStateValue = bodyBuilder.create<firrtl::ConstantOp>(
             loc, fsmType, llvm::APInt(fsmWidth, nextState)).getResult();
         transitionDesc = std::to_string(nextState);
-      } else if (hasDoneGuard) {
-        // Dynamic step exit - guard transition by done signal
-        // next_state = done ? nextState : currentState (stay until done)
-        StringRef doneStepName = transitions[0].doneStep;
-        uint64_t nextState = transitions[0].toState;
-
-        // Find the step and extract its done signal
-        // The step body was already cloned into bodyMapping (excluding ProcStepDoneOp)
-        // We need to find the done value in the original step
-        Value doneValue = nullptr;
-        if (hasSteps) {
-          for (auto *stepOp : stepsIt->second) {
-            if (auto step = dyn_cast<ProcStepOp>(stepOp)) {
-              if (step.getSymName() == doneStepName) {
-                // Find ProcStepDoneOp in the step body
-                for (auto &op : step.getBody().front()) {
-                  if (auto stepDone = dyn_cast<ProcStepDoneOp>(op)) {
-                    // The done signal should be in bodyMapping from step body cloning
-                    doneValue = bodyMapping.lookupOrNull(stepDone.getDone());
-                    if (!doneValue) {
-                      // If not in mapping, clone the done signal computation
-                      // (This handles cases where done is computed inline)
-                      Value origDone = stepDone.getDone();
-                      if (origDone.getDefiningOp()) {
-                        // Clone the defining operation chain
-                        std::function<Value(Value)> cloneDef;
-                        cloneDef = [&](Value v) -> Value {
-                          if (!v) return nullptr;
-                          if (auto mapped = bodyMapping.lookupOrNull(v))
-                            return mapped;
-                          if (auto defOp = v.getDefiningOp()) {
-                            for (Value operand : defOp->getOperands())
-                              cloneDef(operand);
-                            bodyBuilder.clone(*defOp, bodyMapping);
-                            return bodyMapping.lookup(v);
-                          }
-                          return v;
-                        };
-                        doneValue = cloneDef(origDone);
-                      }
-                    }
-                    break;
-                  }
-                }
-                break;
-              }
-            }
-          }
-        }
-
-        if (doneValue) {
-          // Generate: next_state = done ? nextState : currentState
-          auto nextConst = bodyBuilder.create<firrtl::ConstantOp>(
-              loc, fsmType, llvm::APInt(fsmWidth, nextState)).getResult();
-          auto stayConst = bodyBuilder.create<firrtl::ConstantOp>(
-              loc, fsmType, llvm::APInt(fsmWidth, state)).getResult();
-          nextStateValue = bodyBuilder.create<firrtl::MuxPrimOp>(
-              loc, doneValue, nextConst, stayConst).getResult();
-          transitionDesc = "done ? " + std::to_string(nextState) + " : " + std::to_string(state);
-        } else {
-          // Fallback: unconditional (done signal not found)
-          nextStateValue = bodyBuilder.create<firrtl::ConstantOp>(
-              loc, fsmType, llvm::APInt(fsmWidth, nextState)).getResult();
-          transitionDesc = std::to_string(nextState) + " (done signal not found)";
-        }
       } else {
         // Multiple conditional transitions - generate muxed next-state
         // Group transitions by guard condition
@@ -1391,7 +1205,7 @@ void ProcStmtToActionPass::generateStateRules(
       if (hasTransitions) {
         auto &transitions = transIt->second;
         if (transitions.size() == 1 && transitions[0].guardOpId < 0 &&
-            transitions[0].doneStep.empty() && transitions[0].parJoinBranches.empty()) {
+            transitions[0].parJoinBranches.empty()) {
           // Single unconditional transition
           uint64_t nextAbsState = transitions[0].toState;
           // Done state = max relative state + 1
@@ -1450,30 +1264,6 @@ void ProcStmtToActionPass::generateStateRules(
               } else {
                 thenAbsState = trans.toState;
                 hasThen = true;
-              }
-            } else if (!trans.doneStep.empty()) {
-              // Done-guarded transition: done ? nextState : currentState
-              thenAbsState = trans.toState;
-              hasThen = true;
-              // The "else" is staying at the current state (when not done)
-              elseAbsState = state;
-              hasElse = true;
-              // For done-guarded transitions, we need to find the done signal
-              // which was already extracted and used to create nextStateValue
-              // We can reuse bodyMapping to find the cloned done value
-              StringRef doneStepName = trans.doneStep;
-              for (auto *stepOp : stepsIt != stateToSteps.end() ? stepsIt->second : SmallVector<Operation*>{}) {
-                if (auto step = dyn_cast<ProcStepOp>(stepOp)) {
-                  if (step.getSymName() == doneStepName) {
-                    for (auto &bodyOp : step.getBody().front()) {
-                      if (auto stepDone = dyn_cast<ProcStepDoneOp>(bodyOp)) {
-                        condValue = bodyMapping.lookupOrNull(stepDone.getDone());
-                        break;
-                      }
-                    }
-                    break;
-                  }
-                }
               }
             } else {
               elseAbsState = trans.toState;
@@ -1714,7 +1504,7 @@ void ProcStmtToActionPass::generateBranchFsmRules(
           stateRule.getBody().push_back(bodyBlock);
           OpBuilder bodyBuilder(bodyBlock, bodyBlock->begin());
 
-          // Clone step body (excluding ProcStepDoneOp)
+          // Clone step body.
           auto stepIt = stepMap.find(stepName);
           if (stepIt != stepMap.end()) {
             Region *bodyRegion = nullptr;
@@ -1727,9 +1517,7 @@ void ProcStmtToActionPass::generateBranchFsmRules(
             if (bodyRegion && !bodyRegion->empty()) {
               IRMapping bodyMapping;
               for (auto &op : bodyRegion->front()) {
-                if (!isa<ProcStepDoneOp>(op)) {
-                  bodyBuilder.clone(op, bodyMapping);
-                }
+                bodyBuilder.clone(op, bodyMapping);
               }
             }
           }

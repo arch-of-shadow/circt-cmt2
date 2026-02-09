@@ -47,7 +47,6 @@ namespace {
 
 /// A guard specification that can be serialized.
 /// For if/else conditions, tracks the source operation and inversion.
-/// For dynamic step done signals, tracks the step name.
 struct GuardSpec {
   /// The operation that defines the condition (e.g., ProcIfOp, ProcStaticIfOp).
   /// nullptr means unconditional (always true).
@@ -58,10 +57,6 @@ struct GuardSpec {
 
   /// The actual FIRRTL Value for the condition (used during schedule building).
   Value condValue = nullptr;
-
-  /// For dynamic step exits: the step name whose done signal guards the transition.
-  /// Empty string means no done signal guard.
-  StringRef doneStepName;
 
   /// For parallel join: list of branch completion register names.
   /// The join transition fires when ALL of these are true.
@@ -88,13 +83,6 @@ struct GuardSpec {
     return g;
   }
 
-  /// Create a done signal guard for dynamic step exits.
-  static GuardSpec doneGuard(StringRef stepName) {
-    GuardSpec g;
-    g.doneStepName = stepName;
-    return g;
-  }
-
   /// Create a parallel join guard (AND of all branch completions).
   static GuardSpec parJoin(SmallVector<std::string> branchNames) {
     GuardSpec g;
@@ -103,9 +91,8 @@ struct GuardSpec {
   }
 
   bool isUnconditional() const {
-    return sourceOp == nullptr && doneStepName.empty() && parJoinBranches.empty();
+    return sourceOp == nullptr && parJoinBranches.empty();
   }
-  bool hasDoneGuard() const { return !doneStepName.empty(); }
   bool hasParJoinGuard() const { return !parJoinBranches.empty(); }
 };
 
@@ -1084,10 +1071,6 @@ void TDCCPass::processDataflowTask(DataflowTaskOp task, cmt2::ModuleOp module) {
                                                builder.getBoolAttr(guard.inverted)));
         }
       }
-      if (guard.hasDoneGuard()) {
-        attrs.push_back(builder.getNamedAttr("done_step",
-                                             builder.getStringAttr(guard.doneStepName)));
-      }
       if (guard.hasParJoinGuard()) {
         SmallVector<Attribute> branchAttrs;
         for (const auto &branchName : guard.parJoinBranches)
@@ -1275,16 +1258,14 @@ SmallVector<PredEdge> TDCCPass::calculateStatesRecur(
         // Record the enable (will generate go signal later)
         schedule.addEnable(curState, nullptr, nullptr, nullptr);
 
-        // Return exit edge from the last state of this step
-        // - Static steps: unconditional (FSM counts cycles)
-        // - Dynamic steps: guarded by done signal
+        // Return exit edge from the last state of this step.
+        // Both dynamic steps and static steps advance when the corresponding
+        // state rule fires; multi-cycle static steps allocate internal
+        // transition states.
         uint64_t exitState = curState + latency - 1;
-        if (isStaticStep) {
-          return SmallVector<PredEdge>{{exitState, GuardSpec::unconditional()}};
-        } else {
-          // Dynamic step: exit is guarded by step's done signal
-          return SmallVector<PredEdge>{{exitState, GuardSpec::doneGuard(stepName)}};
-        }
+        (void)isStaticStep;
+        (void)stepName;
+        return SmallVector<PredEdge>{{exitState, GuardSpec::unconditional()}};
       })
       .Case<ProcSeqOp>([&](ProcSeqOp seq) {
         SmallVector<PredEdge> prev = preds;
@@ -1519,29 +1500,21 @@ SmallVector<PredEdge> TDCCPass::calculateStatesRecur(
           // Add transition from fork state to exec state (unconditional)
           schedule.addTransition(forkState, execState);
 
-          // Compute max latency and collect done guards
+          // Compute max latency of branches (used to allocate internal states).
           int64_t maxLatency = 1;
-          bool allStatic = true;
-          SmallVector<StringRef> doneStepNames;
 
           for (auto enable : enableOps) {
             StringRef stepName = enable.getStepName();
             int64_t latency = 1;
-            bool isStatic = false;
 
             auto it = stepMap.find(stepName);
             if (it != stepMap.end()) {
               if (auto staticStep = dyn_cast<ProcStaticStepOp>(it->second)) {
                 latency = staticStep.getLatency();
-                isStatic = true;
               }
             }
 
             maxLatency = std::max(maxLatency, latency);
-            if (!isStatic) {
-              allStatic = false;
-              doneStepNames.push_back(stepName);
-            }
 
             // Record enable for this state
             schedule.addEnable(execState, nullptr, nullptr, nullptr);
@@ -1555,21 +1528,9 @@ SmallVector<PredEdge> TDCCPass::calculateStatesRecur(
           // Exit state is after all cycles complete
           uint64_t exitState = execState + maxLatency - 1;
 
-          // Create combined exit guard
-          GuardSpec exitGuard;
-          if (allStatic) {
-            // All static: unconditional exit after max latency cycles
-            exitGuard = GuardSpec::unconditional();
-          } else {
-            // Has dynamic steps: need combined done guard
-            // For now, use the first done step (proper AND logic would need enhancement)
-            // TODO: Implement proper AND of all done signals
-            if (!doneStepNames.empty()) {
-              exitGuard = GuardSpec::doneGuard(doneStepNames[0]);
-            } else {
-              exitGuard = GuardSpec::unconditional();
-            }
-          }
+          // Exit after max latency cycles. Dynamic steps advance on fire, so
+          // no step-local done guard is required.
+          GuardSpec exitGuard = GuardSpec::unconditional();
 
           // Return exit from the last state
           return SmallVector<PredEdge>{{exitState, exitGuard}};
@@ -1835,11 +1796,6 @@ void TDCCPass::realizeSchedule(Schedule &schedule, Operation *procOp,
                                                builder.getBoolAttr(guard.inverted)));
         }
       }
-      // Store done signal guard (for dynamic step exits)
-      if (guard.hasDoneGuard()) {
-        attrs.push_back(builder.getNamedAttr("done_step",
-                                             builder.getStringAttr(guard.doneStepName)));
-      }
       // Store parallel join guard (AND of all branch completions)
       if (guard.hasParJoinGuard()) {
         SmallVector<Attribute> branchAttrs;
@@ -1879,10 +1835,6 @@ void TDCCPass::realizeSchedule(Schedule &schedule, Operation *procOp,
                                                builder.getI64IntegerAttr(branch.lastState)));
         brAttrs.push_back(builder.getNamedAttr("needs_separate_fsm",
                                                builder.getBoolAttr(branch.needsSeparateFsm)));
-        if (branch.exitGuard.hasDoneGuard()) {
-          brAttrs.push_back(builder.getNamedAttr("done_step",
-                                                 builder.getStringAttr(branch.exitGuard.doneStepName)));
-        }
         branchAttrs.push_back(builder.getDictionaryAttr(brAttrs));
       }
       blockAttrs.push_back(builder.getNamedAttr("branches", builder.getArrayAttr(branchAttrs)));

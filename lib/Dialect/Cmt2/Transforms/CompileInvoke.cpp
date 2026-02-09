@@ -117,12 +117,6 @@ void CompileInvokePass::compileInvoke(ProcInvokeOp invoke, cmt2::ModuleOp module
   // Store the call results for later use
   SmallVector<Value> callResults(callOp.getResults());
 
-  // Create step_done with constant true
-  auto uint1Type = firrtl::UIntType::get(builder.getContext(), 1);
-  auto trueConst = stepBuilder.create<firrtl::ConstantOp>(
-      loc, uint1Type, llvm::APInt(1, 1));
-  stepBuilder.create<ProcStepDoneOp>(loc, trueConst);
-
   // Replace the invoke with an enable
   builder.create<ProcEnableOp>(loc, FlatSymbolRefAttr::get(
       builder.getContext(), stepName));

@@ -27,7 +27,6 @@ void DynamicControlPlugin::initialize(cmt2::ModuleOp module,
                                        StateManager &state) {
   state_ = &state;
   steps_.clear();
-  stepsDone_.clear();
 
   // Collect proc.step definitions
   module.walk([&](ProcStepOp step) {
@@ -41,7 +40,7 @@ void DynamicControlPlugin::initialize(cmt2::ModuleOp module,
 }
 
 bool DynamicControlPlugin::handles(mlir::Operation *op) const {
-  return mlir::isa<ProcStepOp, ProcEnableOp, ProcStepDoneOp>(op);
+  return mlir::isa<ProcStepOp, ProcEnableOp>(op);
 }
 
 bool DynamicControlPlugin::execute(mlir::Operation *op, OpContext &ctx) {
@@ -57,18 +56,11 @@ bool DynamicControlPlugin::execute(mlir::Operation *op, OpContext &ctx) {
     return true; // Step not found, consider done
   }
 
-  if (auto doneOp = mlir::dyn_cast<ProcStepDoneOp>(op)) {
-    // Check the done condition
-    InterpValue doneVal = ctx.getValue(doneOp.getDone());
-    return doneVal != 0;
-  }
-
   return true;
 }
 
 void DynamicControlPlugin::tick() {
-  // Clear step done status at cycle start
-  clearStepsDone();
+  // Nothing to do for dynamic control.
 }
 
 void DynamicControlPlugin::commit() {
@@ -76,18 +68,8 @@ void DynamicControlPlugin::commit() {
 }
 
 void DynamicControlPlugin::reset() {
-  stepsDone_.clear();
+  // Nothing to reset for dynamic control.
 }
-
-bool DynamicControlPlugin::isStepDone(llvm::StringRef stepName) const {
-  return stepsDone_.count(stepName) > 0;
-}
-
-void DynamicControlPlugin::markStepDone(llvm::StringRef stepName) {
-  stepsDone_.insert(stepName);
-}
-
-void DynamicControlPlugin::clearStepsDone() { stepsDone_.clear(); }
 
 bool DynamicControlPlugin::executeRegionOps(mlir::Region &region, OpContext &ctx) {
   if (region.empty())
@@ -96,10 +78,6 @@ bool DynamicControlPlugin::executeRegionOps(mlir::Region &region, OpContext &ctx
   mlir::Block &block = region.front();
 
   for (mlir::Operation &op : block) {
-    // Skip step done ops - they are handled separately
-    if (mlir::isa<ProcStepDoneOp>(op))
-      continue;
-
     // Skip yield ops
     if (mlir::isa<YieldOp>(op))
       continue;
@@ -123,29 +101,9 @@ bool DynamicControlPlugin::executeStep(ProcStepOp step, OpContext &ctx) {
   if (body.empty())
     return true;
 
-  mlir::Block &block = body.front();
-  bool stepDone = false;
-
-  // Execute the step body operations first
+  // Execute the step body operations.
   executeRegionOps(body, ctx);
-
-  // Then check for done condition
-  for (mlir::Operation &op : block) {
-    if (auto doneOp = mlir::dyn_cast<ProcStepDoneOp>(op)) {
-      // Evaluate the done condition
-      InterpValue doneVal = ctx.getValue(doneOp.getDone());
-      stepDone = doneVal != 0;
-      break;
-    }
-  }
-
-  if (stepDone) {
-    markStepDone(step.getSymName());
-    LLVM_DEBUG(llvm::dbgs() << "DynamicControlPlugin: step '"
-                            << step.getSymName() << "' done\n");
-  }
-
-  return stepDone;
+  return true;
 }
 
 //===----------------------------------------------------------------------===//
