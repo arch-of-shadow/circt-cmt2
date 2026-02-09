@@ -993,19 +993,26 @@ void TDCCPass::processDataflowTask(DataflowTaskOp task, cmt2::ModuleOp module) {
 
   // Store state assignments for enables
   SmallVector<Attribute> stateAssigns;
+  auto computeEnableTiming = [&](ProcEnableOp enable, int64_t startState)
+      -> std::tuple<int64_t, int64_t, bool> {
+    int64_t latency = 1;
+    bool isStatic = false;
+    StringRef stepName = enable.getStepName();
+    auto it = stepMap.find(stepName);
+    if (it != stepMap.end()) {
+      if (auto staticStep = dyn_cast<ProcStaticStepOp>(it->second)) {
+        latency = staticStep.getLatency();
+        isStatic = true;
+      }
+    }
+    int64_t endState = startState + latency;
+    return {endState, latency, isStatic};
+  };
+
   for (auto &[enableOp, state] : stateIds) {
     if (auto enable = dyn_cast<ProcEnableOp>(enableOp)) {
-      int64_t endState = state + 1;
-      int64_t latency = 1;
-      bool isStatic = false;
-
-      if (auto attr = enable->getAttrOfType<IntegerAttr>("tdcc.end_state"))
-        endState = attr.getInt();
-      if (auto attr = enable->getAttrOfType<IntegerAttr>("tdcc.latency"))
-        latency = attr.getInt();
-      if (auto attr = enable->getAttrOfType<BoolAttr>("tdcc.is_static"))
-        isStatic = attr.getValue();
-
+      auto [endState, latency, isStatic] =
+          computeEnableTiming(enable, /*startState=*/state);
       auto entry = builder.getDictionaryAttr({
         builder.getNamedAttr("step", enable.getStepNameAttr()),
         builder.getNamedAttr("state", builder.getI64IntegerAttr(state)),
@@ -1017,20 +1024,17 @@ void TDCCPass::processDataflowTask(DataflowTaskOp task, cmt2::ModuleOp module) {
     }
   }
   // Add iteration-aware state assignments from static_repeat
+  //
+  // IMPORTANT: Do not read `tdcc.*` timing attributes from the ProcEnableOp
+  // here. A ProcEnableOp inside `proc.static_repeat` is visited multiple times
+  // during unrolling, so any per-enable attributes stored directly on the op
+  // will be overwritten by the last iteration. Instead, recompute timing from
+  // the step definition and the iteration-specific `state`.
   for (auto &[key, state] : iterStateIds) {
     auto [enableOp, iteration] = key;
     if (auto enable = dyn_cast<ProcEnableOp>(enableOp)) {
-      int64_t endState = state + 1;
-      int64_t latency = 1;
-      bool isStatic = false;
-
-      if (auto attr = enable->getAttrOfType<IntegerAttr>("tdcc.end_state"))
-        endState = attr.getInt();
-      if (auto attr = enable->getAttrOfType<IntegerAttr>("tdcc.latency"))
-        latency = attr.getInt();
-      if (auto attr = enable->getAttrOfType<BoolAttr>("tdcc.is_static"))
-        isStatic = attr.getValue();
-
+      auto [endState, latency, isStatic] =
+          computeEnableTiming(enable, /*startState=*/state);
       auto entry = builder.getDictionaryAttr({
         builder.getNamedAttr("step", enable.getStepNameAttr()),
         builder.getNamedAttr("state", builder.getI64IntegerAttr(state)),
@@ -1684,56 +1688,57 @@ void TDCCPass::realizeSchedule(Schedule &schedule, Operation *procOp,
 
   // Store state assignments for each enable with timing information
   SmallVector<Attribute> stateAssigns;
-  // First add non-iteration state assignments
+  auto computeEnableTiming = [&](ProcEnableOp enable, int64_t startState)
+      -> std::tuple<int64_t, int64_t, bool> {
+    int64_t latency = 1;
+    bool isStatic = false;
+    StringRef stepName = enable.getStepName();
+    auto it = stepMap.find(stepName);
+    if (it != stepMap.end()) {
+      if (auto staticStep = dyn_cast<ProcStaticStepOp>(it->second)) {
+        latency = staticStep.getLatency();
+        isStatic = true;
+      }
+    }
+    int64_t endState = startState + latency;
+    return {endState, latency, isStatic};
+  };
+
+  // First add non-iteration state assignments.
   for (auto &[enableOp, state] : stateIds) {
     if (auto enable = dyn_cast<ProcEnableOp>(enableOp)) {
-      // Read timing attributes we set earlier
-      int64_t startState = state;
-      int64_t endState = state + 1;
-      int64_t latency = 1;
-      bool isStatic = false;
-
-      if (auto attr = enable->getAttrOfType<IntegerAttr>("tdcc.end_state"))
-        endState = attr.getInt();
-      if (auto attr = enable->getAttrOfType<IntegerAttr>("tdcc.latency"))
-        latency = attr.getInt();
-      if (auto attr = enable->getAttrOfType<BoolAttr>("tdcc.is_static"))
-        isStatic = attr.getValue();
-
+      auto [endState, latency, isStatic] =
+          computeEnableTiming(enable, /*startState=*/state);
       auto entry = builder.getDictionaryAttr({
-        builder.getNamedAttr("step", enable.getStepNameAttr()),
-        builder.getNamedAttr("state", builder.getI64IntegerAttr(state)),
-        builder.getNamedAttr("end_state", builder.getI64IntegerAttr(endState)),
-        builder.getNamedAttr("latency", builder.getI64IntegerAttr(latency)),
-        builder.getNamedAttr("is_static", builder.getBoolAttr(isStatic))
+          builder.getNamedAttr("step", enable.getStepNameAttr()),
+          builder.getNamedAttr("state", builder.getI64IntegerAttr(state)),
+          builder.getNamedAttr("end_state", builder.getI64IntegerAttr(endState)),
+          builder.getNamedAttr("latency", builder.getI64IntegerAttr(latency)),
+          builder.getNamedAttr("is_static", builder.getBoolAttr(isStatic)),
       });
       stateAssigns.push_back(entry);
     }
   }
-  // Then add iteration-aware state assignments from static_repeat
+
+  // Then add iteration-aware state assignments from static_repeat.
+  //
+  // IMPORTANT: Do not read `tdcc.*` timing attributes from the ProcEnableOp
+  // here. A ProcEnableOp inside `proc.static_repeat` is visited multiple times
+  // during unrolling, so any per-enable attributes stored directly on the op
+  // will be overwritten by the last iteration. Instead, recompute timing from
+  // the step definition and the iteration-specific `state`.
   for (auto &[key, state] : iterStateIds) {
     auto [enableOp, iteration] = key;
     if (auto enable = dyn_cast<ProcEnableOp>(enableOp)) {
-      // Read timing attributes we set earlier
-      int64_t startState = state;
-      int64_t endState = state + 1;
-      int64_t latency = 1;
-      bool isStatic = false;
-
-      if (auto attr = enable->getAttrOfType<IntegerAttr>("tdcc.end_state"))
-        endState = attr.getInt();
-      if (auto attr = enable->getAttrOfType<IntegerAttr>("tdcc.latency"))
-        latency = attr.getInt();
-      if (auto attr = enable->getAttrOfType<BoolAttr>("tdcc.is_static"))
-        isStatic = attr.getValue();
-
+      auto [endState, latency, isStatic] =
+          computeEnableTiming(enable, /*startState=*/state);
       auto entry = builder.getDictionaryAttr({
-        builder.getNamedAttr("step", enable.getStepNameAttr()),
-        builder.getNamedAttr("state", builder.getI64IntegerAttr(state)),
-        builder.getNamedAttr("end_state", builder.getI64IntegerAttr(endState)),
-        builder.getNamedAttr("latency", builder.getI64IntegerAttr(latency)),
-        builder.getNamedAttr("is_static", builder.getBoolAttr(isStatic)),
-        builder.getNamedAttr("iteration", builder.getI64IntegerAttr(iteration))
+          builder.getNamedAttr("step", enable.getStepNameAttr()),
+          builder.getNamedAttr("state", builder.getI64IntegerAttr(state)),
+          builder.getNamedAttr("end_state", builder.getI64IntegerAttr(endState)),
+          builder.getNamedAttr("latency", builder.getI64IntegerAttr(latency)),
+          builder.getNamedAttr("is_static", builder.getBoolAttr(isStatic)),
+          builder.getNamedAttr("iteration", builder.getI64IntegerAttr(iteration)),
       });
       stateAssigns.push_back(entry);
     }

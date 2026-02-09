@@ -105,7 +105,10 @@ cmt2.circuit {
     cmt2.proc.dataflow @test_repeat(%input: !firrtl.uint<8>) -> (!firrtl.uint<8>) {
       // CHECK: cmt2.dataflow.task @task_repeat()
       // CHECK-SAME: tdcc.enables
-      // CHECK-SAME: iteration
+      // CHECK-DAG: {end_state = 2 : i64, is_static = true, iteration = 0 : i64, latency = 1 : i64, state = 1 : i64, step = @step_a}
+      // CHECK-DAG: {end_state = 3 : i64, is_static = true, iteration = 1 : i64, latency = 1 : i64, state = 2 : i64, step = @step_a}
+      // CHECK-DAG: {end_state = 4 : i64, is_static = true, iteration = 2 : i64, latency = 1 : i64, state = 3 : i64, step = @step_a}
+      // CHECK-DAG: {end_state = 5 : i64, is_static = true, iteration = 3 : i64, latency = 1 : i64, state = 4 : i64, step = @step_a}
       %tok0 = cmt2.dataflow.task @task_repeat() -> (!cmt2.sync_token<data = !firrtl.uint<8>>) {
         cmt2.proc.static_repeat 4 {
           cmt2.proc.enable @step_a
