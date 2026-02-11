@@ -216,7 +216,6 @@ def create_test_harness(circuit: Circuit, pipeline_mod, width: int, num_stages: 
             in_counter.next = push_item.bits(next_cnt, width - 1, 0)
             pcnt = push_cnt.read
             push_cnt.next = push_item.bits(push_item.add(pcnt, push_item.const(1, width)), width - 1, 0)
-            push_item.done(push_item.const(1, 1))
 
         # Dynamic step: pop_item - for while loop
         with harness.step() as pop_item:
@@ -226,12 +225,10 @@ def create_test_harness(circuit: Circuit, pipeline_mod, width: int, num_stages: 
             out_sum.next = pop_item.bits(new_sum, width - 1, 0)
             pcnt = pop_cnt.read
             pop_cnt.next = pop_item.bits(pop_item.add(pcnt, pop_item.const(1, width)), width - 1, 0)
-            pop_item.done(pop_item.const(1, 1))
 
         # Step: mark_done
         with harness.step() as mark_done:
             done_reg.next = mark_done.const(1, 1)
-            mark_done.done(mark_done.const(1, 1))
 
         # Procedural rule: main with parallel push/pop
         # Structure:
@@ -241,7 +238,7 @@ def create_test_harness(circuit: Circuit, pipeline_mod, width: int, num_stages: 
         #
         # Key insight:
         # - static_repeat uses static_step (latency=1) for single-cycle iteration
-        # - while uses dynamic_step (with done signal) because condition needs re-evaluation
+        # - while uses dynamic steps because the condition needs re-evaluation
         with harness.proc_rule() as main:
             with main.guard as g:
                 g.returns(g.not_(done_reg.read))

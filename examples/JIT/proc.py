@@ -7,7 +7,7 @@
 Comprehensive Procedural Control Example (JIT stacked on PyCMT2).
 
 This example demonstrates and validates all procedural control features:
-1. Dynamic steps (with explicit done signal)
+1. Dynamic steps (complete when state rule fires)
 2. Static steps (with fixed latency)
 3. Sequential composition (proc.seq)
 4. Parallel composition (proc.par)
@@ -63,44 +63,37 @@ def create_proc_comprehensive_circuit():
         reg_flag = m.instance(reg1, clk=clk, rst=rst)
 
         # =====================================================================
-        # Dynamic Steps (explicit done signal based on method call readiness)
+        # Dynamic Steps (no step-local done protocol)
         # =====================================================================
 
         # Step: read_a - Read from reg_a (dynamic, depends on read method ready)
         with m.step() as read_a:
             _ = reg_a.read
-            # Done when the read succeeds
-            read_a.done(read_a.const(1, 1))
 
         # Step: write_result - Write to reg_result (dynamic)
         with m.step() as write_result:
             val = reg_a.read
             reg_result.next = val
-            write_result.done(write_result.const(1, 1))
 
         # Step: increment_counter - Increment counter (dynamic)
         with m.step() as increment_counter:
             count = reg_counter.read
             new_count = increment_counter.add(count, increment_counter.const(1, 32))
             reg_counter.next = new_count
-            increment_counter.done(increment_counter.const(1, 1))
 
         # Step: decrement_counter - Decrement counter (dynamic)
         with m.step() as decrement_counter:
             count = reg_counter.read
             new_count = decrement_counter.sub(count, decrement_counter.const(1, 32))
             reg_counter.next = new_count
-            decrement_counter.done(decrement_counter.const(1, 1))
 
         # Step: set_flag - Set the flag register (dynamic)
         with m.step() as set_flag:
             reg_flag.next = set_flag.const(1, 1)
-            set_flag.done(set_flag.const(1, 1))
 
         # Step: clear_flag - Clear the flag register (dynamic)
         with m.step() as clear_flag:
             reg_flag.next = clear_flag.const(0, 1)
-            clear_flag.done(clear_flag.const(1, 1))
 
         # =====================================================================
         # Static Steps (fixed latency, no explicit done needed)

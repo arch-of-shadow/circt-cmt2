@@ -131,11 +131,10 @@ def create_static_proc_circuit():
 
         # =================================================================
         # DYNAMIC STEP: finish
-        # Demonstrates: dynamic step with explicit done signal
+        # Demonstrates: dynamic step (no step-local done protocol)
         # =================================================================
         with m.step() as finish_step:
             busy.next = finish_step.const(0, 1)
-            finish_step.done(finish_step.const(1, 1))
 
         # =================================================================
         # METHOD: start

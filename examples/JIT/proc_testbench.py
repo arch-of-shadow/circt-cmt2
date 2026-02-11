@@ -124,7 +124,6 @@ def create_proc_testable_circuit():
                     # Clear busy flag (dynamic step)
                     with mult_mod.step() as clear_mult_busy:
                         busy.next = clear_mult_busy.const(0, 1)
-                        clear_mult_busy.done(clear_mult_busy.const(1, 1))
                     seq.enable(clear_mult_busy.ref())
 
     with jit.module(circuit, "ProcALU") as m:
@@ -159,12 +158,10 @@ def create_proc_testable_circuit():
         # Step: load_a - Read reg_a (dynamic)
         with m.step() as load_a:
             _ = reg_a.read
-            load_a.done(load_a.const(1, 1))
 
         # Step: load_b - Read reg_b (dynamic)
         with m.step() as load_b:
             _ = reg_b.read
-            load_b.done(load_b.const(1, 1))
 
         # Step: compute_add - Add reg_a and reg_b, store in reg_result
         with m.step() as compute_add:
@@ -172,7 +169,6 @@ def create_proc_testable_circuit():
             b = reg_b.read
             result = compute_add.add(a, b)
             reg_result.next = result
-            compute_add.done(compute_add.const(1, 1))
 
         # Step: compute_sub - Subtract reg_b from reg_a
         with m.step() as compute_sub:
@@ -180,34 +176,28 @@ def create_proc_testable_circuit():
             b = reg_b.read
             result = compute_sub.sub(a, b)
             reg_result.next = result
-            compute_sub.done(compute_sub.const(1, 1))
 
         # Step: increment_counter - Increment the counter
         with m.step() as increment_counter:
             count = reg_counter.read
             new_count = increment_counter.add(count, increment_counter.const(1, 8))
             reg_counter.next = increment_counter.bits(new_count, 7, 0)
-            increment_counter.done(increment_counter.const(1, 1))
 
         # Step: set_done_flag - Set the done flag
         with m.step() as set_done_flag:
             reg_done.next = set_done_flag.const(1, 1)
-            set_done_flag.done(set_done_flag.const(1, 1))
 
         # Step: clear_done_flag - Clear the done flag
         with m.step() as clear_done_flag:
             reg_done.next = clear_done_flag.const(0, 1)
-            clear_done_flag.done(clear_done_flag.const(1, 1))
 
         # Step: set_busy - Set busy flag
         with m.step() as set_busy:
             reg_busy.next = set_busy.const(1, 1)
-            set_busy.done(set_busy.const(1, 1))
 
         # Step: clear_busy - Clear busy flag
         with m.step() as clear_busy:
             reg_busy.next = clear_busy.const(0, 1)
-            clear_busy.done(clear_busy.const(1, 1))
 
         # =====================================================================
         # Static Steps (fixed latency)
@@ -258,18 +248,15 @@ def create_proc_testable_circuit():
             # Call multiply - this triggers the computation in mult_unit
             # The method sets busy=1 and stores operands
             mult_unit.multiply(a, b)
-            start_mult.done(start_mult.const(1, 1))
 
         # Step: check_mult_busy - Check if mult_unit is still busy
         with m.step() as check_mult_busy:
-            is_busy = mult_unit.is_busy
-            check_mult_busy.done(check_mult_busy.not_(is_busy))  # Done when not busy
+            _ = mult_unit.is_busy
 
         # Step: copy_mult_result - Copy result from mult_unit to reg_result
         with m.step() as copy_mult_result:
             result = mult_unit.get_result
             reg_result.next = result
-            copy_mult_result.done(copy_mult_result.const(1, 1))
 
         # =====================================================================
         # Proc Rule 1: Simple Sequential (seq_add_sub)

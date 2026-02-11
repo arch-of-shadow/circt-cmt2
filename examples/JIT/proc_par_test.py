@@ -66,17 +66,14 @@ def create_parallel_test(width: int = 32) -> Circuit:
         # Step: incr1 - increment counter1
         with harness.step() as incr1:
             counter1.next = counter1.read + 1
-            incr1.done(incr1.const(1, 1))
 
         # Step: incr2 - increment counter2
         with harness.step() as incr2:
             counter2.next = counter2.read + 1
-            incr2.done(incr2.const(1, 1))
 
         # Step: mark_done
         with harness.step() as mark_done:
             done_reg.next = mark_done.const(1, 1)
-            mark_done.done(mark_done.const(1, 1))
 
         # Procedural rule: main with parallel execution
         with harness.proc_rule() as main:

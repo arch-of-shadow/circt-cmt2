@@ -307,7 +307,6 @@ def test_proc_rule() -> bool:
         with m.step() as incr_step:
             val = counter.read
             counter.next = incr_step.bits(incr_step.add(val, incr_step.const(1, 32)), 31, 0)
-            incr_step.done(incr_step.const(1, 1))  # Always done after one cycle
 
         # Proc rule that runs the step
         with m.proc_rule() as incr_proc:
@@ -359,7 +358,6 @@ def test_proc_conflict() -> bool:
         with m.step() as incr_step:
             val = counter.read
             counter.next = incr_step.bits(incr_step.add(val, incr_step.const(1, 32)), 31, 0)
-            incr_step.done(incr_step.const(1, 1))  # Always done after one cycle
 
         # Proc rule for increment loop
         with m.proc_rule() as incr_loop:
@@ -646,7 +644,6 @@ def test_while_loop() -> bool:
         # Step: increment counter
         with m.step() as incr_step:
             counter.next = counter.read + 1
-            incr_step.done(incr_step.const(1, 1))
 
         # Proc rule with while loop (condition=0 means no iterations for testing)
         with m.proc_rule() as while_test:
@@ -756,7 +753,6 @@ def test_static_repeat() -> bool:
         # Step that increments
         with m.step() as incr:
             counter.next = counter.read + 1
-            incr.done(incr.const(1, 1))
 
         # Proc rule: repeat 4 times
         with m.proc_rule() as repeat_4:
@@ -815,17 +811,14 @@ def test_static_if() -> bool:
         # Step: add 1
         with m.step() as add_1:
             result.next = result.read + 1
-            add_1.done(add_1.const(1, 1))
 
         # Step: add 10
         with m.step() as add_10:
             result.next = result.read + 10
-            add_10.done(add_10.const(1, 1))
 
         # Step: increment counter
         with m.step() as incr_counter:
             counter.next = counter.read + 1
-            incr_counter.done(incr_counter.const(1, 1))
 
         # Proc rule: if condition is true, add 1; else add 10
         with m.proc_rule() as conditional:

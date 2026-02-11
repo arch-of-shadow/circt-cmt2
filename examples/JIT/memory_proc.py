@@ -116,7 +116,6 @@ def create_memory_accumulator_circuit():
             accum_reg.next = init_sum.const(0, 32)
             addr_reg.next = init_sum.const(0, 2)
             busy_reg.next = init_sum.const(1, 1)
-            init_sum.done(init_sum.const(1, 1))
 
         # Step: read_and_add
         with m.step() as read_and_add:
@@ -127,12 +126,10 @@ def create_memory_accumulator_circuit():
             accum_reg.next = new_sum
             new_addr = read_and_add.add(addr, read_and_add.const(1, 2))
             addr_reg.next = read_and_add.bits(new_addr, 1, 0)
-            read_and_add.done(read_and_add.const(1, 1))
 
         # Step: finish_sum
         with m.step() as finish_sum:
             busy_reg.next = finish_sum.const(0, 1)
-            finish_sum.done(finish_sum.const(1, 1))
 
         # =====================================================================
         # Method: start_sum() - Start the sum operation
