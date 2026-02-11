@@ -185,10 +185,17 @@ class Pipeline:
                 if stage.latency == 1:
                     timing = (i, i + 1)
 
-                # Create the task
+                # Create the task.
+                #
+                # Important: `df.task(..., tokens_out=...)` must declare the number and
+                # types of yielded tokens up front, otherwise MLIR verification fails
+                # (`dataflow.yield` operand count must match task result count).
                 tokens_in = [] if prev_token is None else [prev_token]
+                tokens_out = [] if is_last else [SyncToken(self._data_type)]
 
-                with df.task(stage.name, tokens_in=tokens_in, timing=timing) as task:
+                with df.task(
+                    stage.name, tokens_in=tokens_in, tokens_out=tokens_out, timing=timing
+                ) as task:
                     # Get input data
                     if is_first:
                         # First stage gets data from dataflow input
@@ -205,9 +212,11 @@ class Pipeline:
                         task.return_values(output_data)
                     else:
                         # Intermediate stages yield tokens
-                        # Determine output token type based on output data
-                        output_type = output_data.type
-                        prev_token = task.create_token(output_data, output_type)
+                        # Tokens between pipeline stages are declared to carry the
+                        # pipeline's `data_type`. Stage functions should return a
+                        # value compatible with that type (use bits/truncate as
+                        # needed).
+                        prev_token = task.create_token(output_data, self._data_type)
                         task.yield_tokens(prev_token)
 
 

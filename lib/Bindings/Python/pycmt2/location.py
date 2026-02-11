@@ -24,6 +24,8 @@ from __future__ import annotations
 
 import sys
 import traceback
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Optional
 
@@ -217,5 +219,38 @@ def format_location_chain(locations: list[PythonLocation], max_depth: int = 5) -
 
     if len(locations) > max_depth:
         lines.append(f"  ... ({len(locations) - max_depth} more frames)")
+
+
+# -----------------------------------------------------------------------------
+# Default elaboration location plumbing (used by cmt2.jit.elaborate)
+# -----------------------------------------------------------------------------
+
+_DEFAULT_PYTHON_LOCATION: ContextVar[PythonLocation | None] = ContextVar(
+    "pycmt2_default_python_location", default=None
+)
+
+
+@contextmanager
+def default_python_location(depth: int = 1):
+    """Temporarily set a default Python location for new IR roots.
+
+    This is intentionally lightweight: it only affects places where PyCMT2
+    would otherwise use `Location.unknown` (e.g., circuit/module containers).
+    """
+    token = _DEFAULT_PYTHON_LOCATION.set(get_python_location(depth=depth + 1))
+    try:
+        yield
+    finally:
+        _DEFAULT_PYTHON_LOCATION.reset(token)
+
+
+def get_default_mlir_location(ctx: "Context") -> "Location":
+    """Get the current default MLIR location (or unknown)."""
+    from circt.ir import Location
+
+    loc = _DEFAULT_PYTHON_LOCATION.get()
+    if loc is None:
+        return Location.unknown(context=ctx)
+    return loc.to_mlir_location(ctx)
 
     return "\n".join(lines)

@@ -242,19 +242,27 @@ class TaskBuilder(RegionBuilder):
         self,
         data: Signal | None = None,
         data_type: Cmt2Type | None = None,
-        mode: str = "ls",
+        mode: Any = "ls",
     ) -> Token:
         """Create a new token, optionally with data.
 
         Args:
             data: Optional data payload signal.
             data_type: Type of data (required if data is provided, inferred otherwise).
-            mode: Token mode - "ls" (latency sensitive) or "li" (latency insensitive).
+            mode: Token mode - LS (latency sensitive) or LI (latency insensitive).
 
         Returns:
             A Token reference for use in downstream tasks.
         """
         from circt.ir import InsertionPoint, Operation
+        from .types import LI, LS
+
+        if mode is LI or isinstance(mode, LI):  # type: ignore[arg-type]
+            mode = "li"
+        elif mode is LS or isinstance(mode, LS):  # type: ignore[arg-type]
+            mode = "ls"
+        if not isinstance(mode, str) or mode not in ("ls", "li"):
+            raise TypeError("Token mode must be LS or LI")
 
         # Determine token type
         if data is not None:
@@ -285,7 +293,7 @@ class TaskBuilder(RegionBuilder):
             token = Token(create_op.result, token_type, self.name)
             return token
 
-    def join_tokens(self, *tokens: Token, mode: str = "ls") -> Token:
+    def join_tokens(self, *tokens: Token, mode: Any = "ls") -> Token:
         """Join multiple tokens into a single synchronization token.
 
         This is useful for synchronization points where multiple
@@ -293,11 +301,20 @@ class TaskBuilder(RegionBuilder):
 
         Args:
             *tokens: Tokens to join.
-            mode: Mode for the output token.
+            mode: Mode for the output token (LS or LI).
 
         Returns:
             A new Token that is valid when all inputs are valid.
         """
+        from .types import LI, LS
+
+        if mode is LI or isinstance(mode, LI):  # type: ignore[arg-type]
+            mode = "li"
+        elif mode is LS or isinstance(mode, LS):  # type: ignore[arg-type]
+            mode = "ls"
+        if not isinstance(mode, str) or mode not in ("ls", "li"):
+            raise TypeError("Token mode must be LS or LI")
+
         from circt.ir import InsertionPoint, Operation
 
         if len(tokens) < 1:
@@ -486,20 +503,28 @@ class TaskBuilder(RegionBuilder):
         finally:
             self._block = saved_block
 
-    def enable(self, step_name: str) -> None:
-        """Enable a step by name.
+    def enable(self, step: object) -> None:
+        """Enable a step.
 
         This is used within proc control blocks to activate steps.
 
         Example:
             with task.seq():
-                task.enable("step_a")
-                task.enable("step_b")
+                task.enable(step_a.ref())
+                task.enable(step_b.ref())
 
         Args:
-            step_name: Name of the step to enable.
+            step: A `StepRef` (preferred) or a string step name.
         """
         from circt.ir import InsertionPoint, Operation, FlatSymbolRefAttr
+        from .refs import StepRef
+
+        if isinstance(step, StepRef):
+            step_name = step.name
+        elif isinstance(step, str):
+            step_name = step
+        else:
+            raise TypeError(f"enable() expects StepRef or str, got {type(step).__name__}")
 
         with InsertionPoint(self._block):
             Operation.create(

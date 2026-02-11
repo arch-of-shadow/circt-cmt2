@@ -1,0 +1,813 @@
+#!/usr/bin/env python3
+"""
+Comprehensive Cmt2 JIT Example (stacked on PyCMT2)
+=================================================
+
+Prerequisites:
+    Build CIRCT with Python bindings enabled:
+        cmake -DCIRCT_BINDINGS_PYTHON_ENABLED=ON ...
+        ninja CIRCTPythonModules
+
+    Run from repo root:
+        PYTHONPATH=build/tools/circt/python_packages/circt_core:python \\
+          python3 examples/JIT/comprehensive_example.py
+
+This example demonstrates end-to-end Cmt2 feature coverage via **JIT syntax**
+(`cmt2.jit`) while using **PyCMT2** (`circt.pycmt2`) for lowering/codegen/sim.
+
+PROCEDURAL CONTROL FLOW:
+  1. proc_rule - Multi-cycle procedural rules with FSM generation
+  2. seq - Sequential composition (execute steps one after another)
+  3. par - Parallel composition (execute branches concurrently)
+  4. while_ - Dynamic loops with runtime condition (condition function)
+  5. if_ with condition function - Conditional with runtime-dependent condition
+  6. static_repeat - Fixed iteration loops with compile-time known count
+  7. static_step - Fixed-latency operations
+  8. step (dynamic) - Variable-latency operations with done signal
+
+DATA STRUCTURES:
+  9. FIFO1Push - Single-entry FIFO for buffering
+  10. Reg - Register for state storage
+
+ATOMIC OPERATIONS:
+  11. rule - Single-cycle rules with guards
+  12. method - Action methods that can modify state
+  13. value - Read-only value methods
+
+HIERARCHICAL DESIGN:
+  14. Submodules with proc_rules - Parent triggers submodule, waits for completion
+  15. Module instantiation and method calls across hierarchy
+
+FULL PIPELINE:
+  16. CMT2 MLIR -> FIRRTL -> SystemVerilog -> RTL Simulation with Verilator
+
+Architecture:
+                    +------------------+
+    input  ------->| Input Buffer     |
+                    | (FIFO)           |
+                    +--------+---------+
+                             |
+                    +--------v---------+
+                    | Parallel Analyze | (par block)
+                    | +------+ +-----+ |
+                    | |Even/ | |Mag  | | <- MagnitudeCalc submodule
+                    | |Odd   | |Calc | |    with proc_rule
+                    | +------+ +-----+ |
+                    +--------+---------+
+                             |
+                    +--------v---------+
+                    | Conditional      | (if_ with condition function)
+                    | Router           |
+                    +--------+---------+
+                        /         \\
+               +-------v-+     +---v-----------+
+               |Fast Path|     |Slow Path      |
+               |(simple) |     |(Accumulator   | <- IterativeAccumulator
+               +---------+     | submodule)    |    with proc_rule + while_
+                        \\      +--------------+
+                    +----v-------v----+
+                    | Output Collect  |
+                    +-----------------+
+
+The example runs full end-to-end RTL simulation with Verilator, verifying
+that the generated hardware correctly processes test data.
+"""
+
+import cmt2.jit as jit
+
+import sys
+import os
+
+# Add the build directory to path for imports
+build_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+python_pkg_dir = os.path.join(build_dir, "build", "tools", "circt", "python_packages", "circt_core")
+if os.path.exists(python_pkg_dir):
+    sys.path.insert(0, python_pkg_dir)
+
+from circt.pycmt2 import Circuit, UInt, SInt
+from circt.pycmt2.stl import Reg, Wire, FIFO1Push, clear_stl_registry
+from circt.pycmt2.simulation import SimulationWorkspace
+from circt.pycmt2.testbench import Testbench
+from pathlib import Path
+import shutil
+
+# Clear any cached STL modules from previous runs
+clear_stl_registry()
+
+
+@jit.elaborate
+def create_comprehensive_example():
+    """
+    Create a comprehensive CMT2 design demonstrating all major features.
+    """
+    circuit = Circuit("ComprehensiveExample")
+
+    # =========================================================================
+    # Part 1: Create STL modules we'll use
+    # =========================================================================
+
+    # 16-bit register for state storage
+    reg16_mod = Reg.create(circuit, 16, init=0)
+
+    # 32-bit register for accumulator
+    reg32_mod = Reg.create(circuit, 32, init=0)
+
+    # 1-bit register for flags
+    reg1_mod = Reg.create(circuit, 1, init=0)
+
+    # FIFO for input buffering (16-bit data)
+    fifo_mod = FIFO1Push.create(circuit, 16)
+
+    # =========================================================================
+    # Part 2: Utility Submodule - Magnitude Calculator
+    # =========================================================================
+
+    with jit.module(circuit, "MagnitudeCalc") as mag_mod:
+        """
+        Submodule that calculates the "magnitude" (iteration count)
+        of a 16-bit value using a multi-cycle static step.
+
+        This submodule has a proc_rule that fires when start() is called,
+        demonstrating submodule proc_rule interaction with parent.
+        """
+        clk = mag_mod.clock()
+        rst = mag_mod.reset()
+
+        # Internal state
+        input_reg = mag_mod.instance(reg16_mod, clk=clk, rst=rst)
+        result_reg = mag_mod.instance(reg16_mod, clk=clk, rst=rst)
+        busy_flag = mag_mod.instance(reg1_mod, clk=clk, rst=rst)
+
+        # Static step: 2-cycle magnitude calculation
+        with mag_mod.static_step(2) as calc_magnitude:
+            """
+            Static step with 2-cycle latency.
+            Calculates iteration count for slow path based on data value.
+            """
+            val = input_reg.read
+
+            # Use lower 2 bits + 1 to get iteration count (1-4 iterations)
+            low_bits = calc_magnitude.bits(val, 1, 0)
+            magnitude = calc_magnitude.add(
+                calc_magnitude.pad(low_bits, 16), calc_magnitude.const(1, 16)
+            )
+
+            result_reg.next = magnitude
+
+        # Static step: clear busy flag
+        with mag_mod.static_step(1) as clear_busy_step:
+            busy_flag.next = clear_busy_step.const(0, 1)
+
+        @jit.method(mag_mod)
+        def start(meth, data: UInt[16]) -> None:
+            with meth.guard:
+                meth.returns(meth.eq(busy_flag.read, meth.const(0, 1)))
+            with meth.body:
+                input_reg.write(data)
+                busy_flag.write(meth.const(1, 1))
+
+        @jit.value(mag_mod)
+        def result(val) -> UInt[16]:
+            with val.guard:
+                val.always()
+            with val.body:
+                val.returns(result_reg.read)
+
+        @jit.value(mag_mod)
+        def done(val) -> UInt[1]:
+            with val.guard:
+                val.always()
+            with val.body:
+                val.returns(val.eq(busy_flag.read, val.const(0, 1)))
+
+        # Proc rule: trigger calculation when busy
+        with mag_mod.proc_rule() as run_calc:
+            """
+            This proc_rule fires when busy_flag is set by start().
+            Executes the magnitude calculation and clears busy.
+            """
+            with run_calc.guard as g:
+                is_busy = busy_flag.read
+                g.returns(is_busy)
+
+            with run_calc.control() as ctrl:
+                with ctrl.seq() as seq:
+                    seq.enable(calc_magnitude.ref())
+                    seq.enable(clear_busy_step.ref())
+
+    # =========================================================================
+    # Part 3: Accumulator Submodule with while_ loop
+    # =========================================================================
+
+    with jit.module(circuit, "IterativeAccumulator") as acc_mod:
+        """
+        Submodule that accumulates values using a while loop.
+        Demonstrates procedural control with while_.
+
+        When start() is called, it sets up iteration parameters and
+        the proc_rule fires to execute the iterative accumulation.
+        """
+        clk = acc_mod.clock()
+        rst = acc_mod.reset()
+
+        # State
+        accumulator = acc_mod.instance(reg32_mod, clk=clk, rst=rst)
+        counter = acc_mod.instance(reg16_mod, clk=clk, rst=rst)
+        target = acc_mod.instance(reg16_mod, clk=clk, rst=rst)
+        increment = acc_mod.instance(reg16_mod, clk=clk, rst=rst)
+        running = acc_mod.instance(reg1_mod, clk=clk, rst=rst)
+
+        # Static step: single accumulation iteration
+        with acc_mod.static_step(1) as accumulate_step:
+            """
+            One iteration: acc += increment, counter++
+            """
+            acc_val = accumulator.read
+            inc_val = increment.read
+            cnt_val = counter.read
+
+            # Accumulate
+            inc_extended = accumulate_step.pad(inc_val, 32)
+            new_acc = accumulate_step.add(acc_val, inc_extended)
+            accumulator.next = new_acc
+
+            # Increment counter
+            new_cnt = accumulate_step.add(cnt_val, accumulate_step.const(1, 16))
+            counter.next = accumulate_step.bits(new_cnt, 15, 0)
+
+        # Static step: clear running flag
+        with acc_mod.static_step(1) as clear_running:
+            running.next = clear_running.const(0, 1)
+
+        # Proc rule: iterative accumulation with while loop
+        with acc_mod.proc_rule() as run_accumulation:
+            """
+            Procedural rule using while loop for iterative computation.
+            Demonstrates: while_ with condition function, enable, seq
+            """
+            with run_accumulation.guard as g:
+                is_running = running.read
+                g.returns(is_running)
+
+            with run_accumulation.control() as ctrl:
+                with ctrl.seq() as seq:
+                    # While counter < target (using condition function)
+                    def loop_condition(b):
+                        cnt = b.call(counter.instance, counter.instance.read)
+                        tgt = b.call(target.instance, target.instance.read)
+                        return b.lt(cnt, tgt)
+
+                    with seq.while_(loop_condition) as loop:
+                        loop.enable(accumulate_step.ref())
+
+                    # Clear running after loop completes
+                    seq.enable(clear_running.ref())
+
+        @jit.method(acc_mod)
+        def start(meth, iterations: UInt[16], inc_value: UInt[16]) -> None:
+            with meth.guard:
+                meth.returns(meth.eq(running.read, meth.const(0, 1)))
+            with meth.body:
+                accumulator.write(meth.const(0, 32))
+                counter.write(meth.const(0, 16))
+                target.write(iterations)
+                increment.write(inc_value)
+                running.write(meth.const(1, 1))
+
+        @jit.value(acc_mod)
+        def result(val) -> UInt[32]:
+            with val.guard:
+                val.always()
+            with val.body:
+                val.returns(accumulator.read)
+
+        @jit.value(acc_mod)
+        def done(val) -> UInt[1]:
+            with val.guard:
+                val.always()
+            with val.body:
+                val.returns(val.eq(running.read, val.const(0, 1)))
+
+    # =========================================================================
+    # Part 4: Main Processing Module with All Features
+    # =========================================================================
+
+    with jit.module(circuit, "DataProcessor") as main_mod:
+        """
+        Main processing module demonstrating ALL features:
+        - FIFO buffering
+        - Parallel processing (par)
+        - if_ with condition function (ProcCondIfOp)
+        - Submodule instantiation and proc_rule triggering
+        - Static repeat
+        - while_ loops
+        """
+        clk = main_mod.clock()
+        rst = main_mod.reset()
+
+        # ---------------------------------------------------------------------
+        # Instantiate components
+        # ---------------------------------------------------------------------
+
+        # Input FIFO for buffering
+        input_fifo = main_mod.instance(fifo_mod, clk=clk, rst=rst)
+
+        # Processing registers
+        even_flag = main_mod.instance(reg1_mod, clk=clk, rst=rst)
+        magnitude_reg = main_mod.instance(reg16_mod, clk=clk, rst=rst)
+
+        # Result storage
+        result_reg = main_mod.instance(reg32_mod, clk=clk, rst=rst)
+        valid_reg = main_mod.instance(reg1_mod, clk=clk, rst=rst)
+
+        # Submodule instances - THESE WILL ACTUALLY BE USED
+        mag_calc = main_mod.instance(mag_mod, clk=clk, rst=rst)
+        accumulator = main_mod.instance(acc_mod, clk=clk, rst=rst)
+
+        # State for pipeline control
+        pipeline_stage = main_mod.instance(reg16_mod, clk=clk, rst=rst)
+        current_data = main_mod.instance(reg16_mod, clk=clk, rst=rst)
+
+        # ---------------------------------------------------------------------
+        # Method: Enqueue data to FIFO
+        # ---------------------------------------------------------------------
+
+        @jit.method(main_mod)
+        def enqueue(meth, data: UInt[16]) -> None:
+            with meth.guard:
+                meth.always()
+            with meth.body:
+                input_fifo.enq(data)
+
+        # ---------------------------------------------------------------------
+        # Step definitions
+        # ---------------------------------------------------------------------
+
+        # Dequeue from FIFO
+        with main_mod.static_step(1) as dequeue_and_start:
+            data = input_fifo.deq()
+            current_data.next = data
+            valid_reg.next = dequeue_and_start.const(0, 1)
+            pipeline_stage.next = dequeue_and_start.const(1, 16)
+
+        # Check even/odd
+        with main_mod.static_step(1) as check_even_odd:
+            data = current_data.read
+            is_even = check_even_odd.eq(check_even_odd.bit(data, 0), check_even_odd.const(0, 1))
+            even_flag.next = is_even
+
+        # Start magnitude calculation submodule
+        with main_mod.static_step(1) as start_mag_calc:
+            data = current_data.read
+            mag_calc.start(data)
+
+        # Wait step (no-op, for while loops)
+        with main_mod.static_step(1) as wait_step:
+            pass
+
+        # Inline magnitude calculation: magnitude = (data & 3) + 1
+        with main_mod.static_step(1) as calc_magnitude_inline:
+            data = current_data.read
+            low_bits = calc_magnitude_inline.bits(data, 1, 0)  # data & 3
+            low_bits_ext = calc_magnitude_inline.pad(low_bits, 16)
+            magnitude = calc_magnitude_inline.add(
+                low_bits_ext, calc_magnitude_inline.const(1, 16)
+            )  # + 1
+            magnitude_reg.next = magnitude
+
+        # Move to stage 2
+        with main_mod.static_step(1) as move_to_stage2:
+            pipeline_stage.next = move_to_stage2.const(2, 16)
+
+        # Fast path: result = data * 2
+        with main_mod.static_step(1) as fast_path_compute:
+            data = current_data.read
+            data_ext = fast_path_compute.pad(data, 32)
+            doubled = fast_path_compute.add(data_ext, data_ext)
+            result_reg.next = doubled
+            pipeline_stage.next = fast_path_compute.const(5, 16)
+
+        # Slow path: initialize result to 0
+        with main_mod.static_step(1) as slow_path_init:
+            result_reg.next = slow_path_init.const(0, 32)
+
+        # Slow path: single accumulation iteration (result += data)
+        with main_mod.static_step(1) as slow_path_accumulate:
+            result = result_reg.read
+            data = current_data.read
+            data_ext = slow_path_accumulate.pad(data, 32)
+            new_result = slow_path_accumulate.add(result, data_ext)
+            result_reg.next = new_result
+
+        # Slow path: move to done stage after accumulation
+        with main_mod.static_step(1) as slow_path_done:
+            pipeline_stage.next = slow_path_done.const(5, 16)
+
+        # Conditional bonus: add 100 if result >= 500 (demonstrates if_ with condition function)
+        with main_mod.static_step(1) as apply_bonus:
+            result = result_reg.read
+            bonus_amount = apply_bonus.const(100, 32)
+            new_result = apply_bonus.add(result, bonus_amount)
+            result_reg.next = new_result
+
+        # Finalize result
+        with main_mod.static_step(1) as finalize_result:
+            valid_reg.next = finalize_result.const(1, 1)
+            pipeline_stage.next = finalize_result.const(0, 16)
+
+        # ---------------------------------------------------------------------
+        # Pipeline Rules - Using ALL control flow features
+        # ---------------------------------------------------------------------
+
+        # Rule 1: Dequeue from FIFO (stage 0 -> 1)
+        with main_mod.proc_rule() as stage0_dequeue:
+            with stage0_dequeue.guard as g:
+                stage = pipeline_stage.read
+                is_idle = g.eq(stage, g.const(0, 16))
+                g.returns(is_idle)
+
+            with stage0_dequeue.control() as ctrl:
+                ctrl.enable(dequeue_and_start.ref())
+
+        # Rule 2: Analysis (stage 1)
+        # Demonstrates: par block for parallel execution
+        with main_mod.proc_rule() as stage1_analysis:
+            """
+            Analysis of data using parallel execution:
+            1. Check even/odd flag  |  (parallel)
+               Calculate magnitude  |
+            2. Move to stage 2 (after both complete)
+
+            Demonstrates: par block - check_even_odd and calc_magnitude_inline
+            run in parallel since they both read current_data but write to
+            different registers.
+            """
+            with stage1_analysis.guard as g:
+                stage = pipeline_stage.read
+                is_stage1 = g.eq(stage, g.const(1, 16))
+                g.returns(is_stage1)
+
+            with stage1_analysis.control() as ctrl:
+                with ctrl.seq() as seq:
+                    # Par block: both steps read current_data, write to different regs
+                    with seq.par() as p:
+                        p.enable(check_even_odd.ref())
+                        p.enable(calc_magnitude_inline.ref())
+                    # After parallel steps complete, move to next stage
+                    seq.enable(move_to_stage2.ref())
+
+        # Rule 3a: Fast path for even numbers (stage 2)
+        # Uses mutually exclusive guard with stage2_odd_slow
+        with main_mod.proc_rule() as stage2_even_fast:
+            """
+            Fast path for even numbers using mutually exclusive guards.
+            """
+            with stage2_even_fast.guard as g:
+                stage = pipeline_stage.read
+                is_stage2 = g.eq(stage, g.const(2, 16))
+                is_even = even_flag.read
+                cond = g.and_(is_stage2, is_even)
+                g.returns(cond)
+
+            with stage2_even_fast.control() as ctrl:
+                ctrl.enable(fast_path_compute.ref())
+
+        # Rule 3b: Slow path for odd numbers (stage 2)
+        # Demonstrates: static_repeat
+        with main_mod.proc_rule() as stage2_odd_slow:
+            """
+            Slow path for odd numbers using static_repeat.
+            Demonstrates: nested seq and static_repeat(4)
+            """
+            with stage2_odd_slow.guard as g:
+                stage = pipeline_stage.read
+                is_stage2 = g.eq(stage, g.const(2, 16))
+                is_even = even_flag.read
+                is_odd = g.eq(is_even, g.const(0, 1))
+                cond = g.and_(is_stage2, is_odd)
+                g.returns(cond)
+
+            with stage2_odd_slow.control() as ctrl:
+                with ctrl.seq() as seq:
+                    seq.enable(slow_path_init.ref())
+                    with seq.static_repeat(4) as loop:
+                        loop.enable(slow_path_accumulate.ref())
+                    seq.enable(slow_path_done.ref())
+
+        # Rule 5: Finalize (stage 5)
+        # Demonstrates: if_ with condition function (ProcCondIfOp)
+        with main_mod.proc_rule() as stage5_finalize:
+            """
+            Finalization with conditional bonus using if_ with condition function.
+            Demonstrates: ProcCondIfOp - dynamic condition evaluated each cycle.
+            If result >= 500, add bonus of 100 before finalizing.
+            """
+            with stage5_finalize.guard as g:
+                stage = pipeline_stage.read
+                is_done = g.eq(stage, g.const(5, 16))
+                g.returns(is_done)
+
+            with stage5_finalize.control() as ctrl:
+                with ctrl.seq() as seq:
+                    # Condition function: evaluate result >= 500 dynamically
+                    def check_large_result(b):
+                        result = b.call(result_reg.instance, result_reg.instance.read)
+                        threshold = b.const(500, 32)
+                        return b.ge(result, threshold)  # greater or equal
+
+                    # if_ with condition function (creates ProcCondIfOp)
+                    with seq.if_(check_large_result) as if_:
+                        with if_.then_() as then_builder:
+                            then_builder.enable(apply_bonus.ref())
+
+                    # Always finalize
+                    seq.enable(finalize_result.ref())
+
+        # ---------------------------------------------------------------------
+        # Value methods for external access
+        # ---------------------------------------------------------------------
+
+        @jit.value(main_mod)
+        def get_result(val) -> UInt[32]:
+            with val.guard:
+                val.always()
+            with val.body:
+                val.returns(result_reg.read)
+
+        @jit.value(main_mod)
+        def is_valid(val) -> UInt[1]:
+            with val.guard:
+                val.always()
+            with val.body:
+                val.returns(valid_reg.read)
+
+        @jit.value(main_mod)
+        def is_busy(val) -> UInt[1]:
+            with val.guard:
+                val.always()
+            with val.body:
+                val.returns(val.neq(pipeline_stage.read, val.const(0, 16)))
+
+        @jit.method(main_mod)
+        def acknowledge(meth) -> None:
+            with meth.guard:
+                meth.returns(valid_reg.read)
+            with meth.body:
+                valid_reg.write(meth.const(0, 1))
+
+    return circuit
+
+
+def create_comprehensive_testbench(circuit):
+    """Create testbench using DSL for comprehensive example."""
+    tb = Testbench(circuit, auto_debug_ports=True)
+
+    # Test cases: (data, is_even, expected_result)
+    # Even: fast_path = data * 2
+    # Odd: slow_path = data * 4 (static_repeat(4))
+    # Bonus: if result >= 500, add 100
+    test_cases = [
+        (4, True, 8),       # even: 4 * 2 = 8
+        (7, False, 28),     # odd: 7 * 4 = 28 (static_repeat(4))
+        (100, True, 200),   # even: 100 * 2 = 200
+        (255, False, 1120), # odd: 255 * 4 = 1020 + 100 bonus = 1120
+        (2, True, 4),       # even: 2 * 2 = 4
+        (9, False, 36),     # odd: 9 * 4 = 36 (static_repeat(4))
+    ]
+
+    # =========================================================================
+    # Test Sequence: Reset Test
+    # =========================================================================
+    with tb.sequence("test_reset") as seq:
+        seq.comment("Test: Verify reset behavior")
+        seq.reset(5)
+        seq.wait(2)
+        seq.expect("is_busy_res0", 0, "Should not be busy after reset")
+        seq.expect("is_valid_res0", 0, "Should not be valid after reset")
+        seq.print("Reset test passed")
+
+    # =========================================================================
+    # Test Sequences: Data Processing Tests
+    # =========================================================================
+    for i, (data, is_even, expected) in enumerate(test_cases):
+        path_name = "EVEN" if is_even else "ODD"
+        with tb.sequence(f"test_data_{i+1}") as seq:
+            seq.comment(f"Test {path_name} value: {data}, expected result: {expected}")
+            seq.reset(5)
+
+            # Wait for enqueue to be ready
+            seq.comment("Enqueue data to FIFO")
+            seq.wait_condition("dut->enqueue_ready", timeout=20)
+            seq.drive("enqueue_data", data)
+            seq.drive("enqueue_enable", 1)
+            seq.wait(1)
+            seq.drive("enqueue_enable", 0)
+
+            # Wait for processing to complete
+            seq.comment("Wait for processing to complete")
+            seq.record_cycle(f"proc_start_{i}")
+            seq.wait_condition("dut->is_valid_res0", timeout=200)
+            seq.record_cycle(f"proc_end_{i}")
+
+            # Verify result
+            seq.expect("get_result_res0", expected, f"Data {data} should produce {expected}")
+            seq.print_cycle_diff(f"proc_start_{i}", f"proc_end_{i}", f"{path_name} path processing time")
+            seq.print(f"Test {i+1} result: ", "get_result_res0")
+
+            # Acknowledge result
+            seq.wait_condition("dut->acknowledge_ready", timeout=10)
+            seq.drive("acknowledge_enable", 1)
+            seq.wait(1)
+            seq.drive("acknowledge_enable", 0)
+            seq.wait(2)
+
+    # =========================================================================
+    # Test Sequence: Debug Port Verification
+    # =========================================================================
+    with tb.sequence("test_debug_ports") as seq:
+        seq.comment("=" * 60)
+        seq.comment("Debug Port Verification Test")
+        seq.comment("=" * 60)
+        seq.reset(5)
+
+        # Process an even number (fast path)
+        seq.comment("Process even number to verify stage debug ports")
+        seq.wait_condition("dut->enqueue_ready", timeout=20)
+        seq.drive("enqueue_data", 10)  # even: 10 * 2 = 20
+        seq.drive("enqueue_enable", 1)
+        seq.wait(1)
+        seq.drive("enqueue_enable", 0)
+
+        # Monitor debug ports during processing
+        seq.wait(2)
+        seq.print_rule_status("stage0_dequeue_state0")
+        seq.wait(3)
+        seq.print_rule_status("stage1_analysis_state0")
+        seq.wait(3)
+        seq.print_rule_status("stage2_even_fast_state0")
+
+        # Wait for completion
+        seq.wait_condition("dut->is_valid_res0", timeout=100)
+        seq.expect("get_result_res0", 20, "10*2=20 for even path")
+
+        # Acknowledge
+        seq.wait_condition("dut->acknowledge_ready", timeout=10)
+        seq.drive("acknowledge_enable", 1)
+        seq.wait(1)
+        seq.drive("acknowledge_enable", 0)
+        seq.wait(2)
+
+        # Process an odd number (slow path)
+        seq.comment("Process odd number to verify slow path debug ports")
+        seq.wait_condition("dut->enqueue_ready", timeout=20)
+        seq.drive("enqueue_data", 5)  # odd: 5 * 4 = 20
+        seq.drive("enqueue_enable", 1)
+        seq.wait(1)
+        seq.drive("enqueue_enable", 0)
+
+        seq.wait(5)
+        seq.print_rule_status("stage2_odd_slow_state0")
+
+        seq.wait_condition("dut->is_valid_res0", timeout=100)
+        seq.expect("get_result_res0", 20, "5*4=20 for odd path")
+
+        seq.print("Debug port verification PASSED")
+
+    # =========================================================================
+    # Test Sequence: Timing Comparison (Even vs Odd path)
+    # =========================================================================
+    with tb.sequence("test_timing_comparison") as seq:
+        seq.comment("=" * 60)
+        seq.comment("Timing Comparison: Even (fast) vs Odd (slow) paths")
+        seq.comment("=" * 60)
+
+        # Test even path timing
+        seq.reset(5)
+        seq.comment("--- Even path timing ---")
+        seq.wait_condition("dut->enqueue_ready", timeout=20)
+        seq.drive("enqueue_data", 6)  # even
+        seq.drive("enqueue_enable", 1)
+        seq.wait(1)
+        seq.drive("enqueue_enable", 0)
+
+        seq.record_cycle("even_start")
+        seq.wait_condition("dut->is_valid_res0", timeout=100)
+        seq.record_cycle("even_end")
+        seq.print_cycle_diff("even_start", "even_end", "Even path cycles")
+
+        # Acknowledge
+        seq.wait_condition("dut->acknowledge_ready", timeout=10)
+        seq.drive("acknowledge_enable", 1)
+        seq.wait(1)
+        seq.drive("acknowledge_enable", 0)
+        seq.wait(5)
+
+        # Test odd path timing
+        seq.comment("--- Odd path timing ---")
+        seq.wait_condition("dut->enqueue_ready", timeout=20)
+        seq.drive("enqueue_data", 7)  # odd
+        seq.drive("enqueue_enable", 1)
+        seq.wait(1)
+        seq.drive("enqueue_enable", 0)
+
+        seq.record_cycle("odd_start")
+        seq.wait_condition("dut->is_valid_res0", timeout=100)
+        seq.record_cycle("odd_end")
+        seq.print_cycle_diff("odd_start", "odd_end", "Odd path cycles")
+
+        seq.print("Timing comparison completed - odd path should take longer")
+
+    return tb
+
+
+def main():
+    """
+    Main entry point: create circuit and run E2E simulation.
+    """
+    print("=" * 70)
+    print("Comprehensive JIT Example (stacked on PyCMT2) - Using Testbench DSL")
+    print("=" * 70)
+    print()
+
+    # Create the comprehensive example
+    circuit = create_comprehensive_example()
+
+    # Emit CMT2 MLIR
+    print("Generating CMT2 MLIR...")
+    mlir = circuit.emit_mlir()
+
+    print()
+    print("-" * 70)
+    print("CMT2 MLIR Output (first 3000 chars):")
+    print("-" * 70)
+    print(mlir[:3000])
+    if len(mlir) > 3000:
+        print(f"... ({len(mlir) - 3000} more characters)")
+
+    # =========================================================================
+    # RTL Simulation
+    # =========================================================================
+
+    print()
+    print("-" * 70)
+    print("Setting up RTL simulation with Testbench DSL...")
+    print("-" * 70)
+
+    # Setup simulation directory
+    script_dir = Path(__file__).parent
+    sim_dir = script_dir / "comprehensive_sim"
+
+    # Clean previous simulation
+    if sim_dir.exists():
+        shutil.rmtree(sim_dir)
+
+    # Create testbench using DSL
+    print("Creating testbench using Testbench DSL...")
+    tb = create_comprehensive_testbench(circuit)
+    print(f"   Test sequences: {len(tb._sequences)}")
+    for seq in tb._sequences:
+        print(f"      - {seq.name}: {len(seq._ops)} operations")
+
+    # Create simulation workspace with debug ports enabled
+    ws = SimulationWorkspace(circuit, sim_dir, debug_ports=True)
+
+    # Generate workspace with testbench
+    print(f"Generating workspace at: {sim_dir}")
+    ws.generate_with_testbench(tb)
+
+    # Build simulation
+    print()
+    print("-" * 70)
+    print("Building simulation...")
+    print("-" * 70)
+
+    if not ws.build():
+        print("Build failed!")
+        return 1
+
+    print("Build successful!")
+
+    # Run simulation
+    print()
+    print("-" * 70)
+    print("Running simulation...")
+    print("-" * 70)
+
+    success, output = ws.run()
+    print(output)
+
+    if not success:
+        print("Simulation failed!")
+        return 1
+
+    print()
+    print("=" * 70)
+    print("Example completed successfully!")
+    print(f"Waveforms available at: {sim_dir / 'waves' / 'DataProcessor.vcd'}")
+    print("=" * 70)
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

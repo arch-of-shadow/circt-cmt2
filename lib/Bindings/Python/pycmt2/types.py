@@ -35,6 +35,10 @@ class UInt(Cmt2Type):
 
     width: int
 
+    @classmethod
+    def __class_getitem__(cls, width: int) -> "UInt":
+        return cls(int(width))
+
     def __post_init__(self):
         if self.width <= 0:
             raise ValueError(f"Width must be positive, got {self.width}")
@@ -55,6 +59,10 @@ class SInt(Cmt2Type):
     """Signed integer type with static width."""
 
     width: int
+
+    @classmethod
+    def __class_getitem__(cls, width: int) -> "SInt":
+        return cls(int(width))
 
     def __post_init__(self):
         if self.width <= 0:
@@ -151,6 +159,15 @@ class Vector(Cmt2Type):
     element: Cmt2Type
     size: int
 
+    @classmethod
+    def __class_getitem__(cls, params) -> "Vector":
+        if not isinstance(params, tuple) or len(params) != 2:
+            raise TypeError("Vector[...] expects (element_type, size)")
+        element, size = params
+        if not isinstance(element, Cmt2Type):
+            raise TypeError(f"Vector element must be a Cmt2Type, got {type(element)}")
+        return cls(element, int(size))
+
     def __post_init__(self):
         if self.size <= 0:
             raise ValueError(f"Size must be positive, got {self.size}")
@@ -192,6 +209,46 @@ class SyncToken(Cmt2Type):
 
     data_type: Cmt2Type | None = None
     mode: str = "ls"  # "ls" or "li"
+
+    @classmethod
+    def __class_getitem__(cls, params) -> "SyncToken":
+        # Typing-friendly shorthand:
+        # - SyncToken[UInt[32]]          -> SyncToken(UInt(32))
+        # - SyncToken[UInt[32], LI]      -> SyncToken(UInt(32), mode="li")
+        # - SyncToken[None]             -> SyncToken()
+        if params is None or params is type(None):  # noqa: E721 (intentional)
+            return cls()
+
+        if isinstance(params, tuple):
+            if len(params) != 2:
+                raise TypeError("SyncToken[...] expects 1 or 2 parameters")
+            data_type, mode = params
+        else:
+            data_type, mode = params, None
+
+        if data_type is None or data_type is type(None):  # noqa: E721 (intentional)
+            data = None
+        elif isinstance(data_type, Cmt2Type):
+            data = data_type
+        else:
+            raise TypeError(f"SyncToken data type must be a Cmt2Type, got {type(data_type)}")
+
+        if mode is None:
+            return cls(data)
+
+        mode_name = getattr(mode, "name", None)
+        if mode_name is None:
+            # Accept marker classes/instances with a `.name` (see LI/LS below).
+            if mode is LI or isinstance(mode, LI):  # type: ignore[arg-type]
+                mode_name = "li"
+            elif mode is LS or isinstance(mode, LS):  # type: ignore[arg-type]
+                mode_name = "ls"
+            else:
+                raise TypeError("SyncToken mode must be LS or LI")
+
+        if mode_name not in ("ls", "li"):
+            raise TypeError("SyncToken mode must be LS or LI")
+        return cls(data, mode=mode_name)
 
     def __post_init__(self):
         if self.mode not in ("ls", "li"):
@@ -246,6 +303,14 @@ Clock = ClockType()
 Reset = ResetType()
 AsyncReset = AsyncResetType()
 Bool = UInt(1)
+
+
+class LS:
+    name = "ls"
+
+
+class LI:
+    name = "li"
 
 
 def bundle(**fields: Cmt2Type | tuple[Cmt2Type, bool]) -> Bundle:

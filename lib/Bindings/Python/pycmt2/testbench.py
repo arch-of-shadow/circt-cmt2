@@ -85,6 +85,18 @@ class WaitOp(TestOp):
 
 
 @dataclass
+class EvalOp(TestOp):
+    """Evaluate combinational logic without advancing time."""
+
+    def to_cpp(self) -> str:
+        return "dut->eval();"
+
+    def to_python(self) -> str:
+        # Best-effort placeholder (this backend is currently not used in-tree).
+        return "# eval()"
+
+
+@dataclass
 class DriveOp(TestOp):
     """Drive a value to an input port."""
     port: str
@@ -190,10 +202,18 @@ class PrintOp(TestOp):
     values: tuple[str, ...] = ()
 
     def to_cpp(self) -> str:
-        if self.values:
-            format_args = ", ".join(f"dut->{v}" for v in self.values)
-            return f'std::cout << "{self.message}: " << {format_args} << std::endl;'
-        return f'std::cout << "{self.message}" << std::endl;'
+        if not self.values:
+            return f'std::cout << "{self.message}" << std::endl;'
+
+        # Cast to uint64_t so that small integer types (e.g. uint8_t) print as
+        # numbers rather than characters.
+        pieces = [f'std::cout << "{self.message}: "']
+        for i, v in enumerate(self.values):
+            if i != 0:
+                pieces.append(' << " "')
+            pieces.append(f" << (uint64_t)dut->{v}")
+        pieces.append(" << std::endl;")
+        return "".join(pieces)
 
     def to_python(self) -> str:
         if self.values:
@@ -333,6 +353,11 @@ class TestSequence:
         self._ops.append(WaitOp(cycles))
         return self
 
+    def eval(self) -> TestSequence:
+        """Evaluate combinational logic without a clock edge."""
+        self._ops.append(EvalOp())
+        return self
+
     def drive(self, port: str, value: int | str) -> TestSequence:
         """Drive a value to an input port.
 
@@ -379,6 +404,87 @@ class TestSequence:
             self for chaining.
         """
         self._ops.append(CallMethodOp(instance, method, args))
+        return self
+
+    def call_interface(
+        self,
+        interface_decl: Any,
+        func: Any,
+        *args: Any,
+        ready: int | str = 1,
+        results: tuple[int | str, ...] | None = None,
+        timeout: int = 1000,
+        advance_cycle: bool = True,
+    ) -> TestSequence:
+        """Expect an *outgoing* interface call from the DUT this cycle.
+
+        InterfaceDecl ports are oriented as:
+          - args/enable: Out (driven by DUT)
+          - results/ready: In (driven by testbench)
+
+        This helper drives `ready` (+ optional `results`), waits for `enable`
+        (methods only), then checks the outgoing args.
+        """
+        decl = getattr(interface_decl, "_decl", interface_decl)
+        decl_name = getattr(decl, "name", None) or getattr(decl, "_name", None)
+        iface = getattr(decl, "interface", None)
+        if not isinstance(decl_name, str) or iface is None:
+            raise TypeError("call_interface expects an InterfaceDecl/InterfaceRef")
+
+        # Apply optional custom prefix used by lowering.
+        prefix = f"{decl_name}_"
+        op = getattr(decl, "_op", None)
+        attrs = getattr(op, "attributes", None)
+        if attrs is not None:
+            try:
+                prefix_attr = attrs["prefix"]
+            except Exception:
+                prefix_attr = None
+            if prefix_attr is not None:
+                prefix = prefix_attr.value
+
+        func_name = (
+            getattr(func, "name", None)
+            or getattr(func, "__name__", None)
+            or func
+        )
+        if not isinstance(func_name, str):
+            raise TypeError("call_interface expects `func` to be str-like or function-like")
+
+        fn = iface.get_function(func_name)
+        if fn is None:
+            raise KeyError(f"Interface '{iface.name}' has no function '{func_name}'")
+
+        fn_prefix = f"{prefix}{func_name}_"
+
+        # Ready is always an input port.
+        self.drive(f"{fn_prefix}ready", ready)
+
+        # Results are input ports (optional; used by value or returned methods).
+        if results is not None:
+            for i, v in enumerate(results):
+                self.drive(f"{fn_prefix}res{i}", v)
+
+        # Ensure combinational outputs reflect the new drives before we sample them.
+        self.eval()
+
+        # Methods have an enable output we can wait for.
+        if func_name in getattr(iface, "_methods", {}):
+            self.wait_condition(f"dut->{fn_prefix}enable", timeout=timeout)
+
+        # Check outgoing args.
+        arg_types = getattr(fn, "_arg_types", [])
+        if arg_types and isinstance(arg_types[0], tuple):
+            arg_names = [n for n, _ in arg_types]
+        else:
+            arg_names = [f"arg{i}" for i in range(len(args))]
+
+        for name, val in zip(arg_names, args):
+            self.expect(f"{fn_prefix}{name}", val)
+
+        if advance_cycle:
+            self.wait(1)
+
         return self
 
     def wait_ready(self, instance: str, method: str) -> TestSequence:
@@ -612,8 +718,8 @@ class Testbench:
         if module_name:
             module = self.circuit._modules.get(module_name)
         elif self.circuit._modules:
-            # Get first (top) module
-            module = next(iter(self.circuit._modules.values()))
+            # Match SimulationWorkspace: last defined module is the user's top.
+            module = list(self.circuit._modules.values())[-1]
         else:
             return []
 
@@ -722,8 +828,35 @@ class Testbench:
     def _get_top_module_name(self) -> str:
         """Get the top-level module name from the circuit."""
         if self.circuit._modules:
-            return next(iter(self.circuit._modules.keys()))
+            # Match SimulationWorkspace: last defined module is the user's top.
+            return list(self.circuit._modules.keys())[-1]
         return self.circuit.name
+
+    def interface_decl(self, decl_or_name: Any, module_name: str | None = None) -> Any:
+        """Get an InterfaceDecl for `seq.call_interface(...)`.
+
+        Preferred usage is to pass the typed `InterfaceDecl` object produced
+        during elaboration (no string lookup).
+
+        For convenience/backward-compatibility, this also accepts a string name
+        and looks it up on the target module (default: top module).
+        """
+        # Fast-path: already an InterfaceDecl-like object.
+        if not isinstance(decl_or_name, str):
+            return decl_or_name
+
+        name = decl_or_name
+        if not self.circuit._modules:
+            raise KeyError("Circuit has no modules")
+
+        target_module_name = module_name or self._get_top_module_name()
+        module = self.circuit._modules.get(target_module_name)
+        if module is None:
+            raise KeyError(f"No module named '{target_module_name}'")
+        decls = getattr(module, "_interface_decls", {})
+        if name not in decls:
+            raise KeyError(f"Module '{target_module_name}' has no interface decl '{name}'")
+        return decls[name]
 
     def __repr__(self) -> str:
         return f"Testbench({self.circuit.name!r}, sequences={len(self._sequences)})"
