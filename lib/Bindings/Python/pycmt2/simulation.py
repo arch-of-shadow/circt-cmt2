@@ -804,10 +804,14 @@ static uint64_t sim_time;
 void tick() {{
     dut->clk = 0;
     dut->eval();
+#if VM_TRACE
     if (tfp) tfp->dump(sim_time++);
+#endif
     dut->clk = 1;
     dut->eval();
+#if VM_TRACE
     if (tfp) tfp->dump(sim_time++);
+#endif
     cycle++;
     cycle_count++;
 }}
