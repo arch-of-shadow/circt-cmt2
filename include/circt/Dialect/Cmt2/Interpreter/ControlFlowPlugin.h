@@ -77,9 +77,8 @@ public:
 /// Plugin for dynamic control (proc.step, proc.while, proc.if).
 ///
 /// Handles:
-/// - ProcStepOp: Execute step body, check done condition
+/// - ProcStepOp: Execute step body (single-fire)
 /// - ProcEnableOp: Enable a step for execution
-/// - ProcStepDoneOp: Signal step completion
 ///
 class DynamicControlPlugin : public ControlFlowPlugin {
 public:
@@ -92,31 +91,24 @@ public:
   void commit() override;
   void reset() override;
 
-  //===--------------------------------------------------------------------===//
-  // Step Management
-  //===--------------------------------------------------------------------===//
-
-  /// Check if a step is done (completed this cycle).
-  bool isStepDone(llvm::StringRef stepName) const;
-
-  /// Mark a step as done for this cycle.
-  void markStepDone(llvm::StringRef stepName);
-
-  /// Clear step done status (called at cycle start).
-  void clearStepsDone();
+  /// Set the operation handler registry for dispatch.
+  void setRegistry(OpHandlerRegistry *registry) { registry_ = registry; }
 
 private:
   /// Execute a proc.step body.
   bool executeStep(ProcStepOp step, OpContext &ctx);
 
+  /// Execute operations in a region using the registry.
+  bool executeRegionOps(mlir::Region &region, OpContext &ctx);
+
   /// State manager reference.
   StateManager *state_ = nullptr;
 
+  /// Operation handler registry for dispatching ops.
+  OpHandlerRegistry *registry_ = nullptr;
+
   /// Step definitions keyed by name.
   llvm::StringMap<ProcStepOp> steps_;
-
-  /// Steps marked as done this cycle.
-  llvm::StringSet<> stepsDone_;
 };
 
 //===----------------------------------------------------------------------===//
@@ -191,12 +183,21 @@ public:
   /// Check if a static step is done.
   bool isStepDone(llvm::StringRef stepName) const;
 
+  /// Set the operation handler registry for dispatch.
+  void setRegistry(OpHandlerRegistry *registry) { registry_ = registry; }
+
 private:
   /// Register static steps with their latencies.
   void registerStaticSteps(cmt2::ModuleOp module);
 
+  /// Execute operations in a region using the registry.
+  bool executeRegionOps(mlir::Region &region, OpContext &ctx);
+
   /// State manager reference.
   StateManager *state_ = nullptr;
+
+  /// Operation handler registry for dispatching ops.
+  OpHandlerRegistry *registry_ = nullptr;
 
   /// Static step definitions keyed by name.
   llvm::StringMap<ProcStaticStepOp> staticSteps_;
@@ -206,6 +207,9 @@ private:
 
   /// Static repeat definitions keyed by enclosing step.
   llvm::StringMap<ProcStaticRepeatOp> staticRepeats_;
+
+  /// Iteration counter for static repeats (keyed by operation address).
+  llvm::DenseMap<mlir::Operation *, unsigned> repeatIterations_;
 
   /// Whether to validate timing at runtime.
   bool validateTiming_ = true;

@@ -117,7 +117,6 @@ builtin.module {
                 %cnt = cmt2.call @counter @read() : () -> !firrtl.uint<32>
                 %lim = cmt2.call @limit @read() : () -> !firrtl.uint<32>
                 %lt = firrtl.lt %cnt, %lim : (!firrtl.uint<32>, !firrtl.uint<32>) -> !firrtl.uint<1>
-                cmt2.proc.step_done %lt : !firrtl.uint<1>
             }
 
             // Dynamic step to compute loop condition
@@ -125,7 +124,6 @@ builtin.module {
                 %cnt = cmt2.call @counter @read() : () -> !firrtl.uint<32>
                 %lim = cmt2.call @limit @read() : () -> !firrtl.uint<32>
                 %lt = firrtl.lt %cnt, %lim : (!firrtl.uint<32>, !firrtl.uint<32>) -> !firrtl.uint<1>
-                cmt2.proc.step_done %lt : !firrtl.uint<1>
             }
 
             // Main control: while (counter < limit) { static seq { A; B; C; } }
@@ -173,7 +171,6 @@ builtin.module {
                 %extended = firrtl.pad %lt, 32 : (!firrtl.uint<1>) -> !firrtl.uint<32>
                 cmt2.call @cond_reg @write(%extended) : (!firrtl.uint<32>) -> ()
                 %done = firrtl.constant 1 : !firrtl.uint<1>
-                cmt2.proc.step_done %done : !firrtl.uint<1>
             }
 
             // Static step: Multiply by 2 (1 cycle)

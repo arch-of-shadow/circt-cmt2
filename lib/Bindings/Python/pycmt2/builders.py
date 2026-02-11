@@ -218,17 +218,27 @@ class RegionBuilder:
 
     def shl(self, a: Signal, amount: Signal | int) -> Signal:
         """Left shift."""
-        from circt.ir import InsertionPoint
+        from circt.ir import InsertionPoint, IntegerAttr, IntegerType, Operation
         from circt.dialects import firrtl
 
         with InsertionPoint(self._block):
             if isinstance(amount, int):
-                shl_op = firrtl.ShlPrimOp(a.value, amount, loc=self._loc)
                 result_width = a.type.bit_width() + amount
+                # Use Operation.create to ensure correct widened result type
+                # (The Python bindings' ShlPrimOp doesn't properly infer the wider type).
+                result_ty = firrtl.UIntType.get(self._ctx.mlir_context, result_width)
+                op = Operation.create(
+                    "firrtl.shl",
+                    results=[result_ty],
+                    operands=[a.value],
+                    attributes={"amount": IntegerAttr.get(IntegerType.get_signless(32), amount)},
+                    loc=self._loc
+                )
             else:
                 shl_op = firrtl.DShlPrimOp(a.value, amount.value, loc=self._loc)
                 result_width = a.type.bit_width() + (2 ** amount.type.bit_width() - 1)
-            return Signal(shl_op.result, UInt(result_width), self)
+                return Signal(shl_op.result, UInt(result_width), self)
+            return Signal(op.result, UInt(result_width), self)
 
     def shr(self, a: Signal, amount: Signal | int) -> Signal:
         """Right shift."""
@@ -464,6 +474,7 @@ class RegionBuilder:
         target,
         method_or_value,
         *args: Signal,
+        call_timing: tuple[int, int] | None = None,
         arg_timing: list[tuple[int, int]] | None = None,
         result_timing: list[tuple[int, int]] | None = None,
     ) -> tuple[Signal, ...] | Signal | None:
@@ -473,6 +484,10 @@ class RegionBuilder:
             target: The instance to call on (Instance object), or None for @this.
             method_or_value: A MethodRef, ValueRef, or string method name.
             *args: Arguments to pass.
+            call_timing: Optional (start, end) cycle timing for when the call is
+                         issued (start pulse). This is separate from argument
+                         and result validity. Example: (0, 1) issues the call
+                         at cycle 0.
             arg_timing: Optional list of (start, end) cycle timing for each argument.
                         Each tuple specifies a half-open interval [start, end).
                         Example: [(0, 1), (0, 1)] means both args driven at cycle 0.
@@ -486,6 +501,7 @@ class RegionBuilder:
         Example with timing (for static steps):
             with mod.static_step(6, "compute") as step:
                 result = step.call(mult, "multiply", a, b,
+                    call_timing=(0, 1),              # issue at cycle 0
                     arg_timing=[(0, 1), (0, 1)],   # args at cycle 0
                     result_timing=[(4, 5)])        # result at cycle 4
         """
@@ -565,6 +581,14 @@ class RegionBuilder:
 
             # Build timing attributes if provided
             call_attrs = {}
+            if call_timing is not None:
+                from circt.ir import Attribute
+
+                start, end = call_timing
+                attr_str = f"#cmt2.timing<[{start}, {end}]>"
+                call_attrs["call_timing"] = Attribute.parse(
+                    attr_str, self._ctx.mlir_context
+                )
             if arg_timing is not None:
                 from circt.ir import ArrayAttr, Attribute
                 timing_attrs = []

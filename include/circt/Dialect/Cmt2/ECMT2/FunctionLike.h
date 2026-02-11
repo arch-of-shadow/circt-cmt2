@@ -135,7 +135,7 @@ private:
 // Procedural Operations
 //===----------------------------------------------------------------------===//
 
-/// ProcStep: execution unit with go-done interface
+/// ProcStep: single-fire procedural step
 class ProcStep {
 public:
   ProcStep(llvm::StringRef name, Module *parent);
@@ -145,9 +145,6 @@ public:
     fn(*bodyBuilder_);
     return *this;
   }
-
-  /// Mark step as done with a condition
-  void stepDone(mlir::Value condition);
 
   llvm::StringRef getName() const { return name_; }
 

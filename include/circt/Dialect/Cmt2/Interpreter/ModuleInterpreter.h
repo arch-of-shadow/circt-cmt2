@@ -247,65 +247,8 @@ private:
   llvm::StringMap<WireState> instances_;
 };
 
-/// Interpreter for FIFO modules.
-///
-/// Supports:
-/// - notEmpty() -> bool: Returns true if FIFO has data
-/// - notFull() -> bool: Returns true if FIFO has space
-/// - first() -> value: Returns front element (guard: notEmpty)
-/// - enq(value): Enqueue value (guard: notFull)
-/// - deq() -> value: Dequeue and return front (guard: notEmpty)
-///
-/// Parameters:
-/// - width: Data width (default: 32)
-/// - depth: FIFO depth (default: 2)
-///
-class FIFOInterpreter : public ModuleInterpreter {
-public:
-  llvm::StringRef getModuleType() const override { return "FIFO"; }
-
-  bool canHandle(llvm::StringRef moduleName) const override {
-    return moduleName.contains_insensitive("fifo");
-  }
-
-  void initializeInstance(llvm::StringRef instanceName,
-                          llvm::ArrayRef<mlir::NamedAttribute> params) override;
-  void resetInstance(llvm::StringRef instanceName) override;
-  void commitCycle(llvm::StringRef instanceName) override;
-
-  bool checkMethodGuard(llvm::StringRef instanceName,
-                        llvm::StringRef methodName,
-                        llvm::ArrayRef<InterpValue> args) override;
-  std::optional<std::vector<InterpValue>>
-  callMethodBody(llvm::StringRef instanceName, llvm::StringRef methodName,
-                 llvm::ArrayRef<InterpValue> args) override;
-
-  llvm::json::Value getInstanceState(llvm::StringRef instanceName) const override;
-  std::vector<std::string> getInstanceNames() const override;
-  bool hasInstance(llvm::StringRef instanceName) const override;
-
-private:
-  struct FIFOState {
-    unsigned width = 32;
-    unsigned depth = 2;
-    std::vector<InterpValue> buffer;
-    unsigned head = 0;  // Read pointer
-    unsigned tail = 0;  // Write pointer
-    unsigned count = 0; // Current occupancy
-
-    // Pending operations (applied at commitCycle)
-    std::optional<InterpValue> pendingEnq;
-    bool pendingDeq = false;
-
-    bool isEmpty() const { return count == 0; }
-    bool isFull() const { return count >= depth; }
-  };
-
-  llvm::StringMap<FIFOState> instances_;
-};
-
 // MemoryInterpreter removed - use MLIR-based behavioral models in ModuleLibrary
-// See docs/Dialects/Cmt2/tmp/InterpreterModularization-Design.md for details
+// See docs/Cmt2/features/Interpreter.md for overview and extension pointers.
 
 } // namespace interp
 } // namespace cmt2

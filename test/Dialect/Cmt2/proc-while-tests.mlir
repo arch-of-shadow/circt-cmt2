@@ -59,7 +59,6 @@ builtin.module {
                 %trunc = firrtl.bits %new_val 31 to 0 : (!firrtl.uint<33>) -> !firrtl.uint<32>
                 cmt2.call @counter @write(%trunc) : (!firrtl.uint<32>) -> ()
                 %done = firrtl.constant 1 : !firrtl.uint<1>
-                cmt2.proc.step_done %done : !firrtl.uint<1>
             }
 
             // While loop: decrement while counter > 0
@@ -91,7 +90,6 @@ builtin.module {
             cmt2.proc.step @read_step {
                 %val = cmt2.call @counter @read() : () -> !firrtl.uint<32>
                 %done = firrtl.constant 1 : !firrtl.uint<1>
-                cmt2.proc.step_done %done : !firrtl.uint<1>
             }
 
             cmt2.proc.step @update_step {
@@ -101,7 +99,6 @@ builtin.module {
                 %trunc = firrtl.bits %new_acc 31 to 0 : (!firrtl.uint<33>) -> !firrtl.uint<32>
                 cmt2.call @accum @write(%trunc) : (!firrtl.uint<32>) -> ()
                 %done = firrtl.constant 1 : !firrtl.uint<1>
-                cmt2.proc.step_done %done : !firrtl.uint<1>
             }
 
             // While with sequential body

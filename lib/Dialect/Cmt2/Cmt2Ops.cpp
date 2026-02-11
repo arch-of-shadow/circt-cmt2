@@ -10,6 +10,7 @@
 //
 //===----------------------------------------------------------------------===//
 #include "circt/Dialect/Cmt2/Cmt2Ops.h"
+#include "circt/Dialect/Cmt2/Cmt2Types.h"
 #include "circt/Dialect/FIRRTL/FIRRTLTypes.h"
 #include "circt/Dialect/HW/HWOps.h"
 #include "circt/Dialect/HW/HWTypes.h"
@@ -320,19 +321,225 @@ static void printFunctionLikeOp(OpAsmPrinter &p, Operation *op,
 //===----------------------------------------------------------------------===//
 
 ParseResult RuleOp::parse(OpAsmParser &parser, OperationState &result) {
-  return parseFunctionLikeOp(parser, result);
+  auto builder = parser.getBuilder();
+
+  // Parse the symbol name
+  StringAttr nameAttr;
+  if (parser.parseSymbolName(nameAttr, SymbolTable::getSymbolAttrName(),
+                             result.attributes))
+    return failure();
+
+  // Parse the regular argument list
+  SmallVector<OpAsmParser::Argument> args;
+  if (parser.parseArgumentList(args, OpAsmParser::Delimiter::OptionalParen,
+                                /*allowType=*/true, /*allowAttrs=*/false))
+    return failure();
+
+  // Extract argument names and types
+  SmallVector<StringRef> argNames;
+  SmallVector<Type> argTypes;
+  for (auto &arg : args) {
+    argNames.push_back(arg.ssaName.name.drop_front());
+    argTypes.push_back(arg.type);
+  }
+
+  // Parse optional tokens_in
+  SmallVector<OpAsmParser::Argument> tokenArgs;
+  SmallVector<StringRef> tokenInNames;
+  SmallVector<Type> tokenInTypes;
+  if (succeeded(parser.parseOptionalKeyword("tokens_in"))) {
+    if (parser.parseArgumentList(tokenArgs, OpAsmParser::Delimiter::Paren,
+                                  /*allowType=*/true, /*allowAttrs=*/false))
+      return failure();
+    for (auto &arg : tokenArgs) {
+      tokenInNames.push_back(arg.ssaName.name.drop_front());
+      tokenInTypes.push_back(arg.type);
+    }
+  }
+
+  // Parse optional tokens_out
+  SmallVector<Type> tokenOutTypes;
+  if (succeeded(parser.parseOptionalKeyword("tokens_out"))) {
+    if (parser.parseLParen())
+      return failure();
+    if (parser.parseOptionalRParen()) {
+      if (parser.parseTypeList(tokenOutTypes) || parser.parseRParen())
+        return failure();
+    }
+  }
+
+  // Parse optional `->` and result types (for body region)
+  SmallVector<Type> bodyResTypes;
+  if (succeeded(parser.parseOptionalArrow())) {
+    if (parser.parseLParen())
+      return failure();
+    if (parser.parseOptionalRParen()) {
+      if (parser.parseTypeList(bodyResTypes) || parser.parseRParen())
+        return failure();
+    }
+  }
+
+  // Store argument names and function type
+  result.addAttribute("argNames", builder.getStrArrayAttr(argNames));
+
+  // The function_type represents the shared arguments
+  auto funcType = builder.getFunctionType(argTypes, bodyResTypes);
+  result.addAttribute("function_type", TypeAttr::get(funcType));
+
+  // Initialize empty bodyResNames
+  SmallVector<Attribute> resNames;
+  for (size_t i = 0; i < bodyResTypes.size(); ++i)
+    resNames.push_back(builder.getStringAttr("res" + std::to_string(i)));
+  result.addAttribute("bodyResNames", builder.getArrayAttr(resNames));
+
+  // Store token attributes if present
+  if (!tokenInTypes.empty()) {
+    result.addAttribute("token_in_types", builder.getTypeArrayAttr(tokenInTypes));
+    result.addAttribute("token_in_names", builder.getStrArrayAttr(tokenInNames));
+  }
+  if (!tokenOutTypes.empty()) {
+    result.addAttribute("token_out_types", builder.getTypeArrayAttr(tokenOutTypes));
+  }
+
+  // Parse optional attribute dict
+  if (parser.parseOptionalAttrDictWithKeyword(result.attributes))
+    return failure();
+
+  // Combine regular args and token args for region parsing
+  SmallVector<OpAsmParser::Argument> allArgs;
+  allArgs.append(args.begin(), args.end());
+  allArgs.append(tokenArgs.begin(), tokenArgs.end());
+
+  // All argument types for block creation
+  SmallVector<Type> allArgTypes;
+  allArgTypes.append(argTypes.begin(), argTypes.end());
+  allArgTypes.append(tokenInTypes.begin(), tokenInTypes.end());
+
+  // Parse guard region
+  auto *guardRegion = result.addRegion();
+  if (parser.parseRegion(*guardRegion, allArgs))
+    return failure();
+
+  // Parse body region
+  auto *bodyRegion = result.addRegion();
+  if (parser.parseRegion(*bodyRegion, allArgs))
+    return failure();
+
+  // Ensure both regions have blocks with implicit terminators
+  OpBuilder opBuilder(builder.getContext());
+
+  // Handle guard region
+  if (guardRegion->empty()) {
+    Block *guardBlock = new Block();
+    guardBlock->addArguments(
+        allArgTypes, SmallVector<Location>(allArgTypes.size(), result.location));
+    guardRegion->push_back(guardBlock);
+  }
+
+  Block &guardBlock = guardRegion->front();
+  if (guardBlock.empty() || !guardBlock.back().hasTrait<OpTrait::IsTerminator>()) {
+    opBuilder.setInsertionPointToEnd(&guardBlock);
+    opBuilder.create<ReturnOp>(result.location);
+  }
+
+  // Handle body region
+  if (bodyRegion->empty()) {
+    Block *bodyBlock = new Block();
+    bodyBlock->addArguments(
+        allArgTypes, SmallVector<Location>(allArgTypes.size(), result.location));
+    bodyRegion->push_back(bodyBlock);
+  }
+
+  Block &bodyBlock = bodyRegion->front();
+  if (bodyBlock.empty() || !bodyBlock.back().hasTrait<OpTrait::IsTerminator>()) {
+    opBuilder.setInsertionPointToEnd(&bodyBlock);
+    opBuilder.create<ReturnOp>(result.location);
+  }
+
+  return success();
 }
 
 void RuleOp::print(OpAsmPrinter &p) {
   p << ' ';
   p.printSymbolName(getSymName());
-  printFunctionLikeOp(p, *this, getArgNames(), getFunctionType(),
-                      getGuard(), getBody());
+
+  // Get types
+  auto argTypes = getFunctionType().getInputs();
+  auto resTypes = getFunctionType().getResults();
+  Block &guardBlock = getGuard().front();
+
+  // Print regular arguments
+  p << '(';
+  size_t numRegularArgs = argTypes.size();
+  for (size_t i = 0; i < numRegularArgs; ++i) {
+    if (i > 0) p << ", ";
+    p.printOperand(guardBlock.getArgument(i));
+    p << ": ";
+    p.printType(argTypes[i]);
+  }
+  p << ')';
+
+  // Print tokens_in if present
+  if (hasTokenInputs()) {
+    p << " tokens_in(";
+    auto tokenInTypes = getTokenInTypes();
+    for (size_t i = 0; i < getNumTokenInputs(); ++i) {
+      if (i > 0) p << ", ";
+      p.printOperand(guardBlock.getArgument(numRegularArgs + i));
+      p << ": ";
+      p.printType(cast<TypeAttr>((*tokenInTypes)[i]).getValue());
+    }
+    p << ')';
+  }
+
+  // Print tokens_out if present
+  if (hasTokenOutputs()) {
+    p << " tokens_out(";
+    auto tokenOutTypes = getTokenOutTypes();
+    llvm::interleaveComma(*tokenOutTypes, p, [&](Attribute attr) {
+      p.printType(cast<TypeAttr>(attr).getValue());
+    });
+    p << ')';
+  }
+
+  // Print result types
+  p << " -> (";
+  llvm::interleaveComma(resTypes, p, [&](Type type) {
+    p.printType(type);
+  });
+  p << ')';
+
+  // Print attributes (excluding the ones we handle specially)
+  SmallVector<StringRef> elidedAttrs = {"sym_name", "function_type", "argNames",
+                                         "guardResName", "bodyResNames",
+                                         "token_in_types", "token_in_names",
+                                         "token_out_types"};
+  p.printOptionalAttrDictWithKeyword((*this)->getAttrs(), elidedAttrs);
+
+  // Print regions
+  p << ' ';
+  p.printRegion(getGuard(), /*printEntryBlockArgs=*/false);
+  p << ' ';
+  p.printRegion(getBody(), /*printEntryBlockArgs=*/false);
 }
 
 void RuleOp::getAsmBlockArgumentNames(Region &region,
                                        OpAsmSetValueNameFn setNameFn) {
+  // Set names for regular arguments
   getAsmBlockArgumentNamesImpl(getArgNames(), region, setNameFn);
+
+  // Set names for token arguments
+  if (hasTokenInputs()) {
+    auto tokenNames = getTokenInNames();
+    size_t numRegularArgs = getFunctionType().getNumInputs();
+    Block &block = region.front();
+    for (size_t i = 0; i < getNumTokenInputs(); ++i) {
+      if (numRegularArgs + i < block.getNumArguments()) {
+        setNameFn(block.getArgument(numRegularArgs + i),
+                  cast<StringAttr>((*tokenNames)[i]).getValue());
+      }
+    }
+  }
 }
 
 // Cmt2FunctionLike methods for RuleOp
@@ -1085,6 +1292,13 @@ LogicalResult MethodOp::verify() {
 //===----------------------------------------------------------------------===//
 
 LogicalResult CallOp::verify() {
+  // Verify call_ty if present (used by lowering to distinguish per-cycle clones).
+  if (auto callTy = (*this)->getAttrOfType<StringAttr>("call_ty")) {
+    StringRef v = callTy.getValue();
+    if (v != "Enable" && v != "GetRes")
+      return emitOpError("call_ty must be one of \"Enable\" or \"GetRes\"");
+  }
+
   // Verify arg_timing array size matches inputs
   if (auto argTiming = getArgTiming()) {
     if (argTiming->size() != getInputs().size()) {
@@ -1126,21 +1340,44 @@ LogicalResult CallOp::verify() {
   }
 
   // Timing attributes are only meaningful inside ProcStaticStepOp.
-  // If specified elsewhere, emit a warning (timing will be ignored).
-  bool hasTimingAttrs = getArgTiming() || getResultTiming();
+  // If specified elsewhere, treat this as an error.
+  bool hasTimingAttrs = getCallTiming() || getArgTiming() || getResultTiming();
   auto staticStep = getOperation()->getParentOfType<ProcStaticStepOp>();
 
   if (hasTimingAttrs && !staticStep) {
     // Timing specified outside static step - this is likely an error.
     // The timing will be ignored during lowering.
-    return emitOpError("timing attributes (arg_timing/result_timing) are only "
-                       "valid inside cmt2.proc.static_step; timing on this "
-                       "call will be ignored during lowering");
+    return emitOpError(
+        "timing attributes (call_timing/arg_timing/result_timing) are only "
+        "valid inside cmt2.proc.static_step; timing on this call will be "
+        "ignored during lowering");
   }
 
   // If inside a static step, verify timing is within step bounds
   if (staticStep) {
     int64_t stepLatency = staticStep.getLatency();
+
+    if (auto callTy = (*this)->getAttrOfType<StringAttr>("call_ty")) {
+      return emitOpError(
+          "call_ty is a lowering-only tag and must not appear inside "
+          "cmt2.proc.static_step");
+    }
+
+    // Default call_timing is [0, 1).
+    TimingIntervalAttr callTiming =
+        getCallTiming().value_or(TimingIntervalAttr::get(getContext(), 0, 1));
+
+    if (callTiming.getStart() < 0)
+      return emitOpError("call_timing start (")
+             << callTiming.getStart() << ") must be non-negative";
+    if (callTiming.getEnd() > stepLatency)
+      return emitOpError("call_timing end (")
+             << callTiming.getEnd() << ") exceeds step latency (" << stepLatency
+             << ")";
+    // Restriction (initial): call_timing is a single-cycle issue point.
+    if (callTiming.getEnd() != callTiming.getStart() + 1)
+      return emitOpError("call_timing must be a single-cycle interval; got [")
+             << callTiming.getStart() << ", " << callTiming.getEnd() << ")";
 
     if (auto argTiming = getArgTiming()) {
       for (size_t i = 0; i < argTiming->size(); ++i) {
@@ -1150,17 +1387,45 @@ LogicalResult CallOp::verify() {
                    << i << "] end (" << timing.getEnd()
                    << ") exceeds step latency (" << stepLatency << ")";
           }
+          // Restriction (initial): arguments must be valid at call issue time.
+          if (timing.getStart() != callTiming.getStart() ||
+              timing.getEnd() != callTiming.getEnd()) {
+            return emitOpError("arg_timing[")
+                   << i << "] must match call_timing ["
+                   << callTiming.getStart() << ", " << callTiming.getEnd()
+                   << "); got [" << timing.getStart() << ", " << timing.getEnd()
+                   << ")";
+          }
         }
       }
     }
 
     if (auto resultTiming = getResultTiming()) {
+      TimingIntervalAttr common;
+      bool haveCommon = false;
       for (size_t i = 0; i < resultTiming->size(); ++i) {
         if (auto timing = dyn_cast<TimingIntervalAttr>((*resultTiming)[i])) {
           if (timing.getEnd() > stepLatency) {
             return emitOpError("result_timing[")
                    << i << "] end (" << timing.getEnd()
                    << ") exceeds step latency (" << stepLatency << ")";
+          }
+          // Restriction (initial): results are captured in a single cycle.
+          if (timing.getEnd() != timing.getStart() + 1) {
+            return emitOpError("result_timing[")
+                   << i << "] must be a single-cycle interval; got ["
+                   << timing.getStart() << ", " << timing.getEnd() << ")";
+          }
+          // Restriction (initial): all results share the same capture time.
+          if (!haveCommon) {
+            common = timing;
+            haveCommon = true;
+          } else if (timing.getStart() != common.getStart() ||
+                     timing.getEnd() != common.getEnd()) {
+            return emitOpError("result_timing[")
+                   << i << "] must match result_timing[0] ["
+                   << common.getStart() << ", " << common.getEnd() << "); got ["
+                   << timing.getStart() << ", " << timing.getEnd() << ")";
           }
         }
       }
@@ -1178,6 +1443,23 @@ LogicalResult CallOp::verify() {
   }
 
   return success();
+}
+
+//===----------------------------------------------------------------------===//
+// ProcCondIfOp
+//===----------------------------------------------------------------------===//
+
+mlir::Value ProcCondIfOp::getCond() {
+  // Get the condition from the terminator of the condition region
+  if (getCondRegion().empty())
+    return nullptr;
+  Block &condBlock = getCondRegion().front();
+  if (condBlock.empty())
+    return nullptr;
+  // The terminator should be ProcCondIfYieldOp
+  if (auto yieldOp = dyn_cast<ProcCondIfYieldOp>(condBlock.getTerminator()))
+    return yieldOp.getCond();
+  return nullptr;
 }
 
 //===----------------------------------------------------------------------===//
@@ -1244,6 +1526,449 @@ LogicalResult ProcStaticStepOp::verify() {
       return emitOpError("interval (")
              << interval->getCycles() << ") must be <= latency ("
              << getLatency() << ")";
+    }
+  }
+
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// Token Operations
+//===----------------------------------------------------------------------===//
+
+LogicalResult TokenValidOp::verify() {
+  // The result should be a 1-bit uint
+  auto resultType = getValid().getType();
+  if (auto uintType = dyn_cast<firrtl::UIntType>(resultType)) {
+    if (uintType.getWidth().has_value() && uintType.getWidth().value() != 1) {
+      return emitOpError("result must be a 1-bit uint, got width ")
+             << uintType.getWidth().value();
+    }
+  }
+  return success();
+}
+
+LogicalResult TokenDataOp::verify() {
+  auto tokenType = cast<SyncTokenType>(getToken().getType());
+  if (!tokenType.hasData()) {
+    return emitOpError("token must carry data, but got ") << tokenType;
+  }
+  // Check that the result type matches the token's data type
+  if (tokenType.getDataType() != getData().getType()) {
+    return emitOpError("result type ")
+           << getData().getType() << " must match token data type "
+           << tokenType.getDataType();
+  }
+  return success();
+}
+
+LogicalResult TokenCreateOp::verify() {
+  auto tokenType = cast<SyncTokenType>(getToken().getType());
+  if (getData()) {
+    // If data is provided, token must have data type
+    if (!tokenType.hasData()) {
+      return emitOpError("token type must have data when data operand is provided");
+    }
+    // Check that data type matches
+    if (tokenType.getDataType() != getData().getType()) {
+      return emitOpError("data type ")
+             << getData().getType() << " must match token data type "
+             << tokenType.getDataType();
+    }
+  } else {
+    // If no data provided, token should not have data type
+    if (tokenType.hasData()) {
+      return emitOpError("token type has data but no data operand provided");
+    }
+  }
+  return success();
+}
+
+// Custom assembly format for TokenCreateOp
+// Without data: %tok = cmt2.token.create : !cmt2.sync_token
+// With data: %tok = cmt2.token.create %data : !firrtl.uint<32> -> !cmt2.sync_token<data = !firrtl.uint<32>>
+ParseResult TokenCreateOp::parse(OpAsmParser &parser, OperationState &result) {
+  OpAsmParser::UnresolvedOperand dataOperand;
+  Type dataType;
+  Type tokenType;
+
+  // Try to parse an operand
+  auto parseOperandResult = parser.parseOptionalOperand(dataOperand);
+  if (parseOperandResult.has_value()) {
+    if (parser.parseColonType(dataType) || parser.parseArrow() ||
+        parser.parseType(tokenType)) {
+      return failure();
+    }
+    if (parser.resolveOperand(dataOperand, dataType, result.operands)) {
+      return failure();
+    }
+  } else {
+    if (parser.parseColonType(tokenType)) {
+      return failure();
+    }
+  }
+
+  result.addTypes(tokenType);
+  return success();
+}
+
+void TokenCreateOp::print(OpAsmPrinter &p) {
+  p << " ";
+  if (getData()) {
+    p << getData() << " : " << getData().getType() << " -> ";
+  } else {
+    p << ": ";
+  }
+  p << getToken().getType();
+}
+
+LogicalResult TokenJoinOp::verify() {
+  if (getTokens().empty()) {
+    return emitOpError("must have at least one input token");
+  }
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// Dataflow Operations
+//===----------------------------------------------------------------------===//
+
+//===----------------------------------------------------------------------===//
+// ProcDataflowOp
+//===----------------------------------------------------------------------===//
+
+ParseResult ProcDataflowOp::parse(OpAsmParser &parser, OperationState &result) {
+  auto builder = parser.getBuilder();
+
+  // Parse the symbol name
+  StringAttr nameAttr;
+  if (parser.parseSymbolName(nameAttr, mlir::SymbolTable::getSymbolAttrName(),
+                             result.attributes))
+    return failure();
+
+  // Parse the argument list
+  SmallVector<OpAsmParser::Argument> args;
+  if (parser.parseArgumentList(args, OpAsmParser::Delimiter::OptionalParen,
+                                /*allowType=*/true, /*allowAttrs=*/false))
+    return failure();
+
+  // Extract argument names and types
+  SmallVector<StringRef> argNames;
+  SmallVector<Type> argTypes;
+  for (auto &arg : args) {
+    argNames.push_back(arg.ssaName.name.drop_front());
+    argTypes.push_back(arg.type);
+  }
+
+  // Parse optional `->` and result types
+  SmallVector<Type> resTypes;
+  if (succeeded(parser.parseOptionalArrow())) {
+    if (parser.parseLParen())
+      return failure();
+    if (parser.parseOptionalRParen()) {
+      if (parser.parseTypeList(resTypes) || parser.parseRParen())
+        return failure();
+    }
+  }
+
+  // Store attributes
+  result.addAttribute("argNames", builder.getStrArrayAttr(argNames));
+  auto funcType = builder.getFunctionType(argTypes, resTypes);
+  result.addAttribute("function_type", TypeAttr::get(funcType));
+
+  // Parse optional attribute dict
+  if (parser.parseOptionalAttrDictWithKeyword(result.attributes))
+    return failure();
+
+  // Parse the body region
+  auto *bodyRegion = result.addRegion();
+  if (parser.parseRegion(*bodyRegion, args))
+    return failure();
+
+  return success();
+}
+
+void ProcDataflowOp::print(OpAsmPrinter &p) {
+  p << ' ';
+  p.printSymbolName(getSymName());
+
+  auto funcType = getFunctionType();
+  auto argTypes = funcType.getInputs();
+  auto resTypes = funcType.getResults();
+
+  // Print arguments
+  if (!argTypes.empty()) {
+    Block &bodyBlock = getBody().front();
+    p << '(';
+    llvm::interleaveComma(llvm::zip(getArgNames(), bodyBlock.getArguments()), p,
+                         [&](auto tuple) {
+                           auto [name, arg] = tuple;
+                           p.printOperand(arg);
+                           p << ": ";
+                           p.printType(arg.getType());
+                         });
+    p << ')';
+  } else {
+    p << "()";
+  }
+
+  // Print result types
+  if (!resTypes.empty()) {
+    p << " -> (";
+    llvm::interleaveComma(resTypes, p, [&](Type type) {
+      p.printType(type);
+    });
+    p << ')';
+  }
+
+  // Print attributes
+  SmallVector<StringRef> elidedAttrs = {"sym_name", "function_type", "argNames"};
+  p.printOptionalAttrDictWithKeyword((*this)->getAttrs(), elidedAttrs);
+
+  // Print body
+  p << ' ';
+  p.printRegion(getBody(), /*printEntryBlockArgs=*/false);
+}
+
+void ProcDataflowOp::getAsmBlockArgumentNames(Region &region,
+                                               OpAsmSetValueNameFn setNameFn) {
+  getAsmBlockArgumentNamesImpl(getArgNames(), region, setNameFn);
+}
+
+LogicalResult ProcDataflowOp::verify() {
+  // Check that the body is not empty
+  if (getBody().empty()) {
+    return emitOpError("body region must not be empty");
+  }
+
+  // Check that interval is positive if specified
+  if (auto interval = getInterval()) {
+    if (*interval <= 0) {
+      return emitOpError("interval must be positive, got ") << *interval;
+    }
+  }
+
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// DataflowTaskOp
+//===----------------------------------------------------------------------===//
+
+ParseResult DataflowTaskOp::parse(OpAsmParser &parser, OperationState &result) {
+  auto builder = parser.getBuilder();
+
+  // Parse the symbol name
+  StringAttr nameAttr;
+  if (parser.parseSymbolName(nameAttr, mlir::SymbolTable::getSymbolAttrName(),
+                             result.attributes))
+    return failure();
+
+  // Parse optional ()
+  if (succeeded(parser.parseOptionalLParen())) {
+    if (parser.parseRParen())
+      return failure();
+  }
+
+  // Parse optional tokens_in
+  SmallVector<OpAsmParser::UnresolvedOperand> tokenOperands;
+  SmallVector<Type> tokenTypes;
+  SmallVector<StringRef> tokenNames;
+  if (succeeded(parser.parseOptionalKeyword("tokens_in"))) {
+    if (parser.parseLParen())
+      return failure();
+
+    // Parse comma-separated list of "name: type" pairs
+    if (parser.parseOptionalRParen()) {
+      do {
+        OpAsmParser::UnresolvedOperand operand;
+        Type type;
+        if (parser.parseOperand(operand) || parser.parseColonType(type))
+          return failure();
+        tokenOperands.push_back(operand);
+        tokenTypes.push_back(type);
+        tokenNames.push_back(operand.name.drop_front());
+      } while (succeeded(parser.parseOptionalComma()));
+      if (parser.parseRParen())
+        return failure();
+    }
+  }
+
+  // Store token_in_names
+  result.addAttribute("token_in_names", builder.getStrArrayAttr(tokenNames));
+
+  // Resolve token operands
+  if (parser.resolveOperands(tokenOperands, tokenTypes, parser.getCurrentLocation(),
+                             result.operands))
+    return failure();
+
+  // Parse optional `->` and result types (token outputs)
+  SmallVector<Type> resTypes;
+  if (succeeded(parser.parseOptionalArrow())) {
+    if (parser.parseLParen())
+      return failure();
+    if (parser.parseOptionalRParen()) {
+      if (parser.parseTypeList(resTypes) || parser.parseRParen())
+        return failure();
+    }
+  }
+
+  // Add result types
+  result.addTypes(resTypes);
+
+  // Parse optional attribute dict BEFORE region (uses "attributes" keyword)
+  if (parser.parseOptionalAttrDictWithKeyword(result.attributes))
+    return failure();
+
+  // Parse the body region (no block arguments - tokens are accessed as operands)
+  auto *bodyRegion = result.addRegion();
+  if (parser.parseRegion(*bodyRegion, {}))
+    return failure();
+
+  // Ensure body block has a terminator
+  if (bodyRegion->empty()) {
+    bodyRegion->emplaceBlock();
+  }
+
+  return success();
+}
+
+void DataflowTaskOp::print(OpAsmPrinter &p) {
+  p << ' ';
+  p.printSymbolName(getSymName());
+  p << "()";
+
+  // Print tokens_in if present
+  if (!getTokenInputs().empty()) {
+    p << " tokens_in(";
+    llvm::interleaveComma(llvm::enumerate(getTokenInputs()), p,
+                         [&](auto enumVal) {
+                           p.printOperand(enumVal.value());
+                           p << ": ";
+                           p.printType(enumVal.value().getType());
+                         });
+    p << ')';
+  }
+
+  // Print result types (token outputs)
+  if (!getTokenOutputs().empty()) {
+    p << " -> (";
+    llvm::interleaveComma(getTokenOutputs().getTypes(), p, [&](Type type) {
+      p.printType(type);
+    });
+    p << ')';
+  }
+
+  // Print attributes
+  SmallVector<StringRef> elidedAttrs = {"sym_name", "token_in_names"};
+  p.printOptionalAttrDictWithKeyword((*this)->getAttrs(), elidedAttrs);
+
+  // Print body
+  p << ' ';
+  p.printRegion(getBody(), /*printEntryBlockArgs=*/false);
+}
+
+void DataflowTaskOp::getAsmBlockArgumentNames(Region &region,
+                                               OpAsmSetValueNameFn setNameFn) {
+  // DataflowTaskOp has no block arguments - token inputs are operands
+  // accessed from outer scope (not IsolatedFromAbove)
+}
+
+LogicalResult DataflowTaskOp::verify() {
+  // Check that the body is not empty
+  if (getBody().empty()) {
+    return emitOpError("body region must not be empty");
+  }
+
+  // Check that token_in_names matches token_inputs count
+  if (getTokenInNames().size() != getTokenInputs().size()) {
+    return emitOpError("token_in_names count (")
+           << getTokenInNames().size() << ") must match token_inputs count ("
+           << getTokenInputs().size() << ")";
+  }
+
+  // Check that terminator is either DataflowYieldOp or DataflowReturnOp
+  Block &block = getBody().front();
+  if (block.empty()) {
+    return emitOpError("body block must not be empty");
+  }
+
+  auto *terminator = block.getTerminator();
+  if (!isa<DataflowYieldOp, DataflowReturnOp>(terminator)) {
+    return emitOpError("body must end with cmt2.dataflow.yield or "
+                       "cmt2.dataflow.return");
+  }
+
+  // If terminator is DataflowYieldOp, check that token counts match
+  if (auto yieldOp = dyn_cast<DataflowYieldOp>(terminator)) {
+    if (yieldOp.getTokens().size() != getTokenOutputs().size()) {
+      return emitOpError("dataflow.yield token count (")
+             << yieldOp.getTokens().size() << ") must match task result count ("
+             << getTokenOutputs().size() << ")";
+    }
+    // Check token types match
+    for (auto [yieldType, resultType] :
+         llvm::zip(yieldOp.getTokens().getTypes(), getTokenOutputs().getTypes())) {
+      if (yieldType != resultType) {
+        return emitOpError("yield token type ")
+               << yieldType << " does not match result type " << resultType;
+      }
+    }
+  }
+
+  // If terminator is DataflowReturnOp, this should be a final task with no token outputs
+  if (auto returnOp = dyn_cast<DataflowReturnOp>(terminator)) {
+    if (!getTokenOutputs().empty()) {
+      return emitOpError("task with dataflow.return cannot have token outputs");
+    }
+  }
+
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// DataflowYieldOp
+//===----------------------------------------------------------------------===//
+
+LogicalResult DataflowYieldOp::verify() {
+  // Verify parent is DataflowTaskOp
+  auto taskOp = dyn_cast<DataflowTaskOp>(getOperation()->getParentOp());
+  if (!taskOp) {
+    return emitOpError("must be inside a cmt2.dataflow.task");
+  }
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// DataflowReturnOp
+//===----------------------------------------------------------------------===//
+
+LogicalResult DataflowReturnOp::verify() {
+  // Verify parent is DataflowTaskOp
+  auto taskOp = dyn_cast<DataflowTaskOp>(getOperation()->getParentOp());
+  if (!taskOp) {
+    return emitOpError("must be inside a cmt2.dataflow.task");
+  }
+
+  // Get the enclosing ProcDataflowOp to check result types
+  auto dataflowOp = taskOp->getParentOfType<ProcDataflowOp>();
+  if (!dataflowOp) {
+    return emitOpError("task must be inside a cmt2.proc.dataflow");
+  }
+
+  // Check that return types match dataflow result types
+  auto dataflowResults = dataflowOp.getResultTypes();
+  if (getResults().size() != dataflowResults.size()) {
+    return emitOpError("return count (")
+           << getResults().size() << ") must match dataflow result count ("
+           << dataflowResults.size() << ")";
+  }
+
+  for (auto [returnType, expectedType] :
+       llvm::zip(getResults().getTypes(), dataflowResults)) {
+    if (returnType != expectedType) {
+      return emitOpError("return type ")
+             << returnType << " does not match expected type " << expectedType;
     }
   }
 

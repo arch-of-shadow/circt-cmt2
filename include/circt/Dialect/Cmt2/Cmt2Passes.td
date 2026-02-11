@@ -402,6 +402,127 @@ def TimingValidation : Pass<"cmt2-timing-validation", "cmt2::CircuitOp"> {
   ];
 }
 
+//===----------------------------------------------------------------------===//
+// Dataflow/Pipeline Passes
+//===----------------------------------------------------------------------===//
+
+def DataflowLowering : Pass<"cmt2-dataflow-lowering", "cmt2::CircuitOp"> {
+  let summary = "Lower dataflow constructs to GAA rules with tokens.";
+  let description = [{
+    This pass converts high-level dataflow constructs (`cmt2.proc.dataflow`
+    and `cmt2.dataflow.task`) to regular GAA rules with token-based
+    synchronization.
+
+    For each `cmt2.proc.dataflow`:
+    1. Each `cmt2.dataflow.task` is converted to a `cmt2.rule` with:
+       - Token inputs from `tokens_in()` as rule token arguments
+       - Token outputs as rule results
+       - Guard includes token validity checks (AND of all token.valid)
+       - Body contains the task's computation
+    2. Token wiring between rules is preserved via SSA def-use
+
+    For tasks with `dataflow.return`:
+    - The result is assigned to the dataflow's output (module wiring)
+
+    Token semantics:
+    - Tokens are SSA values representing synchronization points
+    - A token can have multiple consumers (fork pattern)
+    - Rules fire when all input tokens are valid
+
+    This pass should run BEFORE token lowering passes.
+  }];
+}
+
+def TokenLowering : Pass<"cmt2-token-lowering", "cmt2::CircuitOp"> {
+  let summary = "Lower tokens to hardware (shift registers and FIFOs).";
+  let description = [{
+    This pass lowers abstract token operations to concrete hardware:
+
+    For latency-sensitive (LS) tokens:
+    - Tokens become shift registers for data forwarding
+    - Valid signals are direct wires (combinational)
+    - Multi-consumer tokens use signal fan-out
+
+    For latency-insensitive (LI) tokens:
+    - Tokens become FIFOs with inferred depth
+    - Valid/ready handshaking for flow control
+    - Multi-consumer tokens use broadcast FIFOs
+
+    Token operations are lowered as:
+    - `token.create` → enqueue to shift reg/FIFO
+    - `token.valid` → check not-empty (FIFO) or valid wire (shift reg)
+    - `token.data` → peek/dequeue from shift reg/FIFO
+    - `token.join` → AND of all input valids
+
+    For mixed LS/LI designs, stall controllers are generated at boundaries
+    to gate LS registers when blocked by LI interfaces.
+
+    This pass should run AFTER dataflow-lowering and timing-inference.
+  }];
+
+  let options = [
+    Option<"defaultFIFODepth", "default-fifo-depth", "unsigned", /*default=*/"2",
+           "Default FIFO depth when analysis cannot infer">,
+    Option<"useBroadcastFIFO", "use-broadcast-fifo", "bool", /*default=*/"true",
+           "Use broadcast FIFOs for multi-consumer LI tokens">
+  ];
+}
+
+def TokenRTLGen : Pass<"cmt2-token-rtl-gen", "cmt2::CircuitOp"> {
+  let summary = "Generate RTL for token operations.";
+  let description = [{
+    This pass converts token annotations to actual RTL hardware by:
+
+    1. Instantiating storage for tokens:
+       - LS tokens: Shift registers (chain of Reg instances)
+       - LI tokens: FIFOs with inferred depth
+
+    2. Rewriting token operations to storage operations:
+       - `token.create` → write to shift register / FIFO enqueue
+       - `token.valid` → shift register valid / FIFO notEmpty
+       - `token.data` → shift register peek / FIFO dequeue
+       - `token.join` → AND of all input valids
+
+    3. Handling multi-consumer (fork) patterns:
+       - LS tokens: fan-out valid/data signals
+       - LI tokens: broadcast FIFO with per-consumer handshake
+
+    This pass MUST run AFTER TokenLowering (which adds annotations) and
+    BEFORE Cmt2ToFIRRTL conversion.
+  }];
+
+  let dependentDialects = ["circt::firrtl::FIRRTLDialect"];
+}
+
+def StallControllerGen : Pass<"cmt2-stall-controller-gen", "cmt2::CircuitOp"> {
+  let summary = "Generate stall controllers for LS/LI boundaries.";
+  let description = [{
+    This pass analyzes mixed latency-sensitive/latency-insensitive regions
+    and generates stall controller annotations for hardware generation.
+
+    For each LS region that interacts with LI interfaces:
+    1. Identify all LI boundaries (entry and exit points)
+    2. Compute stall condition: stall when ANY LI interface is blocked
+    3. Annotate the region with stall controller configuration
+
+    Stall controller interface:
+    - Inputs: li_ready[N] (not full for writes), li_valid[N] (not empty for reads)
+    - Outputs: stall (gates all LS registers), enable[N] (per-FIFO transaction enables)
+
+    Stall logic:
+    - stall = NOT(AND(all_ready) AND AND(all_valid))
+    - Each LS register is gated by NOT(stall)
+
+    This pass adds annotations:
+    - `stall.controller` on LS regions requiring stall management
+    - `stall.li_inputs` list of LI input signals
+    - `stall.li_outputs` list of LI output signals
+    - `stall.gated_registers` list of registers to gate
+
+    This pass should run AFTER token-lowering.
+  }];
+}
+
 def StaticFSMAllocation : Pass<"cmt2-static-fsm-allocation", "cmt2::CircuitOp"> {
   let summary = "Allocate FSM states for static control timing.";
   let description = [{
@@ -434,6 +555,49 @@ def StaticFSMAllocation : Pass<"cmt2-static-fsm-allocation", "cmt2::CircuitOp"> 
            "Use one-hot encoding for FSMs with <= this many states">,
     Option<"enableSharing", "enable-sharing", "bool", /*default=*/"false",
            "Enable FSM sharing via graph coloring (experimental)">
+  ];
+}
+
+//===----------------------------------------------------------------------===//
+// Debug Passes
+//===----------------------------------------------------------------------===//
+
+def AddRuleFiringPort : Pass<"cmt2-add-rule-firing-port", "cmt2::CircuitOp"> {
+  let summary = "Add debug output ports for rule firing signals.";
+  let description = [{
+    This pass adds output ports to modules that indicate when each rule fires.
+    These ports are useful for debugging and waveform analysis.
+
+    For each rule in a module, the pass adds:
+    - An output port `<rule_name>_firing` of type `!firrtl.uint<1>`
+
+    The firing signal is 1 when the rule's guard is true and it executes
+    (i.e., ready ∧ ¬conflict with higher priority rules).
+
+    Note: This pass should run BEFORE Cmt2ToFIRRTL conversion.
+
+    Usage:
+    - Run with `--cmt2-add-rule-firing-port`
+    - The generated Verilog will have additional output ports
+    - Use these in testbenches or waveform viewers to observe rule firing
+
+    Example:
+    ```mlir
+    // Before:
+    cmt2.rule @my_rule { /* guard */ } { /* body */ }
+
+    // After (attribute added):
+    cmt2.module @Top ... {
+      // ...
+      cmt2.rule @my_rule { /* guard */ } { /* body */ } {debug.firing_port = "my_rule_firing"}
+    }
+    // Module gains output port annotation
+    ```
+  }];
+
+  let options = [
+    Option<"prefix", "prefix", "std::string", /*default=*/"\"dbg_\"",
+           "Prefix for generated firing port names">
   ];
 }
 

@@ -42,6 +42,7 @@ builtin.module {
         }
 
         // CHECK-LABEL: firrtl.module @SimpleProc
+        // CHECK-NOT: ResultOutOfBound
         // CHECK-ACTION-LABEL: cmt2.module @SimpleProc
         cmt2.module @SimpleProc(%clk: !firrtl.clock, %rst: !firrtl.uint<1>) {
             cmt2.instance @r = @reg (%clk, %rst) : !firrtl.clock, !firrtl.uint<1>
@@ -50,14 +51,12 @@ builtin.module {
             cmt2.proc.step @read_group {
                 %val = cmt2.call @r @read() : () -> !firrtl.uint<32>
                 %c1 = firrtl.constant 1 : !firrtl.uint<1>
-                cmt2.proc.step_done %c1 : !firrtl.uint<1>
             }
 
             cmt2.proc.step @write_group {
                 %c42 = firrtl.constant 42 : !firrtl.uint<32>
                 cmt2.call @r @write(%c42) : (!firrtl.uint<32>) -> ()
                 %c1 = firrtl.constant 1 : !firrtl.uint<1>
-                cmt2.proc.step_done %c1 : !firrtl.uint<1>
             }
 
             // Procedural rule with sequential control

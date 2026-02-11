@@ -87,8 +87,8 @@ class Reg:
         Returns:
             The ExternalModuleBuilder for the register.
         """
-        # Use parameterized name to allow reuse
-        name = f"FIRRTLReg_{width}"
+        # Use parameterized name to allow reuse (include init to avoid cache collision)
+        name = f"FIRRTLReg_{width}_i{init}"
 
         # Check if already exists
         if name in circuit._external_modules:
@@ -879,6 +879,100 @@ class Memory:
             return Memory.create_1r1w_sync(circuit, data_width, addr_width, depth)
         else:
             return Memory.create_1r1w_async(circuit, data_width, addr_width, depth)
+
+
+# =============================================================================
+# ShiftReg Module
+# =============================================================================
+
+class ShiftReg:
+    """Factory for shift register as CMT2 module.
+
+    A shift register is a chain of registers that delays data by a fixed
+    number of cycles. Data enters at one end (enq) and exits at the other (deq).
+
+    Built from: Reg instances for each stage
+
+    Interface:
+    - method "enq" (data): Write data to input stage
+    - value "deq" -> data: Read data from output stage
+    - value "valid" -> bool: Output is valid (always true after delay cycles)
+
+    The shift register delays data by `depth` cycles.
+
+    Example:
+        shiftreg_mod = ShiftReg.create(circuit, 32, depth=4)
+        sr = m.instance(shiftreg_mod, "delay_line", clk=clk, rst=rst)
+    """
+
+    @staticmethod
+    def create(circuit: Circuit, width: int, depth: int = 2) -> ModuleBuilder:
+        """Create a shift register as CMT2 module.
+
+        Args:
+            circuit: The circuit to add the module to.
+            width: Bit width of the data.
+            depth: Number of register stages (default 2).
+
+        Returns:
+            The ModuleBuilder for the shift register.
+        """
+        name = f"ShiftReg_w{width}_d{depth}"
+
+        if name in circuit._modules:
+            return circuit._modules[name]
+
+        if depth < 1:
+            depth = 1
+
+        # Get register primitive
+        reg_mod = Reg.create(circuit, width)
+
+        with circuit.module(name) as shiftreg:
+            clk = shiftreg.clock("clk")
+            rst = shiftreg.reset("rst")
+
+            # Create chain of registers
+            stages = []
+            for i in range(depth):
+                stage = shiftreg.instance(reg_mod, f"stage{i}", clk=clk, rst=rst)
+                stages.append(stage)
+
+            # Value: deq() -> data (read from last stage)
+            with shiftreg.value("deq", returns=[UInt(width)]) as deq_val:
+                with deq_val.guard() as g:
+                    g.always()
+                with deq_val.body() as body:
+                    result = body.call(stages[-1], "read")
+                    body.returns(result)
+
+            # Value: valid() -> bool (always true for simple shift reg)
+            with shiftreg.value("valid", returns=[UInt(1)]) as valid_val:
+                with valid_val.guard() as g:
+                    g.always()
+                with valid_val.body() as body:
+                    body.returns(body.const(1, 1))
+
+            # Method: enq(data) - write to first stage and shift through
+            with shiftreg.method("enq", args=[("data", UInt(width))]) as enq_meth:
+                with enq_meth.guard() as g:
+                    g.always()
+                with enq_meth.body() as body:
+                    # Write new data to first stage
+                    body.call(stages[0], "write", body.arg("data"))
+                    # Shift data through remaining stages
+                    for i in range(1, depth):
+                        prev_data = body.call(stages[i - 1], "read")
+                        body.call(stages[i], "write", prev_data)
+
+            # Precedence: deq < valid < enq
+            shiftreg.precedence(
+                deq_val.ref(),
+                valid_val.ref(),
+                enq_meth.ref()
+            )
+
+        return circuit._modules[name]
 
 
 # =============================================================================

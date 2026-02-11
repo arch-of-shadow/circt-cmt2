@@ -37,7 +37,6 @@ builtin.module {
 
             cmt2.proc.step @inc {
                 %c1 = firrtl.constant 1 : !firrtl.uint<1>
-                cmt2.proc.step_done %c1 : !firrtl.uint<1>
             }
 
             // This should fail: cmt2.call is in the body region of proc.while
@@ -98,7 +97,6 @@ builtin.module {
 
             cmt2.proc.step @inc {
                 %c1 = firrtl.constant 1 : !firrtl.uint<1>
-                cmt2.proc.step_done %c1 : !firrtl.uint<1>
             }
 
             cmt2.proc.rule @good_while() -> () {

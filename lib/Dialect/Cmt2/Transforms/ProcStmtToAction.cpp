@@ -21,8 +21,11 @@
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/IRMapping.h"
 #include "mlir/Pass/Pass.h"
+#include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/StringMap.h"
 #include "llvm/Support/Debug.h"
+#include "llvm/Support/MathExtras.h"
 
 #define DEBUG_TYPE "cmt2-proc-stmt-to-action"
 
@@ -58,7 +61,8 @@ private:
                           unsigned fsmWidth, ArrayAttr enablesAttr,
                           ArrayAttr transitionsAttr, uint64_t doneState,
                           ArrayAttr complexParsAttr,
-                          const DenseMap<StringRef, std::string> &branchFsmInstNames);
+                          const DenseMap<StringRef, std::string> &branchFsmInstNames,
+                          const DenseMap<StringRef, unsigned> &branchFsmWidths);
 
   /// Generate idle/running value methods.
   void generateStatusValues(ProcRuleOp procRule, cmt2::ModuleOp module,
@@ -79,7 +83,12 @@ private:
   void generateBranchFsmRules(ProcRuleOp procRule, cmt2::ModuleOp module,
                                OpBuilder &builder, StringRef mainFsmInstName,
                                unsigned fsmWidth, ArrayAttr complexParsAttr,
-                               const DenseMap<StringRef, std::string> &branchFsmInstNames);
+                               const DenseMap<StringRef, std::string> &branchFsmInstNames,
+                               const DenseMap<StringRef, unsigned> &branchFsmWidths);
+
+  /// Process a rule that originated from a dataflow task with proc control.
+  /// These rules have tdcc.* attributes and need FSM generation.
+  LogicalResult processDataflowTaskRule(RuleOp rule, cmt2::ModuleOp module);
 };
 
 } // end anonymous namespace
@@ -235,7 +244,8 @@ void ProcStmtToActionPass::generateStateRules(
     StringRef fsmInstName, unsigned fsmWidth, ArrayAttr enablesAttr,
     ArrayAttr transitionsAttr, uint64_t doneState,
     ArrayAttr complexParsAttr,
-    const DenseMap<StringRef, std::string> &branchFsmInstNames) {
+    const DenseMap<StringRef, std::string> &branchFsmInstNames,
+    const DenseMap<StringRef, unsigned> &branchFsmWidths) {
 
   Location loc = procRule.getLoc();
   auto fsmType = firrtl::UIntType::get(builder.getContext(), fsmWidth);
@@ -264,7 +274,6 @@ void ProcStmtToActionPass::generateStateRules(
       auto stateAttr = dict.getAs<IntegerAttr>("state");
       if (stepRef && stateAttr) {
         uint64_t state = stateAttr.getInt();
-        stepToStates[stepRef.getValue()].push_back(state);
 
         // TL2: Extract timing information
         StepTimingInfo timing;
@@ -280,7 +289,20 @@ void ProcStmtToActionPass::generateStateRules(
         if (auto isStaticAttr = dict.getAs<BoolAttr>("is_static"))
           timing.isStatic = isStaticAttr.getValue();
 
-        stepStateTiming[{stepRef.getValue(), state}] = timing;
+        // For static steps, TDCC provides an enable with an [start, end) window.
+        // We expand that window so we can clone scheduled operations in each
+        // cycle of the static step, based on `state_assignments` computed by
+        // StaticFSMAllocation.
+        if (timing.isStatic && timing.endState > timing.startState + 1) {
+          for (uint64_t activeState = timing.startState;
+               activeState < timing.endState; ++activeState) {
+            stepToStates[stepRef.getValue()].push_back(activeState);
+            stepStateTiming[{stepRef.getValue(), activeState}] = timing;
+          }
+        } else {
+          stepToStates[stepRef.getValue()].push_back(state);
+          stepStateTiming[{stepRef.getValue(), state}] = timing;
+        }
       }
     }
   }
@@ -290,14 +312,12 @@ void ProcStmtToActionPass::generateStateRules(
     uint64_t toState;
     int64_t guardOpId;   // -1 means unconditional
     bool guardInverted;  // true for else branches
-    StringRef doneStep;  // non-empty means guarded by step's done signal
     SmallVector<std::string> parJoinBranches;  // non-empty means parallel join guard
   };
 
   // Structure to hold parallel branch info
   struct ParBranchInfo {
     std::string name;
-    StringRef doneStep;
     uint64_t exitState;
     uint64_t firstState;
     uint64_t lastState;
@@ -329,9 +349,6 @@ void ProcStmtToActionPass::generateStateRules(
           auto brDict = cast<DictionaryAttr>(branchAttr);
           ParBranchInfo brInfo;
           brInfo.name = brDict.getAs<StringAttr>("name").getValue().str();
-          brInfo.doneStep = "";
-          if (auto doneStepAttr = brDict.getAs<StringAttr>("done_step"))
-            brInfo.doneStep = doneStepAttr.getValue();
           brInfo.exitState = 0;
           if (auto exitStateAttr = brDict.getAs<IntegerAttr>("exit_state"))
             brInfo.exitState = exitStateAttr.getInt();
@@ -399,11 +416,6 @@ void ProcStmtToActionPass::generateStateRules(
         }
       }
 
-      // Check for done signal guard (dynamic step exits)
-      if (auto doneStepAttr = dict.getAs<StringAttr>("done_step")) {
-        trans.doneStep = doneStepAttr.getValue();
-      }
-
       // Check for parallel join guard (AND of all branch completions)
       if (auto parJoinAttr = dict.getAs<ArrayAttr>("par_join_branches")) {
         for (auto branchAttr : parJoinAttr) {
@@ -457,7 +469,7 @@ void ProcStmtToActionPass::generateStateRules(
     if (!region || region->empty())
       return;
     for (auto &op : region->front()) {
-      if (isa<ProcIfOp, ProcStaticIfOp, ProcWhileOp>(&op)) {
+      if (isa<ProcIfOp, ProcCondIfOp, ProcStaticIfOp, ProcWhileOp>(&op)) {
         condOpIdToOp[nextCondOpId++] = &op;
       }
       // Recurse into nested regions
@@ -468,30 +480,6 @@ void ProcStmtToActionPass::generateStateRules(
   };
   collectCondOps(&procRule.getControl());
 
-  // Identify branch states that should be skipped in generateStateRules
-  // For simple parallel blocks: branch first states are merged into fork state handling
-  // For complex parallel blocks (per-branch FSM): branch states are in separate FSMs,
-  //   but fork/join states in the main FSM still need rules (don't skip them)
-  DenseSet<uint64_t> branchStatesToSkip;
-  for (auto &parBlock : parBlocks) {
-    if (!parBlock.needsPerBranchFsm) {
-      // Simple parallel: skip only the first branch states (merged into fork state)
-      auto forkTransIt = stateTransitions.find(parBlock.forkState);
-      if (forkTransIt != stateTransitions.end()) {
-        for (auto &trans : forkTransIt->second) {
-          // All unconditional transitions from fork are to branch states
-          if (trans.guardOpId < 0 && trans.doneStep.empty() && trans.parJoinBranches.empty()) {
-            branchStatesToSkip.insert(trans.toState);
-          }
-        }
-      }
-    }
-    // For per-branch FSM blocks, we DON'T skip any main FSM states.
-    // The fork state (parBlock.forkState) needs a rule to initialize branch FSMs.
-    // The join state (parBlock.joinState) needs a rule to check branch completion.
-    // Branch states are in separate FSMs handled by generateBranchFsmRules.
-  }
-
   // For parallel blocks with nested control, identify which states belong to which branch
   // NOTE: For per-branch FSM blocks, branch execution states are NOT in the main FSM.
   //       They have their own separate FSMs handled by generateBranchFsmRules.
@@ -501,12 +489,8 @@ void ProcStmtToActionPass::generateStateRules(
   // For per-branch FSM blocks, we leave stateToBranch empty since branch execution
   // states are not in the main FSM at all.
 
-  // For each state, generate a rule
+  // For each state, generate a rule.
   for (uint64_t state : allStates) {
-    // Skip branch states that are merged into fork state handling
-    if (branchStatesToSkip.contains(state))
-      continue;
-
     auto transIt = stateTransitions.find(state);
     auto stepsIt = stateToSteps.find(state);
     bool hasSteps = stepsIt != stateToSteps.end() && !stepsIt->second.empty();
@@ -561,6 +545,15 @@ void ProcStmtToActionPass::generateStateRules(
     if (isBranchState && !branchFsmName.empty()) {
       // Branch state with per-branch FSM:
       // Guard: main_fsm == fork_state AND branch_fsm == relative_state
+
+      // Look up branch-specific FSM width (may differ from parent FSM)
+      unsigned branchWidth = fsmWidth;  // Default to parent width
+      auto branchWidthIt = branchFsmWidths.find(branchInfo->name);
+      if (branchWidthIt != branchFsmWidths.end()) {
+        branchWidth = branchWidthIt->second;
+      }
+      auto branchFsmType = firrtl::UIntType::get(builder.getContext(), branchWidth);
+
       auto mainInstanceSym = FlatSymbolRefAttr::get(builder.getContext(), fsmInstName);
       auto mainFsmRead = guardBuilder.create<CallOp>(
           loc, SmallVector<Type>{fsmType}, ValueRange{},
@@ -571,16 +564,16 @@ void ProcStmtToActionPass::generateStateRules(
       auto mainAtFork = guardBuilder.create<firrtl::EQPrimOp>(
           loc, mainFsmRead.getResult(0), forkConst.getResult());
 
-      // Read branch FSM and check relative state
+      // Read branch FSM and check relative state (using branch-specific type/width)
       auto branchInstanceSym = FlatSymbolRefAttr::get(builder.getContext(), branchFsmName);
       auto branchFsmRead = guardBuilder.create<CallOp>(
-          loc, SmallVector<Type>{fsmType}, ValueRange{},
+          loc, SmallVector<Type>{branchFsmType}, ValueRange{},
           branchInstanceSym, readSym,
           ArrayAttr(), ArrayAttr());
       // Relative state: state - firstState + 1 (state 1 is first active state in branch FSM)
       uint64_t relativeState = state - branchInfo->firstState + 1;
       auto relStateConst = guardBuilder.create<firrtl::ConstantOp>(
-          loc, fsmType, llvm::APInt(fsmWidth, relativeState));
+          loc, branchFsmType, llvm::APInt(branchWidth, relativeState));
       auto branchAtState = guardBuilder.create<firrtl::EQPrimOp>(
           loc, branchFsmRead.getResult(0), relStateConst.getResult());
 
@@ -653,9 +646,6 @@ void ProcStmtToActionPass::generateStateRules(
     // Mapping to track cloned operations (shared across all steps in this state)
     IRMapping bodyMapping;
 
-    // For fork states, we need to enable all branch steps
-    SmallVector<std::pair<StringRef, Value>> branchDoneSignals;  // (stepName, doneValue)
-
     if (isForkState) {
       // Fork state: handle parallel block entry
       auto *parBlock = forkIt->second;
@@ -670,20 +660,28 @@ void ProcStmtToActionPass::generateStateRules(
 
         // Check if any branch FSM is at 0 (need initialization)
         Value anyBranchNotStarted = nullptr;
-        auto zeroConst = bodyBuilder.create<firrtl::ConstantOp>(
-            loc, fsmType, llvm::APInt(fsmWidth, 0)).getResult();
 
         for (const auto &branch : parBlock->branches) {
           auto branchFsmIt = branchFsmInstNames.find(branch.name);
           if (branchFsmIt != branchFsmInstNames.end()) {
+            // Look up branch-specific FSM width
+            unsigned branchWidth = fsmWidth;  // Default to parent width
+            auto branchWidthIt = branchFsmWidths.find(branch.name);
+            if (branchWidthIt != branchFsmWidths.end()) {
+              branchWidth = branchWidthIt->second;
+            }
+            auto branchFsmType = firrtl::UIntType::get(builder.getContext(), branchWidth);
+            auto branchZeroConst = bodyBuilder.create<firrtl::ConstantOp>(
+                loc, branchFsmType, llvm::APInt(branchWidth, 0)).getResult();
+
             auto branchInstanceSym = FlatSymbolRefAttr::get(
                 builder.getContext(), branchFsmIt->second);
             auto branchFsmRead = bodyBuilder.create<CallOp>(
-                loc, SmallVector<Type>{fsmType}, ValueRange{},
+                loc, SmallVector<Type>{branchFsmType}, ValueRange{},
                 branchInstanceSym, readSym,
                 ArrayAttr(), ArrayAttr());
             auto branchAtZero = bodyBuilder.create<firrtl::EQPrimOp>(
-                loc, branchFsmRead.getResult(0), zeroConst).getResult();
+                loc, branchFsmRead.getResult(0), branchZeroConst).getResult();
             if (!anyBranchNotStarted) {
               anyBranchNotStarted = branchAtZero;
             } else {
@@ -698,18 +696,28 @@ void ProcStmtToActionPass::generateStateRules(
         for (const auto &branch : parBlock->branches) {
           auto branchFsmIt = branchFsmInstNames.find(branch.name);
           if (branchFsmIt != branchFsmInstNames.end()) {
+            // Look up branch-specific FSM width
+            unsigned branchWidth = fsmWidth;  // Default to parent width
+            auto branchWidthIt = branchFsmWidths.find(branch.name);
+            if (branchWidthIt != branchFsmWidths.end()) {
+              branchWidth = branchWidthIt->second;
+            }
+            auto branchFsmType = firrtl::UIntType::get(builder.getContext(), branchWidth);
+            auto branchZeroConst = bodyBuilder.create<firrtl::ConstantOp>(
+                loc, branchFsmType, llvm::APInt(branchWidth, 0)).getResult();
+
             auto branchInstanceSym = FlatSymbolRefAttr::get(
                 builder.getContext(), branchFsmIt->second);
             // Read current value
             auto branchFsmRead = bodyBuilder.create<CallOp>(
-                loc, SmallVector<Type>{fsmType}, ValueRange{},
+                loc, SmallVector<Type>{branchFsmType}, ValueRange{},
                 branchInstanceSym, readSym,
                 ArrayAttr(), ArrayAttr());
             auto initStateConst = bodyBuilder.create<firrtl::ConstantOp>(
-                loc, fsmType, llvm::APInt(fsmWidth, 1)).getResult();
+                loc, branchFsmType, llvm::APInt(branchWidth, 1)).getResult();
             // Conditional: init if at zero, keep current otherwise
             auto branchAtZero = bodyBuilder.create<firrtl::EQPrimOp>(
-                loc, branchFsmRead.getResult(0), zeroConst).getResult();
+                loc, branchFsmRead.getResult(0), branchZeroConst).getResult();
             auto valueToWrite = bodyBuilder.create<firrtl::MuxPrimOp>(
                 loc, branchAtZero, initStateConst, branchFsmRead.getResult(0)).getResult();
             bodyBuilder.create<CallOp>(
@@ -719,60 +727,11 @@ void ProcStmtToActionPass::generateStateRules(
           }
         }
         // Main FSM stays at fork state - transition handled separately
-      } else {
-        // Simple parallel: enable all branch steps from the fork state (old behavior)
-        for (auto &trans : stateTransitions[state]) {
-          if (trans.guardOpId < 0 && trans.doneStep.empty() && trans.parJoinBranches.empty()) {
-            uint64_t branchState = trans.toState;
-            auto branchStepsIt = stateToSteps.find(branchState);
-            if (branchStepsIt != stateToSteps.end()) {
-              for (auto *stepOp : branchStepsIt->second) {
-                Region *bodyRegion = nullptr;
-                StringRef stepName;
-                if (auto step = dyn_cast<ProcStepOp>(stepOp)) {
-                  bodyRegion = &step.getBody();
-                  stepName = step.getSymName();
-                } else if (auto staticStep = dyn_cast<ProcStaticStepOp>(stepOp)) {
-                  bodyRegion = &staticStep.getBody();
-                  stepName = staticStep.getSymName();
-                }
-
-                if (bodyRegion && !bodyRegion->empty()) {
-                  IRMapping stepMapping;
-                  for (auto &op : bodyRegion->front()) {
-                    if (auto stepDone = dyn_cast<ProcStepDoneOp>(op)) {
-                      // Clone done signal computation and save it
-                      Value doneValue = stepMapping.lookupOrNull(stepDone.getDone());
-                      if (!doneValue && stepDone.getDone().getDefiningOp()) {
-                        std::function<Value(Value)> cloneDef;
-                        cloneDef = [&](Value v) -> Value {
-                          if (!v) return nullptr;
-                          if (auto mapped = stepMapping.lookupOrNull(v))
-                            return mapped;
-                          if (auto defOp = v.getDefiningOp()) {
-                            for (Value operand : defOp->getOperands())
-                              cloneDef(operand);
-                            bodyBuilder.clone(*defOp, stepMapping);
-                            return stepMapping.lookup(v);
-                          }
-                          return v;
-                        };
-                        doneValue = cloneDef(stepDone.getDone());
-                      }
-                      if (doneValue)
-                        branchDoneSignals.push_back({stepName, doneValue});
-                    } else {
-                      bodyBuilder.clone(op, stepMapping);
-                    }
-                  }
-                }
-              }
-            }
-          }
-        }
       }
-    } else if (hasSteps) {
-      // Normal state: clone step bodies
+    }
+
+    if (hasSteps) {
+      // Clone step bodies for this state.
       for (auto *stepOp : stepsIt->second) {
         Region *bodyRegion = nullptr;
         StringRef stepName;
@@ -789,11 +748,230 @@ void ProcStmtToActionPass::generateStateRules(
         // 1. After lowering, timing is implicit in the FSM state structure
         // 2. The CallOp verifier rejects timing outside static_step
         // 3. The FSM state machine already enforces correct timing
-        // See TL2/TL5 design decision in Development-Tracker.md
+        // See docs/Cmt2/features/Lowering.md for lowering overview and pointers.
 
         if (bodyRegion && !bodyRegion->empty()) {
-          for (auto &op : bodyRegion->front()) {
-            if (!isa<ProcStepDoneOp>(op)) {
+          if (auto staticStep = dyn_cast<ProcStaticStepOp>(stepOp)) {
+            // Static step: clone only operations scheduled for this cycle.
+            //
+            // StaticFSMAllocation annotates the step with:
+            //   state_assignments = [[local_state, call_idx...], ...]
+            // where call_idx refers to the i-th CallOp in the step body.
+            //
+            // We compute local_state = (global_state - step_enable_start_state)
+            // using the TDCC timing information expanded above.
+            auto timingIt =
+                stepStateTiming.find({staticStep.getSymName(), state});
+
+            uint64_t localState = 0;
+            if (timingIt != stepStateTiming.end())
+              localState = state - timingIt->second.startState;
+
+            DenseMap<int64_t, StringRef> activeCallTypes;
+            if (auto assignments =
+                    staticStep->getAttrOfType<ArrayAttr>("state_assignments")) {
+              for (auto entryAttr : assignments) {
+                auto entry = cast<ArrayAttr>(entryAttr);
+                if (entry.empty())
+                  continue;
+                auto stAttr = dyn_cast<IntegerAttr>(entry[0]);
+                if (!stAttr)
+                  continue;
+                if (static_cast<uint64_t>(stAttr.getInt()) != localState)
+                  continue;
+                for (size_t i = 1; i < entry.size(); ++i) {
+                  // Legacy format: integers are treated as "Enable".
+                  if (auto idxAttr = dyn_cast<IntegerAttr>(entry[i])) {
+                    activeCallTypes[idxAttr.getInt()] = "Enable";
+                    continue;
+                  }
+
+                  // New format: [call_idx, "Enable"/"GetRes"].
+                  if (auto pairAttr = dyn_cast<ArrayAttr>(entry[i])) {
+                    if (pairAttr.size() != 2)
+                      continue;
+                    auto idxAttr = dyn_cast<IntegerAttr>(pairAttr[0]);
+                    auto tyAttr = dyn_cast<StringAttr>(pairAttr[1]);
+                    if (!idxAttr || !tyAttr)
+                      continue;
+                    activeCallTypes[idxAttr.getInt()] = tyAttr.getValue();
+                  }
+                }
+                break;
+              }
+            } else {
+              // No scheduling info available: fall back to cloning the full body
+              // in the first cycle only.
+              if (localState == 0) {
+                for (auto &op : bodyRegion->front()) {
+                  bodyBuilder.clone(op, bodyMapping);
+                }
+              }
+              continue;
+            }
+
+            if (activeCallTypes.empty())
+              continue;
+
+            Block &stepBlock = bodyRegion->front();
+
+            // Map each CallOp in the step body to its call index, matching the
+            // indexing used by `state_assignments`.
+            DenseMap<Operation *, int64_t> callOpToIndex;
+            int64_t totalCalls = 0;
+            for (auto &op : stepBlock) {
+              if (auto call = dyn_cast<CallOp>(op))
+                callOpToIndex[call.getOperation()] = totalCalls++;
+            }
+
+            auto checkCrossCycleDependencies =
+                [&](CallOp consumerCall, int64_t consumerCallIdx,
+                    StringRef callTy) -> LogicalResult {
+              // For GetRes clones, we intentionally ignore operand dependencies:
+              // the per-cycle clone will substitute dummy operands so we don't
+              // re-execute operand-producing calls in the capture cycle.
+              if (callTy == "GetRes")
+                return success();
+
+              // Walk the consumer's operand definitions inside the static_step
+              // body. Any dependency on a CallOp that is not scheduled in this
+              // local cycle would require cross-cycle storage, which must be
+              // made explicit (e.g., via a Reg).
+              SmallVector<Value, 8> worklist(consumerCall.getOperands().begin(),
+                                             consumerCall.getOperands().end());
+              DenseSet<Value> visited;
+
+              while (!worklist.empty()) {
+                Value v = worklist.pop_back_val();
+                if (!v)
+                  continue;
+                if (!visited.insert(v).second)
+                  continue;
+                if (isa<BlockArgument>(v))
+                  continue;
+
+                Operation *defOp = v.getDefiningOp();
+                if (!defOp)
+                  continue;
+                if (defOp->getBlock() != &stepBlock)
+                  continue;
+
+                if (auto producerCall = dyn_cast<CallOp>(defOp)) {
+                  auto it = callOpToIndex.find(defOp);
+                  if (it != callOpToIndex.end()) {
+                    int64_t producerIdx = it->second;
+                    if (!activeCallTypes.contains(producerIdx)) {
+                      std::string msg;
+                      llvm::raw_string_ostream os(msg);
+                      os << "cross-cycle dependency on call result in "
+                            "proc.static_step @"
+                         << staticStep.getSymName() << ": call #"
+                         << consumerCallIdx
+                         << " uses value defined by call #" << producerIdx
+                         << " which is not scheduled in local cycle "
+                         << localState;
+
+                      (void)Cmt2Diagnostic::error(consumerCall.getOperation(),
+                                                  os.str())
+                          .note(producerCall.getLoc(),
+                                "producer call is scheduled in a different "
+                                "cycle of this static_step")
+                          .hint("insert explicit state (e.g. a Reg) to carry "
+                                "the value across cycles, or adjust call "
+                                "timing so the producer is active in the same "
+                                "cycle as the consumer")
+                          .withPythonSource()
+                          .emit();
+                      return failure();
+                    }
+                  }
+                }
+
+                for (Value operand : defOp->getOperands())
+                  worklist.push_back(operand);
+              }
+
+              return success();
+            };
+
+            // Clone dependencies for operands on-demand before cloning a call.
+            std::function<Value(Value)> cloneDef;
+            cloneDef = [&](Value v) -> Value {
+              if (!v)
+                return nullptr;
+              if (auto mapped = bodyMapping.lookupOrNull(v))
+                return mapped;
+              if (auto defOp = v.getDefiningOp()) {
+                // Only clone defs that are local to this step body; leave
+                // externally-defined values as-is.
+                if (defOp->getBlock() != &stepBlock)
+                  return v;
+                for (Value operand : defOp->getOperands())
+                  (void)cloneDef(operand);
+                bodyBuilder.clone(*defOp, bodyMapping);
+                return bodyMapping.lookup(v);
+              }
+              // Block argument (shouldn't happen for static_step bodies).
+              return v;
+            };
+
+            // Clone active calls (and required defs) for this localState.
+            int64_t callIdx = 0;
+            for (auto &op : stepBlock) {
+              auto call = dyn_cast<CallOp>(op);
+              if (!call)
+                continue;
+              auto callTyIt = activeCallTypes.find(callIdx);
+              if (callTyIt == activeCallTypes.end()) {
+                ++callIdx;
+                continue;
+              }
+
+              StringRef callTy = callTyIt->second;
+              if (failed(checkCrossCycleDependencies(call, callIdx, callTy))) {
+                signalPassFailure();
+                return;
+              }
+
+              if (callTy == "GetRes") {
+                // Create a capture-only call clone which does not depend on the
+                // original operands. This avoids re-running operand
+                // computations (which may contain other calls) in the capture
+                // cycle.
+                SmallVector<Value> dummyOperands;
+                dummyOperands.reserve(call.getNumOperands());
+                for (Value operand : call->getOperands()) {
+                  dummyOperands.push_back(
+                      bodyBuilder.create<firrtl::InvalidValueOp>(
+                          loc, operand.getType())
+                          .getResult());
+                }
+
+                auto clonedCall = bodyBuilder.create<CallOp>(
+                    loc, call.getResultTypes(), dummyOperands,
+                    call.getCalleeAttr(), call.getMethodOrValueAttr(),
+                    call.getArgAttrsAttr(), call.getResAttrsAttr(),
+                    /*call_timing=*/nullptr, /*arg_timing=*/nullptr,
+                    /*result_timing=*/nullptr, /*call_ty=*/nullptr);
+                clonedCall->setAttr("call_ty",
+                                    bodyBuilder.getStringAttr(callTy));
+                for (auto [origRes, newRes] :
+                     llvm::zip(call.getResults(), clonedCall.getResults()))
+                  bodyMapping.map(origRes, newRes);
+              } else {
+                for (Value operand : call->getOperands())
+                  (void)cloneDef(operand);
+                Operation *cloned = bodyBuilder.clone(op, bodyMapping);
+                if (cloned) {
+                  OpBuilder attrBuilder(cloned);
+                  cloned->setAttr("call_ty", attrBuilder.getStringAttr(callTy));
+                }
+              }
+              ++callIdx;
+            }
+          } else {
+            // Dynamic step: clone full body.
+            for (auto &op : bodyRegion->front()) {
               bodyBuilder.clone(op, bodyMapping);
             }
           }
@@ -806,12 +984,12 @@ void ProcStmtToActionPass::generateStateRules(
     Value nextStateValue;
     std::string transitionDesc;
 
-    // Special handling for fork states: transition when all branches are done
-    if (isForkState) {
+    // Special handling for per-branch-FSM fork states: transition when all
+    // branch FSMs reach their done state.
+    if (isForkState && forkIt->second->needsPerBranchFsm) {
       auto *parBlock = forkIt->second;
       uint64_t joinState = parBlock->joinState;
 
-      if (parBlock->needsPerBranchFsm) {
         // Per-branch FSM mode: check if ALL branch FSMs are at their "done" state
         // Branch state values:
         // - 0 = idle (not started)
@@ -835,10 +1013,18 @@ void ProcStmtToActionPass::generateStateRules(
         for (const auto &branch : parBlock->branches) {
           auto branchFsmIt = branchFsmInstNames.find(branch.name);
           if (branchFsmIt != branchFsmInstNames.end()) {
+            // Look up branch-specific FSM width (may differ from parent FSM)
+            unsigned branchWidth = fsmWidth;  // Default to parent width
+            auto branchWidthIt = branchFsmWidths.find(branch.name);
+            if (branchWidthIt != branchFsmWidths.end()) {
+              branchWidth = branchWidthIt->second;
+            }
+            auto branchFsmType = firrtl::UIntType::get(builder.getContext(), branchWidth);
+
             auto branchInstanceSym = FlatSymbolRefAttr::get(
                 builder.getContext(), branchFsmIt->second);
             auto branchFsmRead = bodyBuilder.create<CallOp>(
-                loc, SmallVector<Type>{fsmType}, ValueRange{},
+                loc, SmallVector<Type>{branchFsmType}, ValueRange{},
                 branchInstanceSym, readSym,
                 ArrayAttr(), ArrayAttr());
 
@@ -849,9 +1035,9 @@ void ProcStmtToActionPass::generateStateRules(
               doneStateVal = numStatesIt->second - 1;  // Done state = numStates - 1
             }
 
-            // Check if at done state
+            // Check if at done state (using branch-specific width and type)
             auto doneConst = bodyBuilder.create<firrtl::ConstantOp>(
-                loc, fsmType, llvm::APInt(fsmWidth, doneStateVal)).getResult();
+                loc, branchFsmType, llvm::APInt(branchWidth, doneStateVal)).getResult();
             auto branchAtDone = bodyBuilder.create<firrtl::EQPrimOp>(
                 loc, branchFsmRead.getResult(0), doneConst).getResult();
 
@@ -864,124 +1050,33 @@ void ProcStmtToActionPass::generateStateRules(
           }
         }
 
-        if (allBranchesDone) {
-          // All branches done -> transition to join
-          auto joinConst = bodyBuilder.create<firrtl::ConstantOp>(
-              loc, fsmType, llvm::APInt(fsmWidth, joinState)).getResult();
-          auto stayConst = bodyBuilder.create<firrtl::ConstantOp>(
-              loc, fsmType, llvm::APInt(fsmWidth, state)).getResult();
-          nextStateValue = bodyBuilder.create<firrtl::MuxPrimOp>(
-              loc, allBranchesDone, joinConst, stayConst).getResult();
-          transitionDesc = "all_branches_done ? " + std::to_string(joinState) +
-                           " : " + std::to_string(state) + " (per-branch FSM fork-join)";
-        } else {
-          // Stay at fork state (branches still running or need initialization)
-          nextStateValue = bodyBuilder.create<firrtl::ConstantOp>(
-              loc, fsmType, llvm::APInt(fsmWidth, state)).getResult();
-          transitionDesc = std::to_string(state) + " (branches running)";
-        }
-      } else if (!branchDoneSignals.empty()) {
-        // Simple parallel mode: AND all branch done signals
-        Value allDone = branchDoneSignals[0].second;
-        for (size_t i = 1; i < branchDoneSignals.size(); ++i) {
-          allDone = bodyBuilder.create<firrtl::AndPrimOp>(
-              loc, allDone, branchDoneSignals[i].second).getResult();
-        }
+        if (!allBranchesDone)
+          allBranchesDone = bodyBuilder.create<firrtl::ConstantOp>(
+              loc, boolType, llvm::APInt(1, 1))
+                               .getResult();
 
-        // Generate: next_state = allDone ? joinState : forkState
+        // Generate: next_state = allBranchesDone ? joinState : forkState
         auto joinConst = bodyBuilder.create<firrtl::ConstantOp>(
             loc, fsmType, llvm::APInt(fsmWidth, joinState)).getResult();
         auto stayConst = bodyBuilder.create<firrtl::ConstantOp>(
             loc, fsmType, llvm::APInt(fsmWidth, state)).getResult();
         nextStateValue = bodyBuilder.create<firrtl::MuxPrimOp>(
-            loc, allDone, joinConst, stayConst).getResult();
-        transitionDesc = "all_done ? " + std::to_string(joinState) + " : " +
-                         std::to_string(state) + " (fork-join)";
-      } else {
-        // No branch signals, just stay at fork state
-        nextStateValue = bodyBuilder.create<firrtl::ConstantOp>(
-            loc, fsmType, llvm::APInt(fsmWidth, state)).getResult();
-        transitionDesc = std::to_string(state) + " (empty fork)";
-      }
+            loc, allBranchesDone, joinConst, stayConst).getResult();
+        transitionDesc = "all_branches_done ? " + std::to_string(joinState) +
+                         " : " + std::to_string(state) + " (per-branch FSM fork-join)";
     } else if (hasTransitions) {
       auto &transitions = transIt->second;
 
       // Check if single transition with no condition guard
       bool singleUnguarded = (transitions.size() == 1 && transitions[0].guardOpId < 0);
-      bool hasDoneGuard = (transitions.size() == 1 && !transitions[0].doneStep.empty());
       bool hasParJoinGuard = (transitions.size() == 1 && !transitions[0].parJoinBranches.empty());
 
-      if (singleUnguarded && !hasDoneGuard && !hasParJoinGuard) {
-        // Single unconditional transition (no condition, no done signal, no par join)
+      if (singleUnguarded && !hasParJoinGuard) {
+        // Single unconditional transition (no condition, no par join)
         uint64_t nextState = transitions[0].toState;
         nextStateValue = bodyBuilder.create<firrtl::ConstantOp>(
             loc, fsmType, llvm::APInt(fsmWidth, nextState)).getResult();
         transitionDesc = std::to_string(nextState);
-      } else if (hasDoneGuard) {
-        // Dynamic step exit - guard transition by done signal
-        // next_state = done ? nextState : currentState (stay until done)
-        StringRef doneStepName = transitions[0].doneStep;
-        uint64_t nextState = transitions[0].toState;
-
-        // Find the step and extract its done signal
-        // The step body was already cloned into bodyMapping (excluding ProcStepDoneOp)
-        // We need to find the done value in the original step
-        Value doneValue = nullptr;
-        if (hasSteps) {
-          for (auto *stepOp : stepsIt->second) {
-            if (auto step = dyn_cast<ProcStepOp>(stepOp)) {
-              if (step.getSymName() == doneStepName) {
-                // Find ProcStepDoneOp in the step body
-                for (auto &op : step.getBody().front()) {
-                  if (auto stepDone = dyn_cast<ProcStepDoneOp>(op)) {
-                    // The done signal should be in bodyMapping from step body cloning
-                    doneValue = bodyMapping.lookupOrNull(stepDone.getDone());
-                    if (!doneValue) {
-                      // If not in mapping, clone the done signal computation
-                      // (This handles cases where done is computed inline)
-                      Value origDone = stepDone.getDone();
-                      if (origDone.getDefiningOp()) {
-                        // Clone the defining operation chain
-                        std::function<Value(Value)> cloneDef;
-                        cloneDef = [&](Value v) -> Value {
-                          if (!v) return nullptr;
-                          if (auto mapped = bodyMapping.lookupOrNull(v))
-                            return mapped;
-                          if (auto defOp = v.getDefiningOp()) {
-                            for (Value operand : defOp->getOperands())
-                              cloneDef(operand);
-                            bodyBuilder.clone(*defOp, bodyMapping);
-                            return bodyMapping.lookup(v);
-                          }
-                          return v;
-                        };
-                        doneValue = cloneDef(origDone);
-                      }
-                    }
-                    break;
-                  }
-                }
-                break;
-              }
-            }
-          }
-        }
-
-        if (doneValue) {
-          // Generate: next_state = done ? nextState : currentState
-          auto nextConst = bodyBuilder.create<firrtl::ConstantOp>(
-              loc, fsmType, llvm::APInt(fsmWidth, nextState)).getResult();
-          auto stayConst = bodyBuilder.create<firrtl::ConstantOp>(
-              loc, fsmType, llvm::APInt(fsmWidth, state)).getResult();
-          nextStateValue = bodyBuilder.create<firrtl::MuxPrimOp>(
-              loc, doneValue, nextConst, stayConst).getResult();
-          transitionDesc = "done ? " + std::to_string(nextState) + " : " + std::to_string(state);
-        } else {
-          // Fallback: unconditional (done signal not found)
-          nextStateValue = bodyBuilder.create<firrtl::ConstantOp>(
-              loc, fsmType, llvm::APInt(fsmWidth, nextState)).getResult();
-          transitionDesc = std::to_string(nextState) + " (done signal not found)";
-        }
       } else {
         // Multiple conditional transitions - generate muxed next-state
         // Group transitions by guard condition
@@ -1032,6 +1127,8 @@ void ProcStmtToActionPass::generateStateRules(
               Value origCondValue = nullptr;
               if (auto ifOp = dyn_cast<ProcIfOp>(condOp)) {
                 origCondValue = ifOp.getCond();
+              } else if (auto condIfOp = dyn_cast<ProcCondIfOp>(condOp)) {
+                origCondValue = condIfOp.getCond();
               } else if (auto staticIfOp = dyn_cast<ProcStaticIfOp>(condOp)) {
                 origCondValue = staticIfOp.getCond();
               } else if (auto whileOp = dyn_cast<ProcWhileOp>(condOp)) {
@@ -1108,7 +1205,7 @@ void ProcStmtToActionPass::generateStateRules(
       if (hasTransitions) {
         auto &transitions = transIt->second;
         if (transitions.size() == 1 && transitions[0].guardOpId < 0 &&
-            transitions[0].doneStep.empty() && transitions[0].parJoinBranches.empty()) {
+            transitions[0].parJoinBranches.empty()) {
           // Single unconditional transition
           uint64_t nextAbsState = transitions[0].toState;
           // Done state = max relative state + 1
@@ -1141,6 +1238,8 @@ void ProcStmtToActionPass::generateStateRules(
                   origCondValue = whileOp.getCond();
                 } else if (auto ifOp = dyn_cast<ProcIfOp>(condOp)) {
                   origCondValue = ifOp.getCond();
+                } else if (auto condIfOp = dyn_cast<ProcCondIfOp>(condOp)) {
+                  origCondValue = condIfOp.getCond();
                 }
                 if (origCondValue && !condValue) {
                   // Clone condition into body
@@ -1165,30 +1264,6 @@ void ProcStmtToActionPass::generateStateRules(
               } else {
                 thenAbsState = trans.toState;
                 hasThen = true;
-              }
-            } else if (!trans.doneStep.empty()) {
-              // Done-guarded transition: done ? nextState : currentState
-              thenAbsState = trans.toState;
-              hasThen = true;
-              // The "else" is staying at the current state (when not done)
-              elseAbsState = state;
-              hasElse = true;
-              // For done-guarded transitions, we need to find the done signal
-              // which was already extracted and used to create nextStateValue
-              // We can reuse bodyMapping to find the cloned done value
-              StringRef doneStepName = trans.doneStep;
-              for (auto *stepOp : stepsIt != stateToSteps.end() ? stepsIt->second : SmallVector<Operation*>{}) {
-                if (auto step = dyn_cast<ProcStepOp>(stepOp)) {
-                  if (step.getSymName() == doneStepName) {
-                    for (auto &bodyOp : step.getBody().front()) {
-                      if (auto stepDone = dyn_cast<ProcStepDoneOp>(bodyOp)) {
-                        condValue = bodyMapping.lookupOrNull(stepDone.getDone());
-                        break;
-                      }
-                    }
-                    break;
-                  }
-                }
               }
             } else {
               elseAbsState = trans.toState;
@@ -1288,14 +1363,15 @@ void ProcStmtToActionPass::generateStateRules(
 void ProcStmtToActionPass::generateBranchFsmRules(
     ProcRuleOp procRule, cmt2::ModuleOp module, OpBuilder &builder,
     StringRef mainFsmInstName, unsigned fsmWidth, ArrayAttr complexParsAttr,
-    const DenseMap<StringRef, std::string> &branchFsmInstNames) {
+    const DenseMap<StringRef, std::string> &branchFsmInstNames,
+    const DenseMap<StringRef, unsigned> &branchFsmWidths) {
 
   if (!complexParsAttr)
     return;
 
   Location loc = procRule.getLoc();
   MLIRContext *ctx = builder.getContext();
-  auto fsmType = firrtl::UIntType::get(ctx, fsmWidth);
+  auto mainFsmType = firrtl::UIntType::get(ctx, fsmWidth);
   auto boolType = firrtl::UIntType::get(ctx, 1);
   StringRef procName = procRule.getSymName();
 
@@ -1340,6 +1416,14 @@ void ProcStmtToActionPass::generateBranchFsmRules(
         continue;
       }
       auto branchInstanceSym = FlatSymbolRefAttr::get(ctx, branchFsmIt->second);
+
+      // Look up branch-specific FSM width (may differ from main FSM width)
+      unsigned branchWidth = fsmWidth;  // Default to main FSM width
+      auto branchWidthIt = branchFsmWidths.find(branchName);
+      if (branchWidthIt != branchFsmWidths.end()) {
+        branchWidth = branchWidthIt->second;
+      }
+      auto branchFsmType = firrtl::UIntType::get(ctx, branchWidth);
 
       // Build transition map: from_state -> to_state
       // For unconditional transitions (enables), prefer back-edges (lower state)
@@ -1394,19 +1478,19 @@ void ProcStmtToActionPass::generateBranchFsmRules(
 
           // Read main FSM
           auto mainFsmRead = guardBuilder.create<CallOp>(
-              loc, SmallVector<Type>{fsmType}, ValueRange{},
+              loc, SmallVector<Type>{mainFsmType}, ValueRange{},
               mainInstanceSym, readSym, ArrayAttr(), ArrayAttr());
           auto forkConst = guardBuilder.create<firrtl::ConstantOp>(
-              loc, fsmType, llvm::APInt(fsmWidth, forkState));
+              loc, mainFsmType, llvm::APInt(fsmWidth, forkState));
           auto mainAtFork = guardBuilder.create<firrtl::EQPrimOp>(
               loc, mainFsmRead.getResult(0), forkConst.getResult());
 
-          // Read branch FSM
+          // Read branch FSM (using branch-specific type/width)
           auto branchFsmRead = guardBuilder.create<CallOp>(
-              loc, SmallVector<Type>{fsmType}, ValueRange{},
+              loc, SmallVector<Type>{branchFsmType}, ValueRange{},
               branchInstanceSym, readSym, ArrayAttr(), ArrayAttr());
           auto stateConst = guardBuilder.create<firrtl::ConstantOp>(
-              loc, fsmType, llvm::APInt(fsmWidth, state));
+              loc, branchFsmType, llvm::APInt(branchWidth, state));
           auto branchAtState = guardBuilder.create<firrtl::EQPrimOp>(
               loc, branchFsmRead.getResult(0), stateConst.getResult());
 
@@ -1420,7 +1504,7 @@ void ProcStmtToActionPass::generateBranchFsmRules(
           stateRule.getBody().push_back(bodyBlock);
           OpBuilder bodyBuilder(bodyBlock, bodyBlock->begin());
 
-          // Clone step body (excluding ProcStepDoneOp)
+          // Clone step body.
           auto stepIt = stepMap.find(stepName);
           if (stepIt != stepMap.end()) {
             Region *bodyRegion = nullptr;
@@ -1433,9 +1517,7 @@ void ProcStmtToActionPass::generateBranchFsmRules(
             if (bodyRegion && !bodyRegion->empty()) {
               IRMapping bodyMapping;
               for (auto &op : bodyRegion->front()) {
-                if (!isa<ProcStepDoneOp>(op)) {
-                  bodyBuilder.clone(op, bodyMapping);
-                }
+                bodyBuilder.clone(op, bodyMapping);
               }
             }
           }
@@ -1464,7 +1546,7 @@ void ProcStmtToActionPass::generateBranchFsmRules(
           }
 
           auto nextStateConst = bodyBuilder.create<firrtl::ConstantOp>(
-              loc, fsmType, llvm::APInt(fsmWidth, nextState));
+              loc, branchFsmType, llvm::APInt(branchWidth, nextState));
           bodyBuilder.create<CallOp>(
               loc, SmallVector<Type>{}, ValueRange{nextStateConst.getResult()},
               branchInstanceSym, writeSym, ArrayAttr(), ArrayAttr());
@@ -1555,19 +1637,19 @@ void ProcStmtToActionPass::generateBranchFsmRules(
 
         // Read main FSM
         auto mainFsmRead = guardBuilder.create<CallOp>(
-            loc, SmallVector<Type>{fsmType}, ValueRange{},
+            loc, SmallVector<Type>{mainFsmType}, ValueRange{},
             mainInstanceSym, readSym, ArrayAttr(), ArrayAttr());
         auto forkConst = guardBuilder.create<firrtl::ConstantOp>(
-            loc, fsmType, llvm::APInt(fsmWidth, forkState));
+            loc, mainFsmType, llvm::APInt(fsmWidth, forkState));
         auto mainAtFork = guardBuilder.create<firrtl::EQPrimOp>(
             loc, mainFsmRead.getResult(0), forkConst.getResult());
 
-        // Read branch FSM
+        // Read branch FSM (using branch-specific type/width)
         auto branchFsmRead = guardBuilder.create<CallOp>(
-            loc, SmallVector<Type>{fsmType}, ValueRange{},
+            loc, SmallVector<Type>{branchFsmType}, ValueRange{},
             branchInstanceSym, readSym, ArrayAttr(), ArrayAttr());
         auto stateConst = guardBuilder.create<firrtl::ConstantOp>(
-            loc, fsmType, llvm::APInt(fsmWidth, headerState));
+            loc, branchFsmType, llvm::APInt(branchWidth, headerState));
         auto branchAtState = guardBuilder.create<firrtl::EQPrimOp>(
             loc, branchFsmRead.getResult(0), stateConst.getResult());
 
@@ -1611,11 +1693,11 @@ void ProcStmtToActionPass::generateBranchFsmRules(
             falseTarget = toState;
         }
 
-        // Write next state: mux(cond, trueTarget, falseTarget)
+        // Write next state: mux(cond, trueTarget, falseTarget) using branch-specific type/width
         auto trueConst = bodyBuilder.create<firrtl::ConstantOp>(
-            loc, fsmType, llvm::APInt(fsmWidth, trueTarget));
+            loc, branchFsmType, llvm::APInt(branchWidth, trueTarget));
         auto falseConst = bodyBuilder.create<firrtl::ConstantOp>(
-            loc, fsmType, llvm::APInt(fsmWidth, falseTarget));
+            loc, branchFsmType, llvm::APInt(branchWidth, falseTarget));
         auto nextState = bodyBuilder.create<firrtl::MuxPrimOp>(
             loc, condValue, trueConst.getResult(), falseConst.getResult());
 
@@ -1649,19 +1731,19 @@ void ProcStmtToActionPass::generateBranchFsmRules(
         OpBuilder guardBuilder(guardBlock, guardBlock->begin());
         guardBuilder.create<ReturnOp>(loc);
 
-        // Body: return branch_fsm == doneState
+        // Body: return branch_fsm == doneState (using branch-specific type/width)
         Block *bodyBlock = new Block();
         doneValue.getBody().push_back(bodyBlock);
         OpBuilder bodyBuilder(bodyBlock, bodyBlock->begin());
 
         auto branchFsmRead = bodyBuilder.create<CallOp>(
-            loc, SmallVector<Type>{fsmType}, ValueRange{},
+            loc, SmallVector<Type>{branchFsmType}, ValueRange{},
             branchInstanceSym, readSym, ArrayAttr(), ArrayAttr());
         auto doneStateConst = bodyBuilder.create<firrtl::ConstantOp>(
-            loc, fsmType, llvm::APInt(fsmWidth, branchDoneState));
+            loc, branchFsmType, llvm::APInt(branchWidth, branchDoneState));
         auto isDone = bodyBuilder.create<firrtl::EQPrimOp>(
             loc, branchFsmRead.getResult(0), doneStateConst.getResult());
-        bodyBuilder.create<ReturnOp>(loc, ValueRange{isDone.getResult()});
+        bodyBuilder.create<ReturnOp>(loc, isDone.getResult());
 
         LLVM_DEBUG(llvm::dbgs() << "  Generated branch done value: "
                                 << doneValueName << " (done state = "
@@ -1836,8 +1918,9 @@ LogicalResult ProcStmtToActionPass::processProcRule(ProcRuleOp rule,
   LLVM_DEBUG(llvm::dbgs() << "  Created FSM instance @" << fsmInstName << "\n");
 
   // Create per-branch FSM instances for parallel blocks that need them
-  // Map from branch name to FSM instance name
+  // Map from branch name to FSM instance name and width
   DenseMap<StringRef, std::string> branchFsmInstNames;
+  DenseMap<StringRef, unsigned> branchFsmWidths;
 
   // Parse tdcc.complex_pars for detailed branch FSM info (new per-branch FSM approach)
   auto complexParsAttr = rule->getAttrOfType<ArrayAttr>("tdcc.complex_pars");
@@ -1848,18 +1931,36 @@ LogicalResult ProcStmtToActionPass::processProcRule(ProcRuleOp rule,
         for (auto bfAttr : branchFsmsAttr) {
           auto bfDict = cast<DictionaryAttr>(bfAttr);
           auto branchName = bfDict.getAs<StringAttr>("name").getValue();
+          uint64_t branchNumStates = bfDict.getAs<IntegerAttr>("num_states").getInt();
 
-          // Create FSM instance for this branch
+          // Calculate branch FSM width from num_states
+          unsigned branchWidth = llvm::Log2_64_Ceil(branchNumStates);
+          if (branchWidth == 0) branchWidth = 1;  // Minimum 1 bit
+          branchFsmWidths[branchName] = branchWidth;
+
+          // Find or create register module with branch-specific width
+          auto branchRegMod = findRegisterModule(circuit, branchWidth);
+          if (!branchRegMod) {
+            branchRegMod = createFSMRegisterModule(circuit, branchWidth, circuitBuilder);
+          }
+          StringRef branchRegModName;
+          if (auto extMod = dyn_cast<ExtModuleFirrtlOp>(branchRegMod)) {
+            branchRegModName = extMod.getSymName();
+          }
+
+          // Create FSM instance for this branch with branch-specific register module
           std::string branchFsmName = (fsmInstName + "_" + branchName).str();
           builder.create<InstanceOp>(
               loc, builder.getStringAttr(branchFsmName),
               ValueRange{clock, reset},
-              FlatSymbolRefAttr::get(builder.getContext(), regModName),
+              FlatSymbolRefAttr::get(builder.getContext(), branchRegModName),
               ArrayAttr());
 
           branchFsmInstNames[branchName] = branchFsmName;
           LLVM_DEBUG(llvm::dbgs() << "  Created branch FSM instance @"
-                                  << branchFsmName << " (from complex_pars)\n");
+                                  << branchFsmName << " (width=" << branchWidth
+                                  << ", numStates=" << branchNumStates
+                                  << ", from complex_pars)\n");
         }
       }
     }
@@ -1883,6 +1984,9 @@ LogicalResult ProcStmtToActionPass::processProcRule(ProcRuleOp rule,
             if (branchFsmInstNames.count(branchName))
               continue;
 
+            // For par_blocks fallback, use main FSM width (less precise but backwards compatible)
+            branchFsmWidths[branchName] = fsmWidth;
+
             // Create FSM instance for this branch
             std::string branchFsmName = (fsmInstName + "_" + branchName).str();
             builder.create<InstanceOp>(
@@ -1903,18 +2007,18 @@ LogicalResult ProcStmtToActionPass::processProcRule(ProcRuleOp rule,
   // Generate state-based rules
   generateStateRules(rule, module, builder, fsmInstName, fsmWidth, enablesAttr,
                      transitionsAttr, doneState, complexParsAttr,
-                     branchFsmInstNames);
+                     branchFsmInstNames, branchFsmWidths);
 
   // Generate branch FSM rules for complex par (new per-branch FSM approach)
   generateBranchFsmRules(rule, module, builder, fsmInstName, fsmWidth,
-                         complexParsAttr, branchFsmInstNames);
+                         complexParsAttr, branchFsmInstNames, branchFsmWidths);
 
   // Generate idle/running value methods
   generateStatusValues(rule, module, builder, fsmInstName, fsmWidth, doneState);
 
   // Update module precedence to include generated state rules
-  // Order: branch body states >> branch header states >> fork/join states >> reset
-  // This ensures branches execute before the fork state can interfere
+  // Principle: Later states in control flow have HIGHER precedence (pipeline semantics)
+  // This ensures downstream stages drain before upstream produces more.
   {
     SmallVector<Attribute> newPrecedenceChains;
 
@@ -1925,62 +2029,84 @@ LogicalResult ProcStmtToActionPass::processProcRule(ProcRuleOp rule,
       }
     }
 
-    // Build precedence chain for state rules
-    // Parse par_blocks to identify fork/join states and branch states
-    SmallVector<uint64_t> forkJoinStates;
-    SmallVector<uint64_t> branchHeaderStates;
-    SmallVector<uint64_t> branchBodyStates;
+    // Build precedence chain using state sequence order from TDCC
+    // Later states (higher seq_idx) have higher precedence, so they go first in chain
+    StringRef ruleName = rule.getSymName();
+    SmallVector<Attribute> stateChain;
 
-    if (auto parBlocksAttr = rule->getAttrOfType<ArrayAttr>("tdcc.par_blocks")) {
-      for (auto blockAttr : parBlocksAttr) {
-        auto dict = cast<DictionaryAttr>(blockAttr);
-        uint64_t forkState = dict.getAs<IntegerAttr>("fork_state").getInt();
-        uint64_t joinState = dict.getAs<IntegerAttr>("join_state").getInt();
-        forkJoinStates.push_back(forkState);
-        forkJoinStates.push_back(joinState);
+    // Read state order from TDCC
+    auto stateOrderAttr = rule->getAttrOfType<ArrayAttr>("tdcc.state_order");
+    if (stateOrderAttr) {
+      // Parse state order: [{state: N, seq_idx: M}, ...]
+      SmallVector<std::pair<uint64_t, uint64_t>> stateSeqPairs; // (state, seq_idx)
+      for (auto attr : stateOrderAttr) {
+        auto dict = cast<DictionaryAttr>(attr);
+        uint64_t state = dict.getAs<IntegerAttr>("state").getInt();
+        uint64_t seqIdx = dict.getAs<IntegerAttr>("seq_idx").getInt();
+        stateSeqPairs.push_back({state, seqIdx});
+      }
 
-        if (auto needsFsmAttr = dict.getAs<BoolAttr>("needs_per_branch_fsm")) {
-          if (needsFsmAttr.getValue()) {
-            if (auto branchesAttr = dict.getAs<ArrayAttr>("branches")) {
-              for (auto branchAttr : branchesAttr) {
-                auto brDict = cast<DictionaryAttr>(branchAttr);
-                uint64_t firstState = brDict.getAs<IntegerAttr>("first_state").getInt();
-                uint64_t lastState = brDict.getAs<IntegerAttr>("last_state").getInt();
-                // Header is first state, body states are the rest
-                branchHeaderStates.push_back(firstState);
-                for (uint64_t s = firstState + 1; s < lastState; ++s) {
-                  branchBodyStates.push_back(s);
+      // Sort by sequence index DESCENDING (later states first = higher precedence)
+      llvm::sort(stateSeqPairs, [](auto &a, auto &b) {
+        return a.second > b.second;
+      });
+
+      // Build precedence chain for main FSM states
+      for (auto &[state, seqIdx] : stateSeqPairs) {
+        std::string stateName = (ruleName + "_state" + std::to_string(state)).str();
+        stateChain.push_back(FlatSymbolRefAttr::get(builder.getContext(), stateName));
+      }
+
+      LLVM_DEBUG(llvm::dbgs() << "  Generated precedence chain with "
+                              << stateSeqPairs.size() << " states (by seq_idx desc)\n");
+    } else {
+      // Fallback: Use old par_blocks-based approach if no state_order
+      SmallVector<uint64_t> forkJoinStates;
+      SmallVector<uint64_t> branchHeaderStates;
+      SmallVector<uint64_t> branchBodyStates;
+
+      if (auto parBlocksAttr = rule->getAttrOfType<ArrayAttr>("tdcc.par_blocks")) {
+        for (auto blockAttr : parBlocksAttr) {
+          auto dict = cast<DictionaryAttr>(blockAttr);
+          uint64_t forkState = dict.getAs<IntegerAttr>("fork_state").getInt();
+          uint64_t joinState = dict.getAs<IntegerAttr>("join_state").getInt();
+          forkJoinStates.push_back(forkState);
+          forkJoinStates.push_back(joinState);
+
+          if (auto needsFsmAttr = dict.getAs<BoolAttr>("needs_per_branch_fsm")) {
+            if (needsFsmAttr.getValue()) {
+              if (auto branchesAttr = dict.getAs<ArrayAttr>("branches")) {
+                for (auto branchAttr : branchesAttr) {
+                  auto brDict = cast<DictionaryAttr>(branchAttr);
+                  uint64_t firstState = brDict.getAs<IntegerAttr>("first_state").getInt();
+                  uint64_t lastState = brDict.getAs<IntegerAttr>("last_state").getInt();
+                  branchHeaderStates.push_back(firstState);
+                  for (uint64_t s = firstState + 1; s < lastState; ++s) {
+                    branchBodyStates.push_back(s);
+                  }
                 }
               }
             }
           }
         }
       }
+
+      // Build precedence: body states >> header states >> fork/join
+      for (uint64_t s : branchBodyStates) {
+        std::string stateName = (ruleName + "_state" + std::to_string(s)).str();
+        stateChain.push_back(FlatSymbolRefAttr::get(builder.getContext(), stateName));
+      }
+      for (uint64_t s : branchHeaderStates) {
+        std::string stateName = (ruleName + "_state" + std::to_string(s)).str();
+        stateChain.push_back(FlatSymbolRefAttr::get(builder.getContext(), stateName));
+      }
+      for (uint64_t s : forkJoinStates) {
+        std::string stateName = (ruleName + "_state" + std::to_string(s)).str();
+        stateChain.push_back(FlatSymbolRefAttr::get(builder.getContext(), stateName));
+      }
     }
 
-    // Build precedence: body states >> header states >> fork/join >> reset
-    SmallVector<Attribute> stateChain;
-    StringRef ruleName = rule.getSymName();
-
-    // Body states first (highest priority)
-    for (uint64_t s : branchBodyStates) {
-      std::string stateName = (ruleName + "_state" + std::to_string(s)).str();
-      stateChain.push_back(FlatSymbolRefAttr::get(builder.getContext(), stateName));
-    }
-
-    // Then header states
-    for (uint64_t s : branchHeaderStates) {
-      std::string stateName = (ruleName + "_state" + std::to_string(s)).str();
-      stateChain.push_back(FlatSymbolRefAttr::get(builder.getContext(), stateName));
-    }
-
-    // Then fork/join states
-    for (uint64_t s : forkJoinStates) {
-      std::string stateName = (ruleName + "_state" + std::to_string(s)).str();
-      stateChain.push_back(FlatSymbolRefAttr::get(builder.getContext(), stateName));
-    }
-
-    // Finally reset rule
+    // Finally reset rule (lowest precedence)
     std::string resetName = (ruleName + "_reset").str();
     stateChain.push_back(FlatSymbolRefAttr::get(builder.getContext(), resetName));
 
@@ -2000,6 +2126,282 @@ LogicalResult ProcStmtToActionPass::processProcRule(ProcRuleOp rule,
 }
 
 //===----------------------------------------------------------------------===//
+// Dataflow Task Rule Processing (Phase 7 C2)
+//===----------------------------------------------------------------------===//
+
+LogicalResult ProcStmtToActionPass::processDataflowTaskRule(RuleOp rule,
+                                                             cmt2::ModuleOp module) {
+  // Only process rules that originated from dataflow tasks with proc control
+  if (!rule->hasAttr("dataflow.from_task") || !rule->hasAttr("tdcc.has_proc_control"))
+    return success();
+
+  LLVM_DEBUG(llvm::dbgs() << "Processing dataflow task rule @" << rule.getSymName() << "\n");
+
+  // Get TDCC metadata
+  auto numStatesAttr = rule->getAttrOfType<IntegerAttr>("tdcc.num_states");
+  auto fsmWidthAttr = rule->getAttrOfType<IntegerAttr>("tdcc.fsm_width");
+  auto doneStateAttr = rule->getAttrOfType<IntegerAttr>("tdcc.done_state");
+  auto enablesAttr = rule->getAttrOfType<ArrayAttr>("tdcc.enables");
+  auto transitionsAttr = rule->getAttrOfType<ArrayAttr>("tdcc.transitions");
+
+  if (!numStatesAttr || !fsmWidthAttr || !doneStateAttr) {
+    LLVM_DEBUG(llvm::dbgs() << "  Missing TDCC metadata, skipping\n");
+    return success();
+  }
+
+  unsigned fsmWidth = fsmWidthAttr.getInt();
+  uint64_t doneState = doneStateAttr.getInt();
+
+  // Find or create register module for FSM
+  auto circuit = module->getParentOfType<CircuitOp>();
+  OpBuilder circuitBuilder(circuit);
+  auto regMod = findRegisterModule(circuit, fsmWidth);
+  if (!regMod) {
+    regMod = createFSMRegisterModule(circuit, fsmWidth, circuitBuilder);
+    if (!regMod) {
+      rule.emitError("failed to create FSM register module for dataflow task");
+      return failure();
+    }
+  }
+
+  // Get clock and reset from module arguments
+  Value clock, reset;
+  for (auto arg : module.getBody().getArguments()) {
+    if (isa<firrtl::ClockType>(arg.getType())) {
+      clock = arg;
+    } else if (auto uintType = dyn_cast<firrtl::UIntType>(arg.getType())) {
+      if (uintType.getWidth() == 1 && !reset) {
+        reset = arg;
+      }
+    }
+  }
+
+  if (!clock || !reset) {
+    rule.emitError("could not find clock/reset for dataflow task FSM");
+    return failure();
+  }
+
+  // Create FSM instance
+  OpBuilder builder(rule);
+  builder.setInsertionPointAfter(rule);
+
+  Location loc = rule.getLoc();
+  auto taskNameAttr = rule->getAttrOfType<StringAttr>("dataflow.task_name");
+  std::string taskName = taskNameAttr ? taskNameAttr.getValue().str() : rule.getSymName().str();
+  std::string fsmInstName = "__fsm_df_" + taskName;
+
+  // Get the module name from the register module
+  StringRef regModName;
+  if (auto extMod = dyn_cast<ExtModuleFirrtlOp>(regMod)) {
+    regModName = extMod.getSymName();
+  }
+
+  // Create FSM instance
+  builder.create<InstanceOp>(
+      loc, builder.getStringAttr(fsmInstName),
+      ValueRange{clock, reset},
+      FlatSymbolRefAttr::get(builder.getContext(), regModName),
+      ArrayAttr());
+
+  LLVM_DEBUG(llvm::dbgs() << "  Created FSM instance @" << fsmInstName << "\n");
+
+  // Create tick rule for FSM transitions
+  std::string tickRuleName = rule.getSymName().str() + "_tick";
+  auto tickFuncType = builder.getFunctionType({}, {});
+
+  auto tickRule = builder.create<RuleOp>(
+      loc,
+      builder.getStringAttr(tickRuleName),
+      TypeAttr::get(tickFuncType),
+      builder.getStrArrayAttr({}),
+      builder.getArrayAttr({}),
+      nullptr, nullptr, nullptr, nullptr, nullptr);
+
+  // Mark tick rule with FSM metadata
+  tickRule->setAttr("dataflow.fsm_tick", builder.getUnitAttr());
+  tickRule->setAttr("dataflow.fsm_inst", builder.getStringAttr(fsmInstName));
+  tickRule->setAttr("dataflow.task_name", builder.getStringAttr(taskName));
+
+  // C4: Check if module needs stall gating and mark tick rule accordingly
+  if (module->hasAttr("stall.controller")) {
+    tickRule->setAttr("stall.gated", builder.getUnitAttr());
+    LLVM_DEBUG(llvm::dbgs() << "  Tick rule marked for stall gating\n");
+  }
+
+  // Build tick rule guard: always enabled (unconditional)
+  Region &tickGuardRegion = tickRule.getGuard();
+  Block *tickGuardBlock = new Block();
+  tickGuardRegion.push_back(tickGuardBlock);
+  OpBuilder tickGuardBuilder(tickGuardBlock, tickGuardBlock->begin());
+
+  // Create constant true for guard
+  auto boolType = firrtl::UIntType::get(builder.getContext(), 1);
+  auto trueConst = tickGuardBuilder.create<firrtl::ConstantOp>(
+      loc, boolType, APInt(1, 1));
+  tickGuardBuilder.create<ReturnOp>(loc, ValueRange{trueConst});
+
+  // Build tick rule body: FSM state transitions based on TDCC transitions
+  Region &tickBodyRegion = tickRule.getBody();
+  Block *tickBodyBlock = new Block();
+  tickBodyRegion.push_back(tickBodyBlock);
+  OpBuilder tickBodyBuilder(tickBodyBlock, tickBodyBlock->begin());
+
+  // Read current FSM state
+  auto fsmType = firrtl::UIntType::get(builder.getContext(), fsmWidth);
+  auto instanceSym = FlatSymbolRefAttr::get(builder.getContext(), fsmInstName);
+  auto readSym = FlatSymbolRefAttr::get(builder.getContext(), "read");
+  auto writeSym = FlatSymbolRefAttr::get(builder.getContext(), "write");
+
+  auto readOp = tickBodyBuilder.create<CallOp>(
+      loc, SmallVector<Type>{fsmType}, ValueRange{},
+      instanceSym, readSym,
+      ArrayAttr(), ArrayAttr());
+  Value currentState = readOp.getResult(0);
+
+  // Build next state logic based on transitions
+  // For now, simple sequential: state + 1 until done
+  Value nextState = currentState;
+
+  // Check if at done state, if so stay at done
+  auto doneStateConst = tickBodyBuilder.create<firrtl::ConstantOp>(
+      loc, fsmType, APInt(fsmWidth, doneState));
+  auto atDone = tickBodyBuilder.create<firrtl::EQPrimOp>(
+      loc, boolType, currentState, doneStateConst);
+
+  // Simple increment for next state (will be refined based on transitions)
+  auto oneConst = tickBodyBuilder.create<firrtl::ConstantOp>(
+      loc, fsmType, APInt(fsmWidth, 1));
+  auto incrementedWide = tickBodyBuilder.create<firrtl::AddPrimOp>(
+      loc, currentState, oneConst);
+  auto incrementedState = tickBodyBuilder.create<firrtl::BitsPrimOp>(
+      loc, incrementedWide, fsmWidth - 1, 0);
+
+  // Mux: if at done, stay at done; else increment
+  nextState = tickBodyBuilder.create<firrtl::MuxPrimOp>(
+      loc, atDone, doneStateConst, incrementedState);
+
+  // Write next state
+  tickBodyBuilder.create<CallOp>(
+      loc, SmallVector<Type>{}, ValueRange{nextState},
+      instanceSym, writeSym,
+      ArrayAttr(), ArrayAttr());
+
+  tickBodyBuilder.create<ReturnOp>(loc);
+
+  LLVM_DEBUG(llvm::dbgs() << "  Created tick rule @" << tickRuleName << "\n");
+
+  // Create step enable rules for each step in enables
+  if (enablesAttr) {
+    for (auto enableAttr : enablesAttr) {
+      auto enableDict = cast<DictionaryAttr>(enableAttr);
+      auto stepAttr = enableDict.getAs<FlatSymbolRefAttr>("step");
+      auto stateAttr = enableDict.getAs<IntegerAttr>("state");
+
+      if (!stepAttr || !stateAttr)
+        continue;
+
+      StringRef stepName = stepAttr.getValue();
+      uint64_t enableState = stateAttr.getInt();
+
+      // Create enable rule: guards on FSM state == enableState
+      // Include state in name for uniqueness when same step is enabled at different states
+      std::string enableRuleName = rule.getSymName().str() + "_enable_" +
+                                    stepName.str() + "_s" + std::to_string(enableState);
+
+      auto enableRule = builder.create<RuleOp>(
+          loc,
+          builder.getStringAttr(enableRuleName),
+          TypeAttr::get(tickFuncType),
+          builder.getStrArrayAttr({}),
+          builder.getArrayAttr({}),
+          nullptr, nullptr, nullptr, nullptr, nullptr);
+
+      // Guard: FSM state == enableState
+      Region &enableGuardRegion = enableRule.getGuard();
+      Block *enableGuardBlock = new Block();
+      enableGuardRegion.push_back(enableGuardBlock);
+      OpBuilder enableGuardBuilder(enableGuardBlock, enableGuardBlock->begin());
+
+      auto enableStateConst = enableGuardBuilder.create<firrtl::ConstantOp>(
+          loc, fsmType, APInt(fsmWidth, enableState));
+      auto stateReadOp = enableGuardBuilder.create<CallOp>(
+          loc, SmallVector<Type>{fsmType}, ValueRange{},
+          instanceSym, readSym,
+          ArrayAttr(), ArrayAttr());
+      auto atEnableState = enableGuardBuilder.create<firrtl::EQPrimOp>(
+          loc, boolType, stateReadOp.getResult(0), enableStateConst);
+      enableGuardBuilder.create<ReturnOp>(loc, ValueRange{atEnableState});
+
+      // Body: The step's body logic is activated when this rule fires
+      // For static steps, the step body is already defined separately
+      // This enable rule just gates when the step can execute
+      Region &enableBodyRegion = enableRule.getBody();
+      Block *enableBodyBlock = new Block();
+      enableBodyRegion.push_back(enableBodyBlock);
+      OpBuilder enableBodyBuilder(enableBodyBlock, enableBodyBlock->begin());
+
+      // Mark which step this rule enables via attribute
+      enableRule->setAttr("enables.step", builder.getStringAttr(stepName));
+      enableRule->setAttr("enables.state", builder.getI64IntegerAttr(enableState));
+      enableRule->setAttr("dataflow.fsm_inst", builder.getStringAttr(fsmInstName));
+
+      // C4: Mark enable rules for stall gating if module needs it
+      if (module->hasAttr("stall.controller")) {
+        enableRule->setAttr("stall.gated", builder.getUnitAttr());
+      }
+
+      enableBodyBuilder.create<ReturnOp>(loc);
+
+      LLVM_DEBUG(llvm::dbgs() << "  Created enable rule @" << enableRuleName
+                              << " for step @" << stepName << " at state " << enableState << "\n");
+    }
+  }
+
+  // Modify the original rule's guard to include FSM done state check
+  // The rule should only fire when FSM reaches done state
+  Region &guardRegion = rule.getGuard();
+  if (!guardRegion.empty()) {
+    Block &guardBlock = guardRegion.front();
+
+    // Find the return op
+    Operation *terminator = guardBlock.getTerminator();
+    if (auto returnOp = dyn_cast<ReturnOp>(terminator)) {
+      OpBuilder guardBuilder(returnOp);
+
+      // Read FSM state and check if at done
+      auto fsmReadOp = guardBuilder.create<CallOp>(
+          loc, SmallVector<Type>{fsmType}, ValueRange{},
+          instanceSym, readSym,
+          ArrayAttr(), ArrayAttr());
+      auto doneConst = guardBuilder.create<firrtl::ConstantOp>(
+          loc, fsmType, APInt(fsmWidth, doneState));
+      auto atDoneState = guardBuilder.create<firrtl::EQPrimOp>(
+          loc, boolType, fsmReadOp.getResult(0), doneConst);
+
+      // If there was an existing guard condition, AND it with done check
+      if (returnOp.getNumOperands() > 0) {
+        Value existingGuard = returnOp.getOperand(0);
+        auto combinedGuard = guardBuilder.create<firrtl::AndPrimOp>(
+            loc, existingGuard, atDoneState);
+        returnOp->setOperand(0, combinedGuard);
+      } else {
+        // Replace return with one that has the done check
+        guardBuilder.create<ReturnOp>(loc, ValueRange{atDoneState});
+        returnOp.erase();
+      }
+    }
+  }
+
+  // Mark rule as processed
+  rule->setAttr("dataflow.fsm_generated", builder.getUnitAttr());
+  rule->setAttr("dataflow.fsm_inst", builder.getStringAttr(fsmInstName));
+
+  LLVM_DEBUG(llvm::dbgs() << "  Added FSM done guard to rule\n");
+
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
 // Module Processing
 //===----------------------------------------------------------------------===//
 
@@ -2008,15 +2410,31 @@ void ProcStmtToActionPass::processModule(cmt2::ModuleOp module) {
                           << "\n");
 
   // Collect all proc rules
-  SmallVector<ProcRuleOp> rules;
+  SmallVector<ProcRuleOp> procRules;
   for (auto &op : module.getBodyRegion().front()) {
     if (auto rule = dyn_cast<ProcRuleOp>(op))
-      rules.push_back(rule);
+      procRules.push_back(rule);
   }
 
-  // Process each rule
-  for (auto rule : rules) {
+  // Process each proc rule
+  for (auto rule : procRules) {
     if (failed(processProcRule(rule, module))) {
+      signalPassFailure();
+      return;
+    }
+  }
+
+  // Collect and process dataflow task rules (Phase 7 C2)
+  SmallVector<RuleOp> dataflowRules;
+  for (auto &op : module.getBodyRegion().front()) {
+    if (auto rule = dyn_cast<RuleOp>(op)) {
+      if (rule->hasAttr("dataflow.from_task"))
+        dataflowRules.push_back(rule);
+    }
+  }
+
+  for (auto rule : dataflowRules) {
+    if (failed(processDataflowTaskRule(rule, module))) {
       signalPassFailure();
       return;
     }

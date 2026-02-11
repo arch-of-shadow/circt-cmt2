@@ -12,7 +12,7 @@ module {
       cmt2.bind.bare %rst, @rst : !firrtl.uint<1>
       cmt2.bind.value @read : () -> !firrtl.uint<32>[ arguments = [], results = ["res0"]]
       cmt2.bind.method @write : (!firrtl.uint<32>) -> ()[ arguments = ["data"], results = []]
-    } {conflict = [["write", "write"]], conflictFree = [["read", "read"]], sequenceBefore = [["read", "write"]]}
+    } {conflict = [[@write, @write]], conflictFree = [[@read, @read]], sequenceBefore = [[@read, @write]]}
 
     // Test location on module - should propagate to FIRRTL module
     cmt2.module @LocationTest(%clk: !firrtl.clock, %rst: !firrtl.uint<1>) {
@@ -26,7 +26,6 @@ module {
         %2 = firrtl.bits %1 31 to 0 : (!firrtl.uint<33>) -> !firrtl.uint<32> loc("test.py":13:5)
         cmt2.call @counter @write(%2) : (!firrtl.uint<32>) -> () loc("test.py":14:5)
         %c1_ui1 = firrtl.constant 1 : !firrtl.uint<1>
-        cmt2.proc.step_done %c1_ui1 : !firrtl.uint<1>
       } loc("test.py":9:3)
 
       // Test location on proc.rule - should propagate to generated GAA rule

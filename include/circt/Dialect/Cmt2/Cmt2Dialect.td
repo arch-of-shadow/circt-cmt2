@@ -22,9 +22,14 @@ def Cmt2Dialect : Dialect {
   // Enable automatic attribute printer/parser generation
   let useDefaultAttributePrinterParser = 1;
 
+  // Enable automatic type printer/parser generation
+  let useDefaultTypePrinterParser = 1;
+
   let extraClassDeclaration = [{
     /// Register all Cmt2 attributes.
     void registerAttributes();
+    /// Register all Cmt2 types.
+    void registerTypes();
   }];
 }
 

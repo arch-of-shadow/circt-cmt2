@@ -312,17 +312,35 @@ AnnotationScheduler::selectNonConflicting(
   std::sort(sortedRules.begin(), sortedRules.end());
 
   // Greedy selection: pick rules that don't conflict with already selected
+  // and respect sequenceBefore constraints
   std::vector<std::string> selected;
   for (const auto &[priority, rule] : sortedRules) {
     bool canSelect = true;
 
     // Check for conflicts with already selected rules
+    // (but allow if conflictFree is declared)
     for (const auto &selectedRule : selected) {
+      // Skip conflict check if rules are declared conflict-free
+      if (isConflictFree(rule, selectedRule)) {
+        continue;
+      }
       if (conflicts(rule, selectedRule)) {
         canSelect = false;
+        LLVM_DEBUG(llvm::dbgs() << "AnnotationScheduler: '" << rule
+                                << "' conflicts with '" << selectedRule << "'\n");
         break;
       }
     }
+
+    // Check sequenceBefore constraints:
+    // If 'rule' must sequence before any already-selected rule,
+    // we can still select it (it would run first).
+    // But if any already-selected rule must sequence before 'rule',
+    // we should still be able to select 'rule' (they run in order).
+    // The key constraint is: if 'rule' must sequence before 'X', and
+    // 'X' is already selected, 'rule' must also be selected (and run first).
+    // For now, we allow both to be selected as the sequencing is handled
+    // at execution time, not selection time.
 
     if (canSelect) {
       selected.push_back(rule);

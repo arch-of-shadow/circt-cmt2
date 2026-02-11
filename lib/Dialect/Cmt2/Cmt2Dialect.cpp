@@ -13,6 +13,9 @@
 #include "circt/Dialect/Cmt2/Cmt2Dialect.h"
 #include "circt/Dialect/Cmt2/Cmt2Attributes.h"
 #include "circt/Dialect/Cmt2/Cmt2Ops.h"
+#include "circt/Dialect/Cmt2/Cmt2Types.h"
+#include "mlir/IR/DialectImplementation.h"
+#include "llvm/ADT/TypeSwitch.h"
 
 using namespace circt;
 using namespace cmt2;
@@ -23,10 +26,7 @@ void Cmt2Dialect::initialize() {
   registerAttributes();
 
   // Register types.
-  addTypes<
-#define GET_TYPEDEF_LIST
-#include "circt/Dialect/Cmt2/Cmt2Types.cpp.inc"
-      >();
+  registerTypes();
 
   // Register operations.
   addOperations<

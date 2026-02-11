@@ -33,6 +33,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import TYPE_CHECKING
+import re
 
 if TYPE_CHECKING:
     from .circuit import Circuit
@@ -61,7 +62,13 @@ class SimulationWorkspace:
         └── README.md             # Instructions
     """
 
-    def __init__(self, circuit: Circuit, output_dir: str | Path, top_module: str | None = None):
+    def __init__(
+        self,
+        circuit: Circuit,
+        output_dir: str | Path,
+        top_module: str | None = None,
+        debug_ports: bool = False,
+    ):
         """Create a simulation workspace generator.
 
         Args:
@@ -69,11 +76,16 @@ class SimulationWorkspace:
             output_dir: Directory to generate workspace in.
             top_module: Optional explicit top module name. If not specified,
                 uses the last defined module in the circuit.
+            debug_ports: If True, enables debug firing ports in generated Verilog.
+                These ports expose rule fire signals for debugging and testbench
+                assertions. Each rule gets a `dbg_<rule_name>_firing` output port.
+                Default is False.
         """
         self.circuit = circuit
         self.output_dir = Path(output_dir)
         self._top_module = top_module if top_module else self._get_top_module_name()
         self._external_rtl: dict[str, str] = {}  # filename -> content
+        self._debug_ports = debug_ports
 
     def add_external_rtl(self, filename: str, content: str) -> "SimulationWorkspace":
         """Add external RTL file to the workspace.
@@ -90,6 +102,42 @@ class SimulationWorkspace:
         """
         self._external_rtl[filename] = content
         return self
+
+    def add_external_rtl_file(
+        self, path: str | Path, *, dest_name: str | None = None
+    ) -> "SimulationWorkspace":
+        """Add an external RTL file to the workspace by path.
+
+        This is a convenience wrapper over `add_external_rtl()` that reads the
+        file content and stages it into `rtl/<dest_name>`.
+
+        Args:
+            path: Path to an existing RTL file (SystemVerilog/Verilog).
+            dest_name: Optional destination filename under `rtl/`. Defaults to
+                `Path(path).name`.
+
+        Returns:
+            self for chaining.
+        """
+        path = Path(path)
+        filename = dest_name if dest_name is not None else path.name
+        self._external_rtl[filename] = path.read_text()
+        return self
+
+    def _add_external_rtl_files_from_circuit(self):
+        """Stage user-provided external RTL files declared on external modules."""
+        for ext in getattr(self.circuit, "_external_modules", {}).values():
+            for rtl in getattr(ext, "_rtl_files", []) or []:
+                try:
+                    self.add_external_rtl_file(rtl)
+                except Exception as e:
+                    ext_name = getattr(ext, "_name", None) or getattr(
+                        ext, "_firrtl_module_name", None
+                    )
+                    raise RuntimeError(
+                        f"Failed to stage external RTL file {rtl!s}"
+                        + (f" for external module {ext_name!r}" if ext_name else "")
+                    ) from e
 
     def _get_top_module_name(self) -> str:
         """Get the top-level module name from the circuit.
@@ -113,17 +161,97 @@ class SimulationWorkspace:
 
         library = get_module_library()
 
-        # Pre-generate FSM register modules for common widths (1-8 bits)
-        # The ProcStmtToAction pass auto-creates FSM register modules during
-        # lowering, and they need the corresponding FIRRTL modules.
-        for width in range(1, 9):
-            library.build_module("FIRRTLReg", {"width": width, "init": 0})
+        needed_module_names: set[str] = set()
+
+        # 1) Modules explicitly requested by the circuit (extern bindings).
+        # These are the "true hardware" extern modules backed by ModuleLibrary.
+        for ext in getattr(self.circuit, "_external_modules", {}).values():
+            firrtl_name = getattr(ext, "_firrtl_module_name", None) or getattr(ext, "_name", None)
+            if firrtl_name:
+                needed_module_names.add(firrtl_name)
+
+        # 2) Modules referenced by emitted Verilog but not defined in it.
+        # This is primarily for auto-generated Proc FSM regs (and similar),
+        # which are created during lowering and may not be present in
+        # circuit._external_modules.
+        verilog = getattr(self, "_last_emitted_verilog", None)
+        defined_modules: set[str] = set()
+        referenced_modules: set[str] = set()
+        if isinstance(verilog, str) and verilog:
+            defined_modules = self._extract_defined_modules(verilog)
+            referenced_modules = self._extract_instantiated_modules(verilog)
+            needed_module_names.update(referenced_modules - defined_modules)
+
+        # Build only what we know how to build from ModuleLibrary.
+        for module_name in sorted(needed_module_names):
+            build_spec = self._module_library_build_spec(module_name)
+            if build_spec is None:
+                continue
+            library_name, params = build_spec
+            library.build_module(library_name, params)
 
         verilog_modules = library.get_verilog_for_modules()
 
-        for module_name, verilog_content in verilog_modules.items():
+        # Only stage files that (a) were requested and (b) have generated RTL.
+        for module_name in sorted(needed_module_names):
+            verilog_content = verilog_modules.get(module_name)
+            if not verilog_content:
+                continue
+
+            # If the emitted SV already defines this module, don't write a
+            # duplicate file into the workspace.
+            if module_name in defined_modules:
+                continue
+
             filename = f"{module_name}.sv"
-            self.add_external_rtl(filename, verilog_content)
+            if filename not in self._external_rtl:
+                self.add_external_rtl(filename, verilog_content)
+
+    @staticmethod
+    def _extract_defined_modules(verilog: str) -> set[str]:
+        return set(
+            re.findall("(?m)^\\s*module\\s+([A-Za-z_][A-Za-z0-9_$]*)\\b", verilog)
+        )
+
+    @staticmethod
+    def _extract_instantiated_modules(verilog: str) -> set[str]:
+        # Heuristic: matches "<Type> <inst> (" at the start of a line, excluding
+        # "module <Type> (...)" definitions.
+        matches = re.findall(
+            "(?m)^\\s*(?!module\\b)([A-Za-z_][A-Za-z0-9_$]*)\\s+[A-Za-z_][A-Za-z0-9_$]*\\s*\\(",
+            verilog,
+        )
+        return set(matches)
+
+    @staticmethod
+    def _module_library_build_spec(module_name: str) -> tuple[str, dict[str, int]] | None:
+        # Reg_width${width}_init${init}
+        m = re.fullmatch("Reg_width(\\d+)_init(\\d+)", module_name)
+        if m:
+            return ("FIRRTLReg", {"width": int(m.group(1)), "init": int(m.group(2))})
+
+        # Wire_w${width}
+        m = re.fullmatch("Wire_w(\\d+)", module_name)
+        if m:
+            return ("Wire", {"width": int(m.group(1))})
+
+        # Mem1r1w1c_w${data_width}_a${addr_width}_d${depth}
+        m = re.fullmatch("Mem1r1w1c_w(\\d+)_a(\\d+)_d(\\d+)", module_name)
+        if m:
+            return (
+                "Mem1r1w1c",
+                {"data_width": int(m.group(1)), "addr_width": int(m.group(2)), "depth": int(m.group(3))},
+            )
+
+        # Mem1r1w0c_w${data_width}_a${addr_width}_d${depth}
+        m = re.fullmatch("Mem1r1w0c_w(\\d+)_a(\\d+)_d(\\d+)", module_name)
+        if m:
+            return (
+                "Mem1r1w0c",
+                {"data_width": int(m.group(1)), "addr_width": int(m.group(2)), "depth": int(m.group(3))},
+            )
+
+        return None
 
     def generate_placeholder(self):
         """Generate workspace with placeholder testbench.
@@ -131,12 +259,12 @@ class SimulationWorkspace:
         Creates a simulation workspace with a template testbench
         that users can customize.
         """
-        self._add_stl_rtl()
         self._create_directories()
         self._generate_rtl()
         self._generate_placeholder_testbench()
         self._generate_makefile()
         self._generate_readme()
+        self.generate_waveform_config()
 
         print(f"Simulation workspace generated at {self.output_dir}")
         print(f"Edit tb/testbench.cpp to add your test logic")
@@ -148,12 +276,12 @@ class SimulationWorkspace:
         Args:
             testbench: A Testbench object describing the test sequences.
         """
-        self._add_stl_rtl()
         self._create_directories()
         self._generate_rtl()
         self._generate_testbench_from_dsl(testbench)
         self._generate_makefile()
         self._generate_readme()
+        self.generate_waveform_config()
 
         print(f"Simulation workspace generated at {self.output_dir}")
         print(f"Run 'make' to build and 'make run' to simulate")
@@ -202,6 +330,112 @@ class SimulationWorkspace:
             return False, "Build failed"
         return self.run()
 
+    def generate_waveform_config(self, output_file: str | None = None) -> str:
+        """Generate GTKWave save file with signal annotations.
+
+        Creates a .gtkw file that groups signals by CMT2 construct type:
+        - Clock and Reset signals
+        - Rule firing signals (if debug_ports enabled)
+        - Register values
+        - Instance signals
+
+        Args:
+            output_file: Optional path to write the .gtkw file.
+                        If not specified, writes to waves/<top>.gtkw.
+
+        Returns:
+            The path to the generated .gtkw file.
+        """
+        top = self._top_module
+        if output_file is None:
+            output_file = str(self.output_dir / "waves" / f"{top}.gtkw")
+
+        # Collect signals from the circuit
+        clock_signals = []
+        reset_signals = []
+        rule_signals = []
+        register_signals = []
+        other_signals = []
+
+        # Analyze circuit structure for signal groups
+        if hasattr(self.circuit, '_modules') and self.circuit._modules:
+            for mod_name, mod in self.circuit._modules.items():
+                prefix = f"TOP.{top}"
+
+                # Clock and reset
+                if hasattr(mod, '_clock') and mod._clock:
+                    clock_signals.append(f"{prefix}.clk")
+                if hasattr(mod, '_reset') and mod._reset:
+                    reset_signals.append(f"{prefix}.rst")
+
+                # Rules (debug firing signals)
+                if hasattr(mod, '_rules'):
+                    for rule_name in mod._rules:
+                        if self._debug_ports:
+                            rule_signals.append(f"{prefix}.dbg_{rule_name}_firing")
+
+                # Instances (likely registers)
+                if hasattr(mod, '_instances'):
+                    for inst_name, inst in mod._instances.items():
+                        register_signals.append(f"{prefix}.{inst_name}_read_data")
+
+        # Generate GTKWave save file
+        gtkw_content = f"""[*]
+[*] GTKWave Signal Configuration for {top}
+[*] Generated by PyCMT2
+[*]
+[dumpfile] "{self.output_dir}/waves/{top}.vcd"
+[dumpfile_size] 0
+[savefile] "{output_file}"
+[timestart] 0
+[size] 1920 1080
+[pos] -1 -1
+*-19.000000 50000 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1
+[treeopen] TOP.
+[treeopen] TOP.{top}.
+[sst_width] 233
+[signals_width] 300
+[sst_expanded] 1
+[sst_vpaned_height] 300
+"""
+
+        # Add signal groups
+        if clock_signals or reset_signals:
+            gtkw_content += "@28\n"  # Group header
+            gtkw_content += f"-Clock/Reset\n"
+            for sig in clock_signals + reset_signals:
+                gtkw_content += f"+{{{sig}}}\n"
+                gtkw_content += f"{sig}\n"
+
+        if rule_signals:
+            gtkw_content += "@28\n"
+            gtkw_content += f"-Rule Firing\n"
+            for sig in rule_signals:
+                gtkw_content += f"+{{{sig}}}\n"
+                gtkw_content += f"{sig}\n"
+
+        if register_signals:
+            gtkw_content += "@22\n"  # Hexadecimal display
+            gtkw_content += f"-Registers\n"
+            for sig in register_signals:
+                gtkw_content += f"+{{{sig}}}\n"
+                gtkw_content += f"{sig}\n"
+
+        gtkw_content += "@22\n"
+        gtkw_content += f"-Other\n"
+        gtkw_content += f"+{{TOP.{top}.*}}\n"
+
+        gtkw_content += "[pattern_trace] 1\n[pattern_trace] 0\n"
+
+        # Write the file
+        Path(output_file).parent.mkdir(parents=True, exist_ok=True)
+        Path(output_file).write_text(gtkw_content)
+
+        print(f"GTKWave config written to {output_file}")
+        print(f"Open with: gtkwave {self.output_dir}/waves/{top}.vcd -a {output_file}")
+
+        return output_file
+
     def _create_directories(self):
         """Create the workspace directory structure."""
         dirs = [
@@ -220,7 +454,10 @@ class SimulationWorkspace:
     def _generate_rtl(self):
         """Generate Verilog RTL files."""
         try:
-            verilog = self.circuit.to_verilog()
+            verilog = self.circuit.emit_verilog(debug_ports=self._debug_ports)
+            self._last_emitted_verilog = verilog
+            self._add_stl_rtl()
+            self._add_external_rtl_files_from_circuit()
             rtl_file = self.output_dir / "rtl" / f"{self._top_module}.sv"
             rtl_file.write_text(verilog)
         except Exception as e:
@@ -363,14 +600,20 @@ int main(int argc, char** argv) {{
 // DUT instance (global for sequence access)
 static V{top}* dut;
 static int cycle;
+static uint64_t cycle_count;
+static VerilatedVcdC* tfp;
+static uint64_t sim_time;
 
 // Helper functions
 void tick() {{
     dut->clk = 0;
     dut->eval();
+    if (tfp) tfp->dump(sim_time++);
     dut->clk = 1;
     dut->eval();
+    if (tfp) tfp->dump(sim_time++);
     cycle++;
+    cycle_count++;
 }}
 
 void reset(int cycles) {{
@@ -405,13 +648,16 @@ int main(int argc, char** argv) {{
 
     dut = new V{top}();
 
-    auto tfp = std::make_unique<VerilatedVcdC>();
-    dut->trace(tfp.get(), 99);
+    auto tfp_owner = std::make_unique<VerilatedVcdC>();
+    tfp = tfp_owner.get();
+    dut->trace(tfp, 99);
     tfp->open("waves/{top}.vcd");
 
     dut->clk = 0;
     dut->rst = 0;
     cycle = 0;
+    cycle_count = 0;
+    sim_time = 0;
 
     std::cout << "Running test sequences..." << std::endl;
 
@@ -419,6 +665,7 @@ int main(int argc, char** argv) {{
     run_all_sequences();
 
     tfp->close();
+    tfp = nullptr;
     delete dut;
 
     if (check_passed) {{
@@ -434,13 +681,11 @@ int main(int argc, char** argv) {{
         tb_file.write_text(tb_content)
 
     def _generate_sequence_code(self, testbench: Testbench) -> str:
-        """Generate C++ code for test sequences."""
-        from .testbench import (
-            ResetOp, WaitOp, DriveOp, ExpectOp,
-            CallMethodOp, WaitReadyOp, WaitConditionOp,
-            CommentOp, PrintOp
-        )
+        """Generate C++ code for test sequences.
 
+        Uses the to_cpp() method of each testbench operation to generate
+        C++ code, ensuring all operation types are properly handled.
+        """
         sequence_functions = []
         sequence_names = []
 
@@ -449,42 +694,12 @@ int main(int argc, char** argv) {{
             lines = [f'void run_{seq.name}() {{']
             lines.append(f'    std::cout << "Running sequence: {seq.name}" << std::endl;')
 
+            # Use the operation's to_cpp() method for correct code generation
             for op in seq._ops:
-                if isinstance(op, ResetOp):
-                    lines.append(f'    reset({op.cycles});')
-                elif isinstance(op, WaitOp):
-                    lines.append(f'    wait_cycles({op.cycles});')
-                elif isinstance(op, DriveOp):
-                    lines.append(f'    dut->{op.port} = {op.value};')
-                elif isinstance(op, ExpectOp):
-                    lines.append(f'    expect("{op.port}", dut->{op.port}, {op.value});')
-                elif isinstance(op, CallMethodOp):
-                    # Generate method call with enable/ready handshake
-                    lines.append(f'    // Call {op.instance}.{op.method}')
-                    lines.append(f'    dut->{op.instance}_{op.method}_enable = 1;')
-                    lines.append(f'    tick();')
-                    lines.append(f'    dut->{op.instance}_{op.method}_enable = 0;')
-                elif isinstance(op, WaitReadyOp):
-                    lines.append(f'    // Wait for {op.instance}.{op.method} ready')
-                    lines.append(f'    while (!dut->{op.instance}_{op.method}_ready) tick();')
-                elif isinstance(op, WaitConditionOp):
-                    # Wait until condition is true with timeout
-                    lines.append(f'    {{')
-                    lines.append(f'        int timeout = {op.timeout};')
-                    lines.append(f'        while (!({op.condition}) && timeout-- > 0) tick();')
-                    lines.append(f'        if (timeout <= 0) {{')
-                    lines.append(f'            std::cerr << "TIMEOUT waiting for: {op.condition}" << std::endl;')
-                    lines.append(f'            check_passed = false;')
-                    lines.append(f'        }}')
-                    lines.append(f'    }}')
-                elif isinstance(op, CommentOp):
-                    lines.append(f'    // {op.text}')
-                elif isinstance(op, PrintOp):
-                    if op.values:
-                        val_strs = ' << " " << dut->'.join([''] + list(op.values))
-                        lines.append(f'    std::cout << "{op.message}"{val_strs} << std::endl;')
-                    else:
-                        lines.append(f'    std::cout << "{op.message}" << std::endl;')
+                cpp_code = op.to_cpp()
+                # Indent each line of the generated code
+                for line in cpp_code.split('\n'):
+                    lines.append(f'    {line}')
 
             lines.append('}')
             sequence_functions.append('\n'.join(lines))
@@ -506,8 +721,20 @@ int main(int argc, char** argv) {{
 
 # Verilator configuration
 VERILATOR ?= verilator
+# NOTE: Verilator does not trace signals with a leading '_' by default.
+# Many compiler-generated internal signals use '_' prefixes to avoid name
+# collisions, so enable tracing underscores by default for debuggability.
+VERILATOR_TRACE_UNDERSCORE ?= 1
+VERILATOR_HAS_TRACE_UNDERSCORE := $(shell $(VERILATOR) --help 2>&1 | grep -q -- '--trace-underscore' && echo 1 || echo 0)
+VERILATOR_TRACE_UNDERSCORE_FLAG :=
+ifeq ($(VERILATOR_TRACE_UNDERSCORE),1)
+ifeq ($(VERILATOR_HAS_TRACE_UNDERSCORE),1)
+VERILATOR_TRACE_UNDERSCORE_FLAG := --trace-underscore
+endif
+endif
+
 VERILATOR_FLAGS = --cc --exe --build -j 0 \\
-    --trace --trace-structs \\
+    --trace --trace-structs $(VERILATOR_TRACE_UNDERSCORE_FLAG) \\
     -Wall -Wno-fatal \\
     --top-module {top}
 

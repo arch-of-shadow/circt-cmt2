@@ -21,12 +21,18 @@ lit.site.cfg.py
 # External software
 /ext
 
+# Reference repositories (local-only)
+/references/
+
 # Generated simulation workspaces
 *_workspace/
 sim_*/
 examples/PyCMT2/*_workspace/
 examples/PyCMT2/sim_*/
+.ralph-loop/
 calyx
 
 # Pdf
 *.pdf
+# Generated simulation workspaces
+examples/PyCMT2/*_sim/

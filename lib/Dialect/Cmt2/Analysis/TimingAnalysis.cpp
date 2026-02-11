@@ -292,6 +292,11 @@ TimingInfo TimingAnalysis::extractProcMethodTiming(ProcMethodOp method) {
 int64_t cmt2::getMaxCycleFromCall(CallOp call) {
   int64_t maxCycle = 0;
 
+  // Check call issue timing.
+  if (auto callTiming = call.getCallTiming()) {
+    maxCycle = std::max(maxCycle, callTiming->getEnd());
+  }
+
   // Check arg timing
   if (auto argTiming = call.getArgTiming()) {
     for (auto attr : *argTiming) {
@@ -314,14 +319,29 @@ int64_t cmt2::getMaxCycleFromCall(CallOp call) {
 }
 
 LogicalResult cmt2::checkCallResultTiming(CallOp call, int64_t methodLatency) {
+  int64_t callStart = 0;
+  if (auto callTiming = call.getCallTiming())
+    callStart = callTiming->getStart();
+
   if (auto resultTiming = call.getResultTiming()) {
     for (size_t i = 0; i < resultTiming->size(); ++i) {
       if (auto timing = dyn_cast<TimingIntervalAttr>((*resultTiming)[i])) {
-        if (timing.getStart() < methodLatency) {
+        int64_t requiredStart = callStart + methodLatency;
+        if (timing.getStart() < requiredStart) {
           return call.emitOpError("result ")
                  << i << " timing [" << timing.getStart() << ", "
                  << timing.getEnd() << ") starts before method latency ("
-                 << methodLatency << ")";
+                 << methodLatency << ") from call start cycle (" << callStart
+                 << "), requires >= " << requiredStart;
+        }
+        // Restriction (initial): require capture exactly at the declared
+        // availability cycle.
+        if (timing.getStart() != requiredStart) {
+          return call.emitOpError("result ")
+                 << i << " timing [" << timing.getStart() << ", "
+                 << timing.getEnd() << ") does not match required capture cycle ("
+                 << requiredStart << ") for method latency (" << methodLatency
+                 << ") from call start cycle (" << callStart << ")";
         }
       }
     }
@@ -330,6 +350,13 @@ LogicalResult cmt2::checkCallResultTiming(CallOp call, int64_t methodLatency) {
 }
 
 LogicalResult cmt2::checkCallArgTimingBounds(CallOp call, int64_t stepLatency) {
+  if (auto callTiming = call.getCallTiming()) {
+    if (callTiming->getEnd() > stepLatency) {
+      return call.emitOpError("call_timing [")
+             << callTiming->getStart() << ", " << callTiming->getEnd()
+             << ") extends beyond step latency (" << stepLatency << ")";
+    }
+  }
   if (auto argTiming = call.getArgTiming()) {
     for (size_t i = 0; i < argTiming->size(); ++i) {
       if (auto timing = dyn_cast<TimingIntervalAttr>((*argTiming)[i])) {

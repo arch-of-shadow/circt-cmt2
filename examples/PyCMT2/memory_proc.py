@@ -4,13 +4,13 @@
 #  SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
 """
-Memory STL Example with Procedural Control for PyCMT2.
+Memory STL Example with Procedural Control using Testbench DSL.
 
 This example demonstrates:
-1. Using Memory STL components (async and sync memory)
+1. Using Memory STL components (async memory)
 2. Procedural control (proc.step, proc.seq) for multi-cycle operations
 3. A memory sum accumulator that reads memory and sums values
-4. Simulation verification with Verilator
+4. Simulation verification with Testbench DSL
 
 The design implements a simple memory accumulator:
 - Stores values at addresses 0-3
@@ -19,7 +19,7 @@ The design implements a simple memory accumulator:
 
 Usage:
     cd circt-cmt2/build
-    PYTHONPATH=tools/circt/python_packages/circt_core:../lib/Bindings/Python python ../examples/PyCMT2/memory_proc.py
+    PYTHONPATH=tools/circt/python_packages/circt_core python3 ../examples/PyCMT2/memory_proc.py
 """
 
 import sys
@@ -27,177 +27,26 @@ import os
 import shutil
 from pathlib import Path
 
-# Add paths for both installed and source pycmt2
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../lib/Bindings/Python'))
+# Add circt Python packages to path
+build_dir = os.path.dirname(os.path.abspath(__file__))
+while build_dir and not os.path.exists(os.path.join(build_dir, "build")):
+    build_dir = os.path.dirname(build_dir)
+if build_dir:
+    sys.path.insert(0, os.path.join(build_dir, "build/tools/circt/python_packages/circt_core"))
 
-from pycmt2 import Circuit, UInt
-from pycmt2.stl import Reg, Memory
-from pycmt2.simulation import SimulationWorkspace
-
-
-# C++ testbench for memory accumulator
-MEMORY_TESTBENCH_CPP = """
-#include <verilated.h>
-#include <verilated_vcd_c.h>
-#include "VMemAccum.h"
-#include <iostream>
-#include <cstdint>
-
-int main(int argc, char** argv) {
-    Verilated::commandArgs(argc, argv);
-    Verilated::traceEverOn(true);
-
-    auto dut = new VMemAccum();
-    auto tfp = new VerilatedVcdC();
-    dut->trace(tfp, 99);
-    tfp->open("waves/MemAccum.vcd");
-
-    // Initialize
-    dut->clk = 0;
-    dut->rst = 1;
-    dut->write_enable = 0;
-    dut->read_enable = 0;
-    dut->start_sum_enable = 0;
-    dut->write_addr = 0;
-    dut->write_data = 0;
-    dut->read_addr = 0;
-
-    int cycle = 0;
-    bool all_passed = true;
-
-    auto tick = [&]() {
-        dut->clk = 0;
-        dut->eval();
-        tfp->dump(cycle * 10);
-        dut->clk = 1;
-        dut->eval();
-        tfp->dump(cycle * 10 + 5);
-        cycle++;
-    };
-
-    // Reset
-    std::cout << "Resetting..." << std::endl;
-    for (int i = 0; i < 5; i++) {
-        tick();
-    }
-    dut->rst = 0;
-    tick();
-
-    std::cout << "\\n=== Memory Write Test ===" << std::endl;
-
-    // Write values to memory: mem[0]=10, mem[1]=20, mem[2]=30, mem[3]=40
-    uint32_t test_values[4] = {10, 20, 30, 40};
-    uint32_t expected_sum = 10 + 20 + 30 + 40;  // = 100
-
-    for (int addr = 0; addr < 4; addr++) {
-        // Check write ready
-        if (dut->write_ready) {
-            dut->write_enable = 1;
-            dut->write_addr = addr;
-            dut->write_data = test_values[addr];
-            std::cout << "Writing mem[" << addr << "] = " << test_values[addr] << std::endl;
-            tick();
-            dut->write_enable = 0;
-        } else {
-            std::cout << "Write not ready at addr " << addr << std::endl;
-            all_passed = false;
-        }
-        tick();
-    }
-
-    std::cout << "\\n=== Memory Read Test ===" << std::endl;
-
-    // Read back values to verify
-    for (int addr = 0; addr < 4; addr++) {
-        dut->read_addr = addr;
-        dut->read_enable = 1;
-        tick();
-        dut->read_enable = 0;
-
-        std::cout << "Read mem[" << addr << "] = " << dut->read_res0 << std::endl;
-
-        if (dut->read_res0 != test_values[addr]) {
-            std::cout << "FAIL: Expected " << test_values[addr] << std::endl;
-            all_passed = false;
-        }
-    }
-
-    if (all_passed) {
-        std::cout << "Memory read verification PASSED!" << std::endl;
-    }
-
-    std::cout << "\\n=== Sum Operation Test ===" << std::endl;
-
-    // Check is_busy before starting
-    std::cout << "Before start: is_busy = " << (int)dut->is_busy_res0 << std::endl;
-
-    // Start sum operation
-    if (dut->start_sum_ready) {
-        std::cout << "Starting sum operation..." << std::endl;
-        dut->start_sum_enable = 1;
-        tick();
-        dut->start_sum_enable = 0;
-    } else {
-        std::cout << "FAIL: start_sum not ready" << std::endl;
-        all_passed = false;
-    }
-
-    // Wait for sum operation to complete
-    int max_cycles = 100;
-
-    for (int i = 0; i < max_cycles; i++) {
-        tick();
-
-        // Check if done (not busy anymore)
-        if (!dut->is_busy_res0) {
-            std::cout << "Sum operation completed in " << (i + 1) << " cycles" << std::endl;
-            break;
-        }
-
-        if (i == max_cycles - 1) {
-            std::cout << "FAIL: Sum operation timed out" << std::endl;
-            all_passed = false;
-        }
-    }
-
-    // Read the accumulated sum
-    uint32_t actual_sum = dut->get_sum_res0;
-    std::cout << "Accumulated sum = " << actual_sum << " (expected " << expected_sum << ")" << std::endl;
-
-    if (actual_sum == expected_sum) {
-        std::cout << "Sum verification PASSED!" << std::endl;
-    } else {
-        std::cout << "FAIL: Sum mismatch!" << std::endl;
-        all_passed = false;
-    }
-
-    tfp->close();
-    delete tfp;
-    delete dut;
-
-    if (all_passed) {
-        std::cout << "\\n=== All Tests PASSED! ===" << std::endl;
-        return 0;
-    } else {
-        std::cerr << "\\nSOME TESTS FAILED!" << std::endl;
-        return 1;
-    }
-}
-"""
+from circt.pycmt2 import Circuit, UInt
+from circt.pycmt2.stl import Reg, Memory, clear_stl_registry
+from circt.pycmt2.simulation import SimulationWorkspace
+from circt.pycmt2.testbench import Testbench
 
 
 def create_memory_accumulator_circuit():
-    """Create a circuit that uses Memory STL with procedural control.
+    """Create a circuit that uses Memory STL with procedural control."""
+    clear_stl_registry()
 
-    The MemoryAccumulator module has:
-    - A 4-entry memory (32-bit data, 2-bit address)
-    - A write method to store values
-    - A sum method that procedurally reads all entries and returns their sum
-    """
     circuit = Circuit("MemoryAccumulator")
 
     # Create memory module: 4 entries, 32-bit data, 2-bit address
-    # Using async memory (0-cycle read latency) for simpler procedural control
     mem_mod = Memory.create_1r1w_async(circuit, data_width=32, addr_width=2, depth=4)
 
     # Create register modules for state
@@ -220,7 +69,6 @@ def create_memory_accumulator_circuit():
         # =====================================================================
         with m.method("write", args=[("addr", UInt(2)), ("data", UInt(32))]) as write_meth:
             with write_meth.guard() as g:
-                # Can write when not busy
                 busy = g.call(busy_reg, "read")
                 not_busy = g.not_(busy)
                 g.returns(not_busy)
@@ -264,57 +112,47 @@ def create_memory_accumulator_circuit():
         # Procedural Steps for sum operation
         # =====================================================================
 
-        # Step: init_sum - Initialize accumulator and address counter
+        # Step: init_sum
         with m.step("init_sum") as step:
             step.call(accum_reg, "write", step.const(0, 32))
             step.call(addr_reg, "write", step.const(0, 2))
             step.call(busy_reg, "write", step.const(1, 1))
-            step.done(step.const(1, 1))
 
-        # Step: read_and_add - Read memory at current address and add to accumulator
+        # Step: read_and_add
         with m.step("read_and_add") as step:
             addr = step.call(addr_reg, "read")
             data = step.call(mem, "read", addr)
             current_sum = step.call(accum_reg, "read")
             new_sum = step.add(current_sum, data)
             step.call(accum_reg, "write", new_sum)
-            # Increment address
             new_addr = step.add(addr, step.const(1, 2))
             step.call(addr_reg, "write", new_addr)
-            step.done(step.const(1, 1))
 
-        # Step: finish_sum - Clear busy flag
+        # Step: finish_sum
         with m.step("finish_sum") as step:
             step.call(busy_reg, "write", step.const(0, 1))
-            step.done(step.const(1, 1))
 
         # =====================================================================
-        # Method: start_sum() - Start the sum operation (procedural)
-        # Uses proc rule internally to sequence the steps
+        # Method: start_sum() - Start the sum operation
         # =====================================================================
         with m.method("start_sum") as start_sum_meth:
             with start_sum_meth.guard() as g:
-                # Can start when not busy
                 busy = g.call(busy_reg, "read")
                 not_busy = g.not_(busy)
                 g.returns(not_busy)
             with start_sum_meth.body() as body:
-                # Just initialize - the proc rule will handle the rest
                 body.call(accum_reg, "write", body.const(0, 32))
                 body.call(addr_reg, "write", body.const(0, 2))
                 body.call(busy_reg, "write", body.const(1, 1))
 
         # =====================================================================
-        # Proc Rule: sum_loop - Procedural control for summing memory
-        # This rule fires when busy and sequences through the read operations
+        # Proc Rule: sum_loop
         # =====================================================================
         with m.proc_rule("sum_loop") as rule:
             with rule.guard() as g:
-                # Fire when busy
                 busy = g.call(busy_reg, "read")
                 g.returns(busy)
             with rule.control() as ctrl:
-                # Sequential execution: read 4 addresses, then finish
                 with ctrl.seq():
                     ctrl.enable(m._steps["read_and_add"].ref())
                     ctrl.enable(m._steps["read_and_add"].ref())
@@ -325,9 +163,166 @@ def create_memory_accumulator_circuit():
     return circuit
 
 
+def create_memory_testbench(circuit):
+    """Create testbench using DSL for memory accumulator."""
+    tb = Testbench(circuit, auto_debug_ports=True)
+
+    # Test values: mem[0]=10, mem[1]=20, mem[2]=30, mem[3]=40
+    test_values = [10, 20, 30, 40]
+    expected_sum = sum(test_values)  # = 100
+
+    # =========================================================================
+    # Test Sequence: Reset Test
+    # =========================================================================
+    with tb.sequence("test_reset") as seq:
+        seq.comment("Test: Verify reset behavior")
+        seq.reset(5)
+        seq.wait(1)
+        seq.expect("is_busy_res0", 0, "Should not be busy after reset")
+        seq.expect("get_sum_res0", 0, "Sum should be 0 after reset")
+        seq.print("Reset test passed")
+
+    # =========================================================================
+    # Test Sequence: Memory Write
+    # =========================================================================
+    with tb.sequence("test_memory_write") as seq:
+        seq.comment("=" * 60)
+        seq.comment("Test: Write values to memory")
+        seq.comment("=" * 60)
+        seq.reset(5)
+
+        # Write test values to memory
+        for addr, value in enumerate(test_values):
+            seq.comment(f"Write mem[{addr}] = {value}")
+            seq.wait_condition("dut->write_ready", timeout=10)
+            seq.drive("write_addr", addr)
+            seq.drive("write_data", value)
+            seq.drive("write_enable", 1)
+            seq.wait(1)
+            seq.drive("write_enable", 0)
+            seq.wait(1)
+
+        seq.print("Memory write completed")
+
+    # =========================================================================
+    # Test Sequence: Memory Read Verification
+    # =========================================================================
+    with tb.sequence("test_memory_read") as seq:
+        seq.comment("=" * 60)
+        seq.comment("Test: Read and verify memory contents")
+        seq.comment("=" * 60)
+        seq.reset(5)
+
+        # First write values
+        for addr, value in enumerate(test_values):
+            seq.wait_condition("dut->write_ready", timeout=10)
+            seq.drive("write_addr", addr)
+            seq.drive("write_data", value)
+            seq.drive("write_enable", 1)
+            seq.wait(1)
+            seq.drive("write_enable", 0)
+            seq.wait(1)
+
+        # Then read and verify
+        seq.comment("Reading back values...")
+        for addr, expected in enumerate(test_values):
+            seq.drive("read_addr", addr)
+            seq.drive("read_enable", 1)
+            seq.wait(1)
+            seq.drive("read_enable", 0)
+            seq.expect("read_res0", expected, f"mem[{addr}] should be {expected}")
+            seq.print(f"mem[{addr}] = ", "read_res0")
+
+        seq.print("Memory read verification passed")
+
+    # =========================================================================
+    # Test Sequence: Sum Operation
+    # =========================================================================
+    with tb.sequence("test_sum_operation") as seq:
+        seq.comment("=" * 60)
+        seq.comment("Test: Sum operation - accumulates all memory values")
+        seq.comment("=" * 60)
+        seq.reset(5)
+
+        # Write test values
+        for addr, value in enumerate(test_values):
+            seq.wait_condition("dut->write_ready", timeout=10)
+            seq.drive("write_addr", addr)
+            seq.drive("write_data", value)
+            seq.drive("write_enable", 1)
+            seq.wait(1)
+            seq.drive("write_enable", 0)
+            seq.wait(1)
+
+        # Start sum operation
+        seq.comment("Starting sum operation...")
+        seq.expect("is_busy_res0", 0, "Should not be busy before start")
+        seq.wait_condition("dut->start_sum_ready", timeout=10)
+        seq.drive("start_sum_enable", 1)
+        seq.wait(1)
+        seq.drive("start_sum_enable", 0)
+
+        # Wait for sum to complete
+        seq.record_cycle("sum_start")
+        seq.wait_condition("!dut->is_busy_res0", timeout=50)
+        seq.record_cycle("sum_end")
+
+        # Verify result
+        seq.expect("get_sum_res0", expected_sum, f"Sum should be {expected_sum}")
+        seq.print_cycle_diff("sum_start", "sum_end", "Sum operation latency")
+        seq.print("Sum = ", "get_sum_res0")
+        seq.print("Sum operation test PASSED")
+
+    # =========================================================================
+    # Test Sequence: Debug Port Verification
+    # =========================================================================
+    with tb.sequence("test_debug_ports") as seq:
+        seq.comment("=" * 60)
+        seq.comment("Debug Port Verification")
+        seq.comment("=" * 60)
+        seq.reset(5)
+
+        # Write values
+        for addr, value in enumerate(test_values):
+            seq.wait_condition("dut->write_ready", timeout=10)
+            seq.drive("write_addr", addr)
+            seq.drive("write_data", value)
+            seq.drive("write_enable", 1)
+            seq.wait(1)
+            seq.drive("write_enable", 0)
+            seq.wait(1)
+
+        # sum_loop should not fire when not busy
+        seq.comment("Before start_sum, sum_loop should not fire")
+        seq.expect_rule_fired("sum_loop_state0", False)
+
+        # Start sum
+        seq.wait_condition("dut->start_sum_ready", timeout=10)
+        seq.drive("start_sum_enable", 1)
+        seq.wait(1)
+        seq.drive("start_sum_enable", 0)
+
+        # Monitor sum_loop during operation
+        seq.comment("Monitoring sum_loop during sum operation...")
+        for i in range(8):
+            seq.wait(1)
+            seq.print_rule_status("sum_loop_state0")
+
+        # Wait for completion
+        seq.wait_condition("!dut->is_busy_res0", timeout=50)
+        seq.wait(2)
+
+        # After completion, sum_loop should not fire
+        seq.comment("After completion, sum_loop should not fire")
+        seq.expect_rule_fired("sum_loop_state0", False)
+        seq.print("Debug port verification completed")
+
+    return tb
+
+
 def main():
     print("=" * 70)
-    print("Memory STL Example with Procedural Control")
+    print("Memory STL Example with Procedural Control (Testbench DSL)")
     print("=" * 70)
 
     # Setup paths
@@ -349,34 +344,18 @@ def main():
         print(f"... ({len(mlir) - 2000} more characters)")
     print("-" * 70)
 
-    # Verify key constructs
-    constructs = [
-        ("Memory module", "Mem1r1w0c"),
-        ("proc.step", "cmt2.proc.step"),
-        ("proc.rule", "cmt2.proc.rule"),
-        ("proc.seq", "cmt2.proc.seq"),
-        ("proc.enable", "cmt2.proc.enable"),
-    ]
+    # Create testbench using DSL
+    print("\n3. Creating testbench using Testbench DSL...")
+    tb = create_memory_testbench(circuit)
+    print(f"   Test sequences: {len(tb._sequences)}")
+    for seq in tb._sequences:
+        print(f"      - {seq.name}: {len(seq._ops)} operations")
 
-    print("\n3. Verifying constructs in MLIR:")
-    for name, pattern in constructs:
-        found = pattern in mlir
-        status = "FOUND" if found else "MISSING"
-        print(f"   {name}: {status}")
+    print("\n4. Setting up simulation workspace with debug_ports=True...")
+    ws = SimulationWorkspace(circuit, sim_dir, debug_ports=True)
 
-    print("\n4. Setting up simulation workspace...")
-    ws = SimulationWorkspace(circuit, sim_dir)
-
-    # Generate workspace - STL RTL files are auto-added
-    ws._add_stl_rtl()
-    ws._create_directories()
-    ws._generate_rtl()
-    ws._generate_makefile()
-
-    # Write custom testbench
-    tb_file = sim_dir / "tb" / "testbench.cpp"
-    tb_file.write_text(MEMORY_TESTBENCH_CPP)
-
+    # Generate workspace with testbench
+    ws.generate_with_testbench(tb)
     print("   Workspace generated at:", sim_dir)
 
     print("\n5. Building simulation...")

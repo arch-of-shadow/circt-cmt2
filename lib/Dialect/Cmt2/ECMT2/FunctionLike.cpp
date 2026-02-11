@@ -203,11 +203,6 @@ ProcStep::ProcStep(llvm::StringRef name, Module *parent) : name_(name.str()) {
   bodyBuilder_ = std::make_unique<mlir::OpBuilder>(block, block->begin());
 }
 
-void ProcStep::stepDone(mlir::Value condition) {
-  bodyBuilder_->create<ProcStepDoneOp>(bodyBuilder_->getUnknownLoc(),
-                                        condition);
-}
-
 //===----------------------------------------------------------------------===//
 // ProcStaticStep
 //===----------------------------------------------------------------------===//

@@ -443,6 +443,60 @@ class ModuleBuilder:
         builder._finalize()
         self._steps[builder.name] = builder
 
+    # Dataflow pipelines
+
+    @contextmanager
+    def dataflow(
+        self,
+        name: str | None = None,
+        args: list[tuple[str, Cmt2Type]] | None = None,
+        returns: list[Cmt2Type] | None = None,
+        interval: int | None = None,
+    ) -> Iterator:
+        """Define a dataflow pipeline with token-based synchronization.
+
+        Dataflow pipelines describe concurrent computations connected by
+        tokens that carry data and synchronization signals. Each task in
+        the pipeline executes when its input tokens are valid.
+
+        Args:
+            name: Optional dataflow name.
+            args: Input arguments as (name, type) pairs.
+            returns: Output types.
+            interval: Optional initiation interval (default None = unlimited).
+                     Specifies minimum cycles between accepting new inputs.
+
+        Yields:
+            A DataflowBuilder for defining tasks and token flow.
+
+        Example:
+            with mod.dataflow("pipeline", args=[("input", UInt(32))],
+                             returns=[UInt(32)], interval=1) as df:
+                # First task produces a token
+                with df.task("stage0") as task:
+                    tok0 = task.create_token(df.input, UInt(32))
+                    task.yield_tokens(tok0)
+
+                # Second task consumes and transforms
+                with df.task("stage1", tokens_in=[tok0]) as task:
+                    data = task.token_data(tok0)
+                    result = task.add(data, task.const(1, 32))
+                    tok1 = task.create_token(result, UInt(32))
+                    task.yield_tokens(tok1)
+
+                # Final task outputs result
+                with df.task("output", tokens_in=[tok1]) as task:
+                    out = task.token_data(tok1)
+                    task.return_values(out)
+        """
+        from .dataflow_builders import DataflowBuilder
+
+        builder = DataflowBuilder(
+            self, name, args or [], returns or [], interval=interval
+        )
+        yield builder
+        builder._finalize()
+
     # Scheduling directives
 
     def sequence_before(

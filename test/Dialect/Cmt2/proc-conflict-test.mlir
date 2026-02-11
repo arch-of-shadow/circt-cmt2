@@ -49,7 +49,6 @@ builtin.module {
                 %new_val = firrtl.bits %sum 31 to 0 : (!firrtl.uint<33>) -> !firrtl.uint<32>
                 cmt2.call @counter @write(%new_val) : (!firrtl.uint<32>) -> ()
                 %c1_done = firrtl.constant 1 : !firrtl.uint<1>
-                cmt2.proc.step_done %c1_done : !firrtl.uint<1>
             }
 
             // Procedural rule: loop forever incrementing by 1

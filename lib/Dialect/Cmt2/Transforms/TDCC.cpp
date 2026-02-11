@@ -47,7 +47,6 @@ namespace {
 
 /// A guard specification that can be serialized.
 /// For if/else conditions, tracks the source operation and inversion.
-/// For dynamic step done signals, tracks the step name.
 struct GuardSpec {
   /// The operation that defines the condition (e.g., ProcIfOp, ProcStaticIfOp).
   /// nullptr means unconditional (always true).
@@ -58,10 +57,6 @@ struct GuardSpec {
 
   /// The actual FIRRTL Value for the condition (used during schedule building).
   Value condValue = nullptr;
-
-  /// For dynamic step exits: the step name whose done signal guards the transition.
-  /// Empty string means no done signal guard.
-  StringRef doneStepName;
 
   /// For parallel join: list of branch completion register names.
   /// The join transition fires when ALL of these are true.
@@ -88,13 +83,6 @@ struct GuardSpec {
     return g;
   }
 
-  /// Create a done signal guard for dynamic step exits.
-  static GuardSpec doneGuard(StringRef stepName) {
-    GuardSpec g;
-    g.doneStepName = stepName;
-    return g;
-  }
-
   /// Create a parallel join guard (AND of all branch completions).
   static GuardSpec parJoin(SmallVector<std::string> branchNames) {
     GuardSpec g;
@@ -103,9 +91,8 @@ struct GuardSpec {
   }
 
   bool isUnconditional() const {
-    return sourceOp == nullptr && doneStepName.empty() && parJoinBranches.empty();
+    return sourceOp == nullptr && parJoinBranches.empty();
   }
-  bool hasDoneGuard() const { return !doneStepName.empty(); }
   bool hasParJoinGuard() const { return !parJoinBranches.empty(); }
 };
 
@@ -294,9 +281,30 @@ private:
   /// Counter for generating unique par block IDs.
   uint64_t nextParId = 0;
 
+  /// State sequence order tracking for precedence generation.
+  /// Maps state ID to its sequence index (order in which states are encountered).
+  /// Later states (higher seq_idx) have higher precedence in pipeline semantics.
+  DenseMap<uint64_t, uint64_t> stateSequenceIndex;
+  uint64_t nextSequenceIndex = 0;
+
+  /// Record a state in the sequence order (called when state is first allocated).
+  void recordStateOrder(uint64_t state) {
+    if (stateSequenceIndex.find(state) == stateSequenceIndex.end()) {
+      stateSequenceIndex[state] = nextSequenceIndex++;
+      LLVM_DEBUG(llvm::dbgs() << "    State " << state << " -> seq_idx "
+                              << stateSequenceIndex[state] << "\n");
+    }
+  }
+
   /// Analyze the control flow in a branch and compute the states needed.
   /// Returns the number of states required (1+ for active states, 0 is reserved for idle/done).
   uint64_t analyzeBranchControl(Operation *branchOp, BranchFsmInfo &branchFsm);
+
+  /// Check if a region contains proc control operations.
+  static bool containsProcControl(Region &region);
+
+  /// Process a DataflowTaskOp that contains proc control operations.
+  void processDataflowTask(DataflowTaskOp task, cmt2::ModuleOp module);
 };
 
 } // end anonymous namespace
@@ -334,12 +342,12 @@ uint64_t TDCCPass::computeUniqueIdsForOp(Operation *op, uint64_t curState) {
         // Use iteration-aware state ID if inside static_repeat
         if (currentIteration >= 0) {
           iterStateIds[{enable.getOperation(), currentIteration}] = curState;
-          LLVM_DEBUG(llvm::dbgs() << "  Enable @" << enable.getGroupName()
+          LLVM_DEBUG(llvm::dbgs() << "  Enable @" << enable.getStepName()
                                   << " iter " << currentIteration
                                   << " -> state " << curState << "\n");
         } else {
           stateIds[enable] = curState;
-          LLVM_DEBUG(llvm::dbgs() << "  Enable @" << enable.getGroupName()
+          LLVM_DEBUG(llvm::dbgs() << "  Enable @" << enable.getStepName()
                                   << " -> state " << curState << "\n");
         }
 
@@ -354,6 +362,12 @@ uint64_t TDCCPass::computeUniqueIdsForOp(Operation *op, uint64_t curState) {
                         attrBuilder.getI64IntegerAttr(latency));
         enable->setAttr("tdcc.is_static",
                         attrBuilder.getBoolAttr(isStatic));
+
+        // Record state order for precedence generation
+        // For multi-cycle steps, record all intermediate states
+        for (int64_t i = 0; i < latency; ++i) {
+          recordStateOrder(curState + i);
+        }
 
         // Allocate 'latency' states for this step
         return curState + latency;
@@ -382,6 +396,7 @@ uint64_t TDCCPass::computeUniqueIdsForOp(Operation *op, uint64_t curState) {
 
         uint64_t forkState = (curState == 0) ? 1 : curState;
         stateIds[par] = forkState;
+        recordStateOrder(forkState);  // Record fork state in sequence
         LLVM_DEBUG(llvm::dbgs() << "  Par fork -> state " << forkState << "\n");
 
         // Check if this is a simple par (all children are enables)
@@ -411,7 +426,7 @@ uint64_t TDCCPass::computeUniqueIdsForOp(Operation *op, uint64_t curState) {
             } else {
               stateIds[enable] = execState;
             }
-            LLVM_DEBUG(llvm::dbgs() << "    Par enable @" << enable.getGroupName()
+            LLVM_DEBUG(llvm::dbgs() << "    Par enable @" << enable.getStepName()
                                     << " -> state " << execState << " (shared)\n");
 
             // Look up latency for this step
@@ -441,8 +456,14 @@ uint64_t TDCCPass::computeUniqueIdsForOp(Operation *op, uint64_t curState) {
                             attrBuilder.getBoolAttr(true));
           }
 
+          // Record exec state and all intermediate states for multi-cycle enables
+          for (int64_t i = 0; i < maxLatency; ++i) {
+            recordStateOrder(execState + i);
+          }
+
           // Join state is after max latency
           uint64_t joinState = execState + maxLatency;
+          recordStateOrder(joinState);  // Record join state in sequence
           LLVM_DEBUG(llvm::dbgs() << "  Simple par: exec state " << execState
                                   << ", max latency " << maxLatency
                                   << ", join -> state " << joinState << "\n");
@@ -462,6 +483,7 @@ uint64_t TDCCPass::computeUniqueIdsForOp(Operation *op, uint64_t curState) {
         // Join state is immediately after fork state in main FSM
         uint64_t joinState = forkState + 1;
         complexPar.joinState = joinState;
+        recordStateOrder(joinState);  // Record join state in sequence
 
         LLVM_DEBUG(llvm::dbgs() << "  Complex par " << complexPar.parId
                                 << ": fork=" << forkState << ", join=" << joinState << "\n");
@@ -506,6 +528,7 @@ uint64_t TDCCPass::computeUniqueIdsForOp(Operation *op, uint64_t curState) {
         // Branches can't get initial state (start at 1 if curState == 0)
         uint64_t cur = (curState == 0) ? 1 : curState;
         stateIds[ifOp] = cur;
+        recordStateOrder(cur);  // Record if header state
 
         // Process then branch
         uint64_t thenNext = cur;
@@ -525,12 +548,37 @@ uint64_t TDCCPass::computeUniqueIdsForOp(Operation *op, uint64_t curState) {
 
         return elseNext;
       })
+      .Case<ProcCondIfOp>([&](ProcCondIfOp condIfOp) {
+        // Similar to ProcIfOp but condition comes from condition region
+        uint64_t cur = (curState == 0) ? 1 : curState;
+        stateIds[condIfOp] = cur;
+        recordStateOrder(cur);  // Record cond_if header state
+
+        // Process then branch
+        uint64_t thenNext = cur;
+        for (Operation &stmt : condIfOp.getThenRegion().front()) {
+          if (!isa<ProcControlEndOp, ProcYieldOp>(stmt))
+            thenNext = computeUniqueIdsForOp(&stmt, thenNext);
+        }
+
+        // Process else branch
+        uint64_t elseNext = thenNext;
+        if (!condIfOp.getElseRegion().empty()) {
+          for (Operation &stmt : condIfOp.getElseRegion().front()) {
+            if (!isa<ProcControlEndOp, ProcYieldOp>(stmt))
+              elseNext = computeUniqueIdsForOp(&stmt, elseNext);
+          }
+        }
+
+        return elseNext;
+      })
       .Case<ProcWhileOp>([&](ProcWhileOp whileOp) {
         // While loop needs:
         // - Header state for condition checking (state N)
         // - Body states starting at N+1
         uint64_t headerState = (curState == 0) ? 1 : curState;
         stateIds[whileOp] = headerState;
+        recordStateOrder(headerState);  // Record while header state
         LLVM_DEBUG(llvm::dbgs() << "  While header -> state " << headerState << "\n");
 
         // Process body starting at headerState + 1
@@ -547,6 +595,7 @@ uint64_t TDCCPass::computeUniqueIdsForOp(Operation *op, uint64_t curState) {
         // Total states = count * body_states
         uint64_t cur = (curState == 0) ? 1 : curState;
         stateIds[repeatOp] = cur;
+        recordStateOrder(cur);  // Record static_repeat header state
         LLVM_DEBUG(llvm::dbgs() << "  StaticRepeat (count=" << repeatOp.getCount()
                                 << ") -> state " << cur << "\n");
 
@@ -568,6 +617,7 @@ uint64_t TDCCPass::computeUniqueIdsForOp(Operation *op, uint64_t curState) {
         // Static if: similar to regular if but with known latencies
         uint64_t cur = (curState == 0) ? 1 : curState;
         stateIds[staticIf] = cur;
+        recordStateOrder(cur);  // Record static_if header state
         LLVM_DEBUG(llvm::dbgs() << "  StaticIf -> state " << cur << "\n");
 
         // Process then branch
@@ -689,6 +739,27 @@ uint64_t TDCCPass::analyzeBranchControl(Operation *branchOp,
 
           return elseNext;
         })
+        .Case<ProcCondIfOp>([&](ProcCondIfOp condIfOp) {
+          uint64_t cur = curState;
+
+          // Process then branch
+          uint64_t thenNext = cur;
+          for (Operation &stmt : condIfOp.getThenRegion().front()) {
+            if (!isa<ProcControlEndOp, ProcYieldOp>(stmt))
+              thenNext = computeBranchStates(&stmt, thenNext);
+          }
+
+          // Process else branch (states continue after then)
+          uint64_t elseNext = thenNext;
+          if (!condIfOp.getElseRegion().empty()) {
+            for (Operation &stmt : condIfOp.getElseRegion().front()) {
+              if (!isa<ProcControlEndOp, ProcYieldOp>(stmt))
+                elseNext = computeBranchStates(&stmt, elseNext);
+            }
+          }
+
+          return elseNext;
+        })
         .Case<ProcStaticIfOp>([&](ProcStaticIfOp staticIf) {
           uint64_t cur = curState;
 
@@ -801,6 +872,254 @@ uint64_t TDCCPass::analyzeBranchControl(Operation *branchOp,
 }
 
 //===----------------------------------------------------------------------===//
+// Dataflow Task Processing (C1 - Dataflow-Proc Compatibility)
+//===----------------------------------------------------------------------===//
+
+bool TDCCPass::containsProcControl(Region &region) {
+  // Check if any operation in the region is a proc control operation
+  for (Block &block : region) {
+    for (Operation &op : block) {
+      if (isa<ProcSeqOp, ProcParOp, ProcIfOp, ProcCondIfOp, ProcWhileOp,
+              ProcStaticRepeatOp, ProcStaticIfOp, ProcEnableOp>(&op))
+        return true;
+      // Recursively check nested regions
+      for (Region &nestedRegion : op.getRegions()) {
+        if (containsProcControl(nestedRegion))
+          return true;
+      }
+    }
+  }
+  return false;
+}
+
+void TDCCPass::processDataflowTask(DataflowTaskOp task, cmt2::ModuleOp module) {
+  Region &body = task.getBody();
+  if (body.empty())
+    return;
+
+  // Check if task body contains proc control operations
+  if (!containsProcControl(body)) {
+    LLVM_DEBUG(llvm::dbgs() << "  Task @" << task.getSymName()
+                            << " has no proc control, skipping TDCC\n");
+    return;
+  }
+
+  LLVM_DEBUG(llvm::dbgs() << "Processing dataflow task @" << task.getSymName()
+                          << " with proc control\n");
+
+  // Clear state from previous processing
+  stateIds.clear();
+  iterStateIds.clear();
+  stateSequenceIndex.clear();
+  nextSequenceIndex = 0;
+  currentIteration = -1;
+  complexParBlocks.clear();
+  nextParId = 0;
+
+  // Step 1: Compute unique state IDs for proc control ops in task body
+  // Unlike ProcRuleOp/ProcMethodOp, task body is a flat region with mixed ops
+  LLVM_DEBUG(llvm::dbgs() << "Computing state IDs for task body...\n");
+  uint64_t numStates = 0;
+  for (Operation &op : body.front()) {
+    // Skip non-control operations (firrtl ops, token ops, etc.)
+    if (isa<ProcSeqOp, ProcParOp, ProcIfOp, ProcWhileOp,
+            ProcStaticRepeatOp, ProcStaticIfOp, ProcEnableOp>(&op)) {
+      numStates = computeUniqueIdsForOp(&op, numStates);
+    }
+  }
+  LLVM_DEBUG(llvm::dbgs() << "  Total states: " << numStates << "\n");
+
+  if (numStates == 0)
+    return;
+
+  // Step 2: Build the schedule
+  OpBuilder builder(task);
+  Schedule schedule;
+
+  SmallVector<PredEdge> initPreds = {{0, GuardSpec::unconditional()}};
+
+  for (Operation &op : body.front()) {
+    // Only process proc control operations for schedule building
+    if (isa<ProcSeqOp, ProcParOp, ProcIfOp, ProcWhileOp,
+            ProcStaticRepeatOp, ProcStaticIfOp, ProcEnableOp>(&op)) {
+      initPreds = calculateStatesRecur(schedule, &op, initPreds, builder, module);
+    }
+  }
+
+  // Step 3: Add transitions from final exits to done state
+  uint64_t doneState = schedule.maxState + 1;
+  for (auto &exitPred : initPreds) {
+    schedule.transitions.push_back({exitPred.state, doneState, exitPred.guard});
+    LLVM_DEBUG(llvm::dbgs() << "  Added final transition: " << exitPred.state
+                            << " -> " << doneState << " (done state)\n");
+  }
+
+  // Step 4: Realize the schedule as attributes on the task
+  // This is similar to realizeSchedule but stores on DataflowTaskOp
+  LLVM_DEBUG({
+    llvm::dbgs() << "Schedule for task @" << task.getSymName() << ":\n";
+    llvm::dbgs() << "  Max state: " << schedule.maxState << "\n";
+    llvm::dbgs() << "  Enables: " << schedule.enables.size() << " states\n";
+    llvm::dbgs() << "  Transitions: " << schedule.transitions.size() << "\n";
+  });
+
+  // Compute FSM width
+  uint64_t totalStates = schedule.maxState + 2; // +1 for done state
+  unsigned fsmWidth = llvm::Log2_64_Ceil(totalStates);
+  if (fsmWidth == 0) fsmWidth = 1;
+
+  // Add FSM metadata as attributes on the task
+  task->setAttr("tdcc.num_states", builder.getI64IntegerAttr(totalStates));
+  task->setAttr("tdcc.fsm_width", builder.getI64IntegerAttr(fsmWidth));
+  task->setAttr("tdcc.done_state", builder.getI64IntegerAttr(schedule.maxState + 1));
+  task->setAttr("tdcc.has_proc_control", builder.getUnitAttr());
+
+  // C5: Infer LS/LI mode from task body analysis
+  // If task contains dynamic control (while loops), tokens should be LI
+  // Otherwise (static control only), tokens can be LS
+  bool hasDynamicControl = false;
+  body.walk([&](ProcWhileOp whileOp) {
+    hasDynamicControl = true;
+  });
+  if (hasDynamicControl) {
+    task->setAttr("tdcc.requires_li_mode", builder.getUnitAttr());
+    LLVM_DEBUG(llvm::dbgs() << "  Task @" << task.getSymName()
+                            << " requires LI mode (has while loops)\n");
+  } else {
+    task->setAttr("tdcc.static_timing", builder.getUnitAttr());
+    LLVM_DEBUG(llvm::dbgs() << "  Task @" << task.getSymName()
+                            << " can use LS mode (static control only)\n");
+  }
+
+  // Store state assignments for enables
+  SmallVector<Attribute> stateAssigns;
+  auto computeEnableTiming = [&](ProcEnableOp enable, int64_t startState)
+      -> std::tuple<int64_t, int64_t, bool> {
+    int64_t latency = 1;
+    bool isStatic = false;
+    StringRef stepName = enable.getStepName();
+    auto it = stepMap.find(stepName);
+    if (it != stepMap.end()) {
+      if (auto staticStep = dyn_cast<ProcStaticStepOp>(it->second)) {
+        latency = staticStep.getLatency();
+        isStatic = true;
+      }
+    }
+    int64_t endState = startState + latency;
+    return {endState, latency, isStatic};
+  };
+
+  for (auto &[enableOp, state] : stateIds) {
+    if (auto enable = dyn_cast<ProcEnableOp>(enableOp)) {
+      auto [endState, latency, isStatic] =
+          computeEnableTiming(enable, /*startState=*/state);
+      auto entry = builder.getDictionaryAttr({
+        builder.getNamedAttr("step", enable.getStepNameAttr()),
+        builder.getNamedAttr("state", builder.getI64IntegerAttr(state)),
+        builder.getNamedAttr("end_state", builder.getI64IntegerAttr(endState)),
+        builder.getNamedAttr("latency", builder.getI64IntegerAttr(latency)),
+        builder.getNamedAttr("is_static", builder.getBoolAttr(isStatic))
+      });
+      stateAssigns.push_back(entry);
+    }
+  }
+  // Add iteration-aware state assignments from static_repeat
+  //
+  // IMPORTANT: Do not read `tdcc.*` timing attributes from the ProcEnableOp
+  // here. A ProcEnableOp inside `proc.static_repeat` is visited multiple times
+  // during unrolling, so any per-enable attributes stored directly on the op
+  // will be overwritten by the last iteration. Instead, recompute timing from
+  // the step definition and the iteration-specific `state`.
+  for (auto &[key, state] : iterStateIds) {
+    auto [enableOp, iteration] = key;
+    if (auto enable = dyn_cast<ProcEnableOp>(enableOp)) {
+      auto [endState, latency, isStatic] =
+          computeEnableTiming(enable, /*startState=*/state);
+      auto entry = builder.getDictionaryAttr({
+        builder.getNamedAttr("step", enable.getStepNameAttr()),
+        builder.getNamedAttr("state", builder.getI64IntegerAttr(state)),
+        builder.getNamedAttr("end_state", builder.getI64IntegerAttr(endState)),
+        builder.getNamedAttr("latency", builder.getI64IntegerAttr(latency)),
+        builder.getNamedAttr("is_static", builder.getBoolAttr(isStatic)),
+        builder.getNamedAttr("iteration", builder.getI64IntegerAttr(iteration))
+      });
+      stateAssigns.push_back(entry);
+    }
+  }
+  if (!stateAssigns.empty())
+    task->setAttr("tdcc.enables", builder.getArrayAttr(stateAssigns));
+
+  // Store transitions with guard information
+  DenseMap<Operation *, int64_t> condOpIds;
+  int64_t nextCondOpId = 0;
+  for (auto &[from, to, guard] : schedule.transitions) {
+    if (!guard.isUnconditional() && guard.sourceOp) {
+      if (condOpIds.find(guard.sourceOp) == condOpIds.end())
+        condOpIds[guard.sourceOp] = nextCondOpId++;
+    }
+  }
+
+  SmallVector<Attribute> transAttrs;
+  for (auto &[from, to, guard] : schedule.transitions) {
+    SmallVector<NamedAttribute> attrs;
+    attrs.push_back(builder.getNamedAttr("from", builder.getI64IntegerAttr(from)));
+    attrs.push_back(builder.getNamedAttr("to", builder.getI64IntegerAttr(to)));
+
+    if (!guard.isUnconditional()) {
+      if (guard.sourceOp) {
+        auto it = condOpIds.find(guard.sourceOp);
+        if (it != condOpIds.end()) {
+          attrs.push_back(builder.getNamedAttr("guard_op_id",
+                                               builder.getI64IntegerAttr(it->second)));
+          attrs.push_back(builder.getNamedAttr("guard_inverted",
+                                               builder.getBoolAttr(guard.inverted)));
+        }
+      }
+      if (guard.hasParJoinGuard()) {
+        SmallVector<Attribute> branchAttrs;
+        for (const auto &branchName : guard.parJoinBranches)
+          branchAttrs.push_back(builder.getStringAttr(branchName));
+        attrs.push_back(builder.getNamedAttr("par_join_branches",
+                                             builder.getArrayAttr(branchAttrs)));
+      }
+    }
+    transAttrs.push_back(builder.getDictionaryAttr(attrs));
+  }
+  if (!transAttrs.empty())
+    task->setAttr("tdcc.transitions", builder.getArrayAttr(transAttrs));
+
+  // Store complex par info if any
+  if (!complexParBlocks.empty()) {
+    SmallVector<Attribute> complexParAttrs;
+    for (const auto &complexPar : complexParBlocks) {
+      SmallVector<NamedAttribute> cpAttrs;
+      cpAttrs.push_back(builder.getNamedAttr("par_id",
+                                             builder.getI64IntegerAttr(complexPar.parId)));
+      cpAttrs.push_back(builder.getNamedAttr("fork_state",
+                                             builder.getI64IntegerAttr(complexPar.forkState)));
+      cpAttrs.push_back(builder.getNamedAttr("join_state",
+                                             builder.getI64IntegerAttr(complexPar.joinState)));
+
+      SmallVector<Attribute> branchFsmAttrs;
+      for (const auto &branchFsm : complexPar.branchFsms) {
+        SmallVector<NamedAttribute> bfAttrs;
+        bfAttrs.push_back(builder.getNamedAttr("name",
+                                               builder.getStringAttr(branchFsm.name)));
+        bfAttrs.push_back(builder.getNamedAttr("num_states",
+                                               builder.getI64IntegerAttr(branchFsm.numStates)));
+        branchFsmAttrs.push_back(builder.getDictionaryAttr(bfAttrs));
+      }
+      cpAttrs.push_back(builder.getNamedAttr("branch_fsms",
+                                             builder.getArrayAttr(branchFsmAttrs)));
+      complexParAttrs.push_back(builder.getDictionaryAttr(cpAttrs));
+    }
+    task->setAttr("tdcc.complex_pars", builder.getArrayAttr(complexParAttrs));
+  }
+
+  LLVM_DEBUG(llvm::dbgs() << "Added TDCC attributes to task @" << task.getSymName() << "\n");
+}
+
+//===----------------------------------------------------------------------===//
 // Control Exits
 //===----------------------------------------------------------------------===//
 
@@ -831,6 +1150,19 @@ void TDCCPass::controlExits(Operation *op, SmallVectorImpl<PredEdge> &exits,
         }
         if (!ifOp.getElseRegion().empty()) {
           for (Operation &stmt : ifOp.getElseRegion().front()) {
+            if (!isa<ProcControlEndOp, ProcYieldOp>(stmt))
+              controlExits(&stmt, exits, builder);
+          }
+        }
+      })
+      .Case<ProcCondIfOp>([&](ProcCondIfOp condIfOp) {
+        // Both branches contribute exits
+        for (Operation &stmt : condIfOp.getThenRegion().front()) {
+          if (!isa<ProcControlEndOp, ProcYieldOp>(stmt))
+            controlExits(&stmt, exits, builder);
+        }
+        if (!condIfOp.getElseRegion().empty()) {
+          for (Operation &stmt : condIfOp.getElseRegion().front()) {
             if (!isa<ProcControlEndOp, ProcYieldOp>(stmt))
               controlExits(&stmt, exits, builder);
           }
@@ -930,16 +1262,14 @@ SmallVector<PredEdge> TDCCPass::calculateStatesRecur(
         // Record the enable (will generate go signal later)
         schedule.addEnable(curState, nullptr, nullptr, nullptr);
 
-        // Return exit edge from the last state of this step
-        // - Static steps: unconditional (FSM counts cycles)
-        // - Dynamic steps: guarded by done signal
+        // Return exit edge from the last state of this step.
+        // Both dynamic steps and static steps advance when the corresponding
+        // state rule fires; multi-cycle static steps allocate internal
+        // transition states.
         uint64_t exitState = curState + latency - 1;
-        if (isStaticStep) {
-          return SmallVector<PredEdge>{{exitState, GuardSpec::unconditional()}};
-        } else {
-          // Dynamic step: exit is guarded by step's done signal
-          return SmallVector<PredEdge>{{exitState, GuardSpec::doneGuard(stepName)}};
-        }
+        (void)isStaticStep;
+        (void)stepName;
+        return SmallVector<PredEdge>{{exitState, GuardSpec::unconditional()}};
       })
       .Case<ProcSeqOp>([&](ProcSeqOp seq) {
         SmallVector<PredEdge> prev = preds;
@@ -978,6 +1308,55 @@ SmallVector<PredEdge> TDCCPass::calculateStatesRecur(
             if (!isa<ProcControlEndOp, ProcYieldOp>(stmt))
               falExits = calculateStatesRecur(schedule, &stmt, falPreds,
                                               builder, module);
+          }
+        } else {
+          // No else branch: false condition skips the if entirely
+          // Pass through predecessors with negative guard
+          for (auto &p : preds) {
+            falExits.push_back({p.state, GuardSpec::negative(ifOp, cond)});
+          }
+        }
+
+        // Combine exits
+        SmallVector<PredEdge> allExits;
+        allExits.append(truExits);
+        allExits.append(falExits);
+        return allExits;
+      })
+      .Case<ProcCondIfOp>([&](ProcCondIfOp condIfOp) {
+        // Same as ProcIfOp but condition comes from condition region
+        Value cond = condIfOp.getCond();
+
+        // True branch: predecessors with positive condition guard
+        SmallVector<PredEdge> truPreds;
+        for (auto &p : preds) {
+          truPreds.push_back({p.state, GuardSpec::positive(condIfOp, cond)});
+        }
+
+        SmallVector<PredEdge> truExits;
+        for (Operation &stmt : condIfOp.getThenRegion().front()) {
+          if (!isa<ProcControlEndOp, ProcYieldOp>(stmt))
+            truExits = calculateStatesRecur(schedule, &stmt, truPreds, builder,
+                                            module);
+        }
+
+        // False branch: predecessors with negative condition guard (!cond)
+        SmallVector<PredEdge> falExits;
+        if (!condIfOp.getElseRegion().empty()) {
+          SmallVector<PredEdge> falPreds;
+          for (auto &p : preds) {
+            falPreds.push_back({p.state, GuardSpec::negative(condIfOp, cond)});
+          }
+          for (Operation &stmt : condIfOp.getElseRegion().front()) {
+            if (!isa<ProcControlEndOp, ProcYieldOp>(stmt))
+              falExits = calculateStatesRecur(schedule, &stmt, falPreds,
+                                              builder, module);
+          }
+        } else {
+          // No else branch: false condition skips the if entirely
+          // Pass through predecessors with negative guard
+          for (auto &p : preds) {
+            falExits.push_back({p.state, GuardSpec::negative(condIfOp, cond)});
           }
         }
 
@@ -1125,29 +1504,21 @@ SmallVector<PredEdge> TDCCPass::calculateStatesRecur(
           // Add transition from fork state to exec state (unconditional)
           schedule.addTransition(forkState, execState);
 
-          // Compute max latency and collect done guards
+          // Compute max latency of branches (used to allocate internal states).
           int64_t maxLatency = 1;
-          bool allStatic = true;
-          SmallVector<StringRef> doneStepNames;
 
           for (auto enable : enableOps) {
             StringRef stepName = enable.getStepName();
             int64_t latency = 1;
-            bool isStatic = false;
 
             auto it = stepMap.find(stepName);
             if (it != stepMap.end()) {
               if (auto staticStep = dyn_cast<ProcStaticStepOp>(it->second)) {
                 latency = staticStep.getLatency();
-                isStatic = true;
               }
             }
 
             maxLatency = std::max(maxLatency, latency);
-            if (!isStatic) {
-              allStatic = false;
-              doneStepNames.push_back(stepName);
-            }
 
             // Record enable for this state
             schedule.addEnable(execState, nullptr, nullptr, nullptr);
@@ -1161,21 +1532,9 @@ SmallVector<PredEdge> TDCCPass::calculateStatesRecur(
           // Exit state is after all cycles complete
           uint64_t exitState = execState + maxLatency - 1;
 
-          // Create combined exit guard
-          GuardSpec exitGuard;
-          if (allStatic) {
-            // All static: unconditional exit after max latency cycles
-            exitGuard = GuardSpec::unconditional();
-          } else {
-            // Has dynamic steps: need combined done guard
-            // For now, use the first done step (proper AND logic would need enhancement)
-            // TODO: Implement proper AND of all done signals
-            if (!doneStepNames.empty()) {
-              exitGuard = GuardSpec::doneGuard(doneStepNames[0]);
-            } else {
-              exitGuard = GuardSpec::unconditional();
-            }
-          }
+          // Exit after max latency cycles. Dynamic steps advance on fire, so
+          // no step-local done guard is required.
+          GuardSpec exitGuard = GuardSpec::unconditional();
 
           // Return exit from the last state
           return SmallVector<PredEdge>{{exitState, exitGuard}};
@@ -1311,58 +1670,75 @@ void TDCCPass::realizeSchedule(Schedule &schedule, Operation *procOp,
   procOp->setAttr("tdcc.fsm_width", builder.getI64IntegerAttr(fsmWidth));
   procOp->setAttr("tdcc.done_state", builder.getI64IntegerAttr(schedule.maxState + 1));
 
+  // Store state sequence order for precedence generation
+  // Maps state ID to sequence index (higher seq_idx = later in control flow = higher precedence)
+  SmallVector<Attribute> stateOrderAttrs;
+  for (auto &[state, seqIdx] : stateSequenceIndex) {
+    auto entry = builder.getDictionaryAttr({
+      builder.getNamedAttr("state", builder.getI64IntegerAttr(state)),
+      builder.getNamedAttr("seq_idx", builder.getI64IntegerAttr(seqIdx))
+    });
+    stateOrderAttrs.push_back(entry);
+  }
+  if (!stateOrderAttrs.empty()) {
+    procOp->setAttr("tdcc.state_order", builder.getArrayAttr(stateOrderAttrs));
+    LLVM_DEBUG(llvm::dbgs() << "  State sequence order: " << stateOrderAttrs.size()
+                            << " entries\n");
+  }
+
   // Store state assignments for each enable with timing information
   SmallVector<Attribute> stateAssigns;
-  // First add non-iteration state assignments
+  auto computeEnableTiming = [&](ProcEnableOp enable, int64_t startState)
+      -> std::tuple<int64_t, int64_t, bool> {
+    int64_t latency = 1;
+    bool isStatic = false;
+    StringRef stepName = enable.getStepName();
+    auto it = stepMap.find(stepName);
+    if (it != stepMap.end()) {
+      if (auto staticStep = dyn_cast<ProcStaticStepOp>(it->second)) {
+        latency = staticStep.getLatency();
+        isStatic = true;
+      }
+    }
+    int64_t endState = startState + latency;
+    return {endState, latency, isStatic};
+  };
+
+  // First add non-iteration state assignments.
   for (auto &[enableOp, state] : stateIds) {
     if (auto enable = dyn_cast<ProcEnableOp>(enableOp)) {
-      // Read timing attributes we set earlier
-      int64_t startState = state;
-      int64_t endState = state + 1;
-      int64_t latency = 1;
-      bool isStatic = false;
-
-      if (auto attr = enable->getAttrOfType<IntegerAttr>("tdcc.end_state"))
-        endState = attr.getInt();
-      if (auto attr = enable->getAttrOfType<IntegerAttr>("tdcc.latency"))
-        latency = attr.getInt();
-      if (auto attr = enable->getAttrOfType<BoolAttr>("tdcc.is_static"))
-        isStatic = attr.getValue();
-
+      auto [endState, latency, isStatic] =
+          computeEnableTiming(enable, /*startState=*/state);
       auto entry = builder.getDictionaryAttr({
-        builder.getNamedAttr("step", enable.getStepNameAttr()),
-        builder.getNamedAttr("state", builder.getI64IntegerAttr(state)),
-        builder.getNamedAttr("end_state", builder.getI64IntegerAttr(endState)),
-        builder.getNamedAttr("latency", builder.getI64IntegerAttr(latency)),
-        builder.getNamedAttr("is_static", builder.getBoolAttr(isStatic))
+          builder.getNamedAttr("step", enable.getStepNameAttr()),
+          builder.getNamedAttr("state", builder.getI64IntegerAttr(state)),
+          builder.getNamedAttr("end_state", builder.getI64IntegerAttr(endState)),
+          builder.getNamedAttr("latency", builder.getI64IntegerAttr(latency)),
+          builder.getNamedAttr("is_static", builder.getBoolAttr(isStatic)),
       });
       stateAssigns.push_back(entry);
     }
   }
-  // Then add iteration-aware state assignments from static_repeat
+
+  // Then add iteration-aware state assignments from static_repeat.
+  //
+  // IMPORTANT: Do not read `tdcc.*` timing attributes from the ProcEnableOp
+  // here. A ProcEnableOp inside `proc.static_repeat` is visited multiple times
+  // during unrolling, so any per-enable attributes stored directly on the op
+  // will be overwritten by the last iteration. Instead, recompute timing from
+  // the step definition and the iteration-specific `state`.
   for (auto &[key, state] : iterStateIds) {
     auto [enableOp, iteration] = key;
     if (auto enable = dyn_cast<ProcEnableOp>(enableOp)) {
-      // Read timing attributes we set earlier
-      int64_t startState = state;
-      int64_t endState = state + 1;
-      int64_t latency = 1;
-      bool isStatic = false;
-
-      if (auto attr = enable->getAttrOfType<IntegerAttr>("tdcc.end_state"))
-        endState = attr.getInt();
-      if (auto attr = enable->getAttrOfType<IntegerAttr>("tdcc.latency"))
-        latency = attr.getInt();
-      if (auto attr = enable->getAttrOfType<BoolAttr>("tdcc.is_static"))
-        isStatic = attr.getValue();
-
+      auto [endState, latency, isStatic] =
+          computeEnableTiming(enable, /*startState=*/state);
       auto entry = builder.getDictionaryAttr({
-        builder.getNamedAttr("step", enable.getStepNameAttr()),
-        builder.getNamedAttr("state", builder.getI64IntegerAttr(state)),
-        builder.getNamedAttr("end_state", builder.getI64IntegerAttr(endState)),
-        builder.getNamedAttr("latency", builder.getI64IntegerAttr(latency)),
-        builder.getNamedAttr("is_static", builder.getBoolAttr(isStatic)),
-        builder.getNamedAttr("iteration", builder.getI64IntegerAttr(iteration))
+          builder.getNamedAttr("step", enable.getStepNameAttr()),
+          builder.getNamedAttr("state", builder.getI64IntegerAttr(state)),
+          builder.getNamedAttr("end_state", builder.getI64IntegerAttr(endState)),
+          builder.getNamedAttr("latency", builder.getI64IntegerAttr(latency)),
+          builder.getNamedAttr("is_static", builder.getBoolAttr(isStatic)),
+          builder.getNamedAttr("iteration", builder.getI64IntegerAttr(iteration)),
       });
       stateAssigns.push_back(entry);
     }
@@ -1392,6 +1768,8 @@ void TDCCPass::realizeSchedule(Schedule &schedule, Operation *procOp,
     // Store operation type for identification
     if (isa<ProcIfOp>(condOp)) {
       attrs.push_back(builder.getNamedAttr("type", builder.getStringAttr("if")));
+    } else if (isa<ProcCondIfOp>(condOp)) {
+      attrs.push_back(builder.getNamedAttr("type", builder.getStringAttr("cond_if")));
     } else if (isa<ProcStaticIfOp>(condOp)) {
       attrs.push_back(builder.getNamedAttr("type", builder.getStringAttr("static_if")));
     } else if (isa<ProcWhileOp>(condOp)) {
@@ -1422,11 +1800,6 @@ void TDCCPass::realizeSchedule(Schedule &schedule, Operation *procOp,
           attrs.push_back(builder.getNamedAttr("guard_inverted",
                                                builder.getBoolAttr(guard.inverted)));
         }
-      }
-      // Store done signal guard (for dynamic step exits)
-      if (guard.hasDoneGuard()) {
-        attrs.push_back(builder.getNamedAttr("done_step",
-                                             builder.getStringAttr(guard.doneStepName)));
       }
       // Store parallel join guard (AND of all branch completions)
       if (guard.hasParJoinGuard()) {
@@ -1467,10 +1840,6 @@ void TDCCPass::realizeSchedule(Schedule &schedule, Operation *procOp,
                                                builder.getI64IntegerAttr(branch.lastState)));
         brAttrs.push_back(builder.getNamedAttr("needs_separate_fsm",
                                                builder.getBoolAttr(branch.needsSeparateFsm)));
-        if (branch.exitGuard.hasDoneGuard()) {
-          brAttrs.push_back(builder.getNamedAttr("done_step",
-                                                 builder.getStringAttr(branch.exitGuard.doneStepName)));
-        }
         branchAttrs.push_back(builder.getDictionaryAttr(brAttrs));
       }
       blockAttrs.push_back(builder.getNamedAttr("branches", builder.getArrayAttr(branchAttrs)));
@@ -1697,6 +2066,8 @@ void TDCCPass::processProcOp(Operation *procOp, cmt2::ModuleOp module) {
   // Clear state from previous proc op
   stateIds.clear();
   iterStateIds.clear();
+  stateSequenceIndex.clear();
+  nextSequenceIndex = 0;
   currentIteration = -1;
   complexParBlocks.clear();
   nextParId = 0;
@@ -1773,6 +2144,16 @@ void TDCCPass::processModule(cmt2::ModuleOp module,
 
   for (auto *procOp : procOps) {
     processProcOp(procOp, module);
+  }
+
+  // Process DataflowTaskOp bodies with proc control (C1 - Dataflow-Proc Compatibility)
+  SmallVector<DataflowTaskOp> dataflowTasks;
+  module.walk([&](DataflowTaskOp task) {
+    dataflowTasks.push_back(task);
+  });
+
+  for (auto task : dataflowTasks) {
+    processDataflowTask(task, module);
   }
 }
 

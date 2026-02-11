@@ -3,6 +3,7 @@ add_circt_dialect_library(CIRCTCmt2
   Cmt2Ops.cpp
   Cmt2OpInterfaces.cpp
   Cmt2Attributes.cpp
+  Cmt2Types.cpp
 
   ADDITIONAL_HEADER_DIRS
   ${CIRCT_MAIN_INCLUDE_DIR}/circt/Dialect/Cmt2
@@ -23,5 +24,6 @@ add_circt_dialect_library(CIRCTCmt2
 
 add_subdirectory(Analysis)
 add_subdirectory(Interpreter)
+add_subdirectory(ModuleLib)
 add_subdirectory(Transforms)
 add_subdirectory(ECMT2)

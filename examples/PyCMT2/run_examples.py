@@ -4,101 +4,122 @@
 #  SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
 """
-Run All PyCMT2 Examples
+Run PyCMT2 Examples (E2E)
 
-This script runs all PyCMT2 examples and reports their status.
+Runs a curated set of end-to-end PyCMT2 examples that generate Verilator
+workspaces and validate outputs via the Testbench DSL.
 
 Usage:
     cd circt-cmt2/build
-    PYTHONPATH=tools/circt/python_packages/circt_core python3 ../examples/PyCMT2/run_examples.py
+    PYTHONPATH=tools/circt/python_packages/circt_core \\
+      python3 ../examples/PyCMT2/run_examples.py
 """
 
-import sys
-import os
-import importlib.util
-import traceback
+from __future__ import annotations
 
-# Add the pycmt2 package to path
-script_dir = os.path.dirname(os.path.abspath(__file__))
-build_dir = os.path.dirname(os.path.dirname(script_dir))
-python_packages = os.path.join(build_dir, "build/tools/circt/python_packages/circt_core")
-if python_packages not in sys.path:
-    sys.path.insert(0, python_packages)
+import argparse
+import os
+import subprocess
+import sys
+
+
+def _default_pythonpath(script_dir: str) -> str | None:
+    build_dir = os.path.dirname(os.path.dirname(script_dir))
+    candidate = os.path.join(build_dir, "build/tools/circt/python_packages/circt_core")
+    return candidate if os.path.isdir(candidate) else None
+
+
+EXAMPLES = [
+    "alu.py",
+    "banked_gemm_dataflow.py",
+    "comprehensive_dataflow_example.py",
+    "comprehensive_example.py",
+    "counter.py",
+    "dataflow_forkjoin.py",
+    "dataflow_proc_control.py",
+    "debug_testbench_example.py",
+    "division_pipeline.py",
+    "dynamic_pipeline_fifo.py",
+    "gcd.py",
+    "li_token_pipeline.py",
+    "memory_proc.py",
+    "nested_dataflow_example.py",
+    "pipeline_e2e.py",
+    "pipeline_fifo_testbench.py",
+    "proc.py",
+    "proc_par_test.py",
+    "proc_pipeline.py",
+    "proc_testbench.py",
+    "simulation_workspace.py",
+    "static_proc.py",
+    "systolic.py",
+    "test_cond_if.py",
+    "test_submodule_proc_step.py",
+    "timing.py",
+    "while_loop_example.py",
+]
 
 
 def run_example(name: str, path: str) -> bool:
-    """Run a single example and return True if successful."""
     print(f"\n{'=' * 60}")
     print(f"Running: {name}")
-    print('=' * 60)
-
-    try:
-        # Load module dynamically
-        spec = importlib.util.spec_from_file_location(name, path)
-        if spec is None or spec.loader is None:
-            print(f"ERROR: Could not load {path}")
-            return False
-
-        module = importlib.util.module_from_spec(spec)
-        sys.modules[name] = module
-        spec.loader.exec_module(module)
-
-        # Run main function if it exists
-        if hasattr(module, 'main'):
-            result = module.main()
-            if result != 0:
-                print(f"ERROR: {name} returned non-zero exit code: {result}")
-                return False
-
-        print(f"\nSUCCESS: {name} completed successfully")
-        return True
-
-    except Exception as e:
-        print(f"\nERROR: {name} failed with exception:")
-        traceback.print_exc()
+    print("=" * 60)
+    result = subprocess.run([sys.executable, path])
+    if result.returncode != 0:
+        print(f"\nFAIL: {name} exited with {result.returncode}")
         return False
+    print(f"\nPASS: {name}")
+    return True
 
 
-def main():
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Run PyCMT2 E2E examples")
+    parser.add_argument("--list", action="store_true", help="List examples and exit")
+    parser.add_argument("--keep-going", action="store_true", help="Continue after failures")
+    args = parser.parse_args()
+
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+
+    default_py_path = _default_pythonpath(script_dir)
+    if default_py_path and "PYTHONPATH" not in os.environ:
+        os.environ["PYTHONPATH"] = default_py_path
+
+    if args.list:
+        for ex in EXAMPLES:
+            print(ex)
+        return 0
+
     print("=" * 60)
-    print("PyCMT2 Examples Test Runner")
+    print("PyCMT2 Examples Test Runner (E2E)")
     print("=" * 60)
 
-    # Find all example files
-    examples = [
-        ("counter_example", os.path.join(script_dir, "counter_example.py")),
-        ("proc_example", os.path.join(script_dir, "proc_example.py")),
-    ]
-
-    results = {}
-    for name, path in examples:
-        if os.path.exists(path):
-            results[name] = run_example(name, path)
-        else:
-            print(f"\nWARNING: Example not found: {path}")
+    results: dict[str, bool] = {}
+    for ex in EXAMPLES:
+        name = ex[:-3] if ex.endswith(".py") else ex
+        path = os.path.join(script_dir, ex)
+        if not os.path.exists(path):
+            print(f"\nMISSING: {ex}")
             results[name] = False
+            if not args.keep_going:
+                break
+            continue
 
-    # Summary
+        results[name] = run_example(name, path)
+        if not results[name] and not args.keep_going:
+            break
+
     print("\n" + "=" * 60)
     print("Summary")
     print("=" * 60)
 
     passed = sum(1 for v in results.values() if v)
     failed = len(results) - passed
-
-    for name, success in results.items():
-        status = "PASS" if success else "FAIL"
-        print(f"  {name}: {status}")
-
+    for name, ok in results.items():
+        print(f"  {name}: {'PASS' if ok else 'FAIL'}")
     print(f"\nTotal: {passed} passed, {failed} failed")
 
-    if failed > 0:
-        print("\nSome examples failed!")
-        return 1
-
-    print("\nAll examples passed!")
-    return 0
+    return 0 if failed == 0 else 1
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    raise SystemExit(main())

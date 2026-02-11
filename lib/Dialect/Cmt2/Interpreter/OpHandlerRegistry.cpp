@@ -525,4 +525,231 @@ void circt::cmt2::interp::registerCMT2Handlers(OpHandlerRegistry &registry) {
 
         return std::nullopt;
       });
+
+  // Token operations - these need to be lowered before interpretation
+  // TokenValidOp - returns validity of token
+  registry.registerHandler<cmt2::TokenValidOp>(
+      [](mlir::Operation *op, OpContext &ctx) -> std::optional<InterpValue> {
+        LLVM_DEBUG(llvm::dbgs() << "TokenValidOp: token ops should be lowered "
+                                << "via --cmt2-token-lowering before interpretation\n");
+        // Return true (1) as default - token is valid
+        auto validOp = mlir::cast<cmt2::TokenValidOp>(op);
+        auto result = llvm::APInt(1, 1);
+        ctx.setValue(validOp.getResult(), result);
+        return result;
+      });
+
+  // TokenDataOp - extracts data from token
+  registry.registerHandler<cmt2::TokenDataOp>(
+      [](mlir::Operation *op, OpContext &ctx) -> std::optional<InterpValue> {
+        LLVM_DEBUG(llvm::dbgs() << "TokenDataOp: token ops should be lowered "
+                                << "via --cmt2-token-lowering before interpretation\n");
+        auto dataOp = mlir::cast<cmt2::TokenDataOp>(op);
+        // Pass through the token's underlying data
+        auto tokenValue = ctx.getValue(dataOp.getToken());
+        ctx.setValue(dataOp.getResult(), tokenValue);
+        return tokenValue;
+      });
+
+  // TokenCreateOp - creates a token from data
+  registry.registerHandler<cmt2::TokenCreateOp>(
+      [](mlir::Operation *op, OpContext &ctx) -> std::optional<InterpValue> {
+        LLVM_DEBUG(llvm::dbgs() << "TokenCreateOp: token ops should be lowered "
+                                << "via --cmt2-token-lowering before interpretation\n");
+        auto createOp = mlir::cast<cmt2::TokenCreateOp>(op);
+        // Pass through the data as the token value
+        auto dataValue = ctx.getValue(createOp.getData());
+        ctx.setValue(createOp.getResult(), dataValue);
+        return dataValue;
+      });
+
+  // TokenJoinOp - joins multiple tokens
+  registry.registerHandler<cmt2::TokenJoinOp>(
+      [](mlir::Operation *op, OpContext &ctx) -> std::optional<InterpValue> {
+        LLVM_DEBUG(llvm::dbgs() << "TokenJoinOp: token ops should be lowered "
+                                << "via --cmt2-token-lowering before interpretation\n");
+        auto joinOp = mlir::cast<cmt2::TokenJoinOp>(op);
+        // For join, return the first input token's value
+        if (joinOp.getNumOperands() > 0) {
+          auto result = ctx.getValue(joinOp.getOperand(0));
+          ctx.setValue(joinOp.getResult(), result);
+          return result;
+        }
+        return std::nullopt;
+      });
+
+  // ReturnOp - return from method/value
+  registry.registerHandler<cmt2::ReturnOp>(
+      [](mlir::Operation *op, OpContext &ctx) -> std::optional<InterpValue> {
+        auto retOp = mlir::cast<cmt2::ReturnOp>(op);
+        if (retOp.getNumOperands() > 0) {
+          return ctx.getValue(retOp.getOperand(0));
+        }
+        return std::nullopt;
+      });
+
+  // YieldOp - yield from control flow region
+  registry.registerHandler<cmt2::YieldOp>(
+      [](mlir::Operation *op, OpContext &ctx) -> std::optional<InterpValue> {
+        auto yieldOp = mlir::cast<cmt2::YieldOp>(op);
+        if (yieldOp.getNumOperands() > 0) {
+          return ctx.getValue(yieldOp.getOperand(0));
+        }
+        return std::nullopt;
+      });
+
+  // ProcSeqOp - sequential execution of body
+  registry.registerHandler<cmt2::ProcSeqOp>(
+      [&registry](mlir::Operation *op, OpContext &ctx) -> std::optional<InterpValue> {
+        auto seqOp = mlir::cast<cmt2::ProcSeqOp>(op);
+        mlir::Region &body = seqOp.getBody();
+        if (body.empty())
+          return std::nullopt;
+
+        LLVM_DEBUG(llvm::dbgs() << "ProcSeqOp: executing sequential body\n");
+
+        // Execute operations in body sequentially
+        for (mlir::Operation &innerOp : body.front()) {
+          if (mlir::isa<cmt2::YieldOp>(innerOp))
+            continue;
+          registry.execute(&innerOp, ctx);
+        }
+
+        return std::nullopt;
+      });
+
+  // ProcParOp - parallel execution of body (all ops in one cycle)
+  registry.registerHandler<cmt2::ProcParOp>(
+      [&registry](mlir::Operation *op, OpContext &ctx) -> std::optional<InterpValue> {
+        auto parOp = mlir::cast<cmt2::ProcParOp>(op);
+        mlir::Region &body = parOp.getBody();
+        if (body.empty())
+          return std::nullopt;
+
+        LLVM_DEBUG(llvm::dbgs() << "ProcParOp: executing parallel body\n");
+
+        // In simulation, we execute all ops "in parallel" (same cycle)
+        // Order matters for determinism, but all should complete in one cycle
+        for (mlir::Operation &innerOp : body.front()) {
+          if (mlir::isa<cmt2::YieldOp>(innerOp))
+            continue;
+          registry.execute(&innerOp, ctx);
+        }
+
+        return std::nullopt;
+      });
+
+  // ProcIfOp - conditional execution
+  registry.registerHandler<cmt2::ProcIfOp>(
+      [&registry](mlir::Operation *op, OpContext &ctx) -> std::optional<InterpValue> {
+        auto ifOp = mlir::cast<cmt2::ProcIfOp>(op);
+        InterpValue cond = ctx.getValue(ifOp.getCond());
+        bool takeThen = cond != 0;
+
+        LLVM_DEBUG(llvm::dbgs() << "ProcIfOp: taking " << (takeThen ? "then" : "else")
+                                << " branch\n");
+
+        mlir::Region &branch = takeThen ? ifOp.getThenRegion() : ifOp.getElseRegion();
+        if (branch.empty())
+          return std::nullopt;
+
+        for (mlir::Operation &innerOp : branch.front()) {
+          if (mlir::isa<cmt2::YieldOp>(innerOp))
+            continue;
+          registry.execute(&innerOp, ctx);
+        }
+
+        return std::nullopt;
+      });
+
+  // ProcCondIfOp - conditional with computed condition region
+  registry.registerHandler<cmt2::ProcCondIfOp>(
+      [&registry](mlir::Operation *op, OpContext &ctx) -> std::optional<InterpValue> {
+        auto condIfOp = mlir::cast<cmt2::ProcCondIfOp>(op);
+
+        // First execute the condition region
+        mlir::Region &condRegion = condIfOp.getCondRegion();
+        if (!condRegion.empty()) {
+          for (mlir::Operation &innerOp : condRegion.front()) {
+            registry.execute(&innerOp, ctx);
+          }
+        }
+
+        // Get condition value (yielded from condition region)
+        InterpValue cond = ctx.getValue(condIfOp.getCond());
+        bool takeThen = cond != 0;
+
+        LLVM_DEBUG(llvm::dbgs() << "ProcCondIfOp: taking " << (takeThen ? "then" : "else")
+                                << " branch\n");
+
+        mlir::Region &branch = takeThen ? condIfOp.getThenRegion() : condIfOp.getElseRegion();
+        if (branch.empty())
+          return std::nullopt;
+
+        for (mlir::Operation &innerOp : branch.front()) {
+          if (mlir::isa<cmt2::YieldOp>(innerOp))
+            continue;
+          registry.execute(&innerOp, ctx);
+        }
+
+        return std::nullopt;
+      });
+
+  // ProcWhileOp - loop while condition is true
+  // Note: This is a simplified interpreter that may not handle all cases
+  registry.registerHandler<cmt2::ProcWhileOp>(
+      [&registry](mlir::Operation *op, OpContext &ctx) -> std::optional<InterpValue> {
+        auto whileOp = mlir::cast<cmt2::ProcWhileOp>(op);
+        mlir::Region &condRegion = whileOp.getCondRegion();
+        mlir::Region &body = whileOp.getBody();
+
+        const unsigned maxIterations = 10000; // Safety limit
+        unsigned iterations = 0;
+
+        while (iterations < maxIterations) {
+          // Execute condition region
+          if (!condRegion.empty()) {
+            for (mlir::Operation &innerOp : condRegion.front()) {
+              registry.execute(&innerOp, ctx);
+            }
+          }
+
+          // Check condition (from block argument or yield)
+          // The condition is typically yielded from the condition region
+          // For simplicity, we look for a ProcWhileCondOp or check a default
+          bool continueLoop = false;
+
+          // Look for while_cond in the condition region
+          for (mlir::Operation &innerOp : condRegion.front()) {
+            if (auto condOp = mlir::dyn_cast<cmt2::ProcWhileCondYieldOp>(innerOp)) {
+              InterpValue condVal = ctx.getValue(condOp.getCond());
+              continueLoop = condVal != 0;
+              break;
+            }
+          }
+
+          if (!continueLoop) {
+            LLVM_DEBUG(llvm::dbgs() << "ProcWhileOp: exiting after " << iterations
+                                    << " iterations\n");
+            break;
+          }
+
+          // Execute body
+          if (!body.empty()) {
+            for (mlir::Operation &innerOp : body.front()) {
+              if (mlir::isa<cmt2::YieldOp>(innerOp))
+                continue;
+              registry.execute(&innerOp, ctx);
+            }
+          }
+
+          iterations++;
+        }
+
+        if (iterations >= maxIterations) {
+          LLVM_DEBUG(llvm::dbgs() << "ProcWhileOp: WARNING - hit max iterations limit\n");
+        }
+
+        return std::nullopt;
+      });
 }

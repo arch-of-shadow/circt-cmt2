@@ -132,7 +132,8 @@ def create_pipeline_circuit():
         with m.rule("stage1_multiply") as rule:
             with rule.guard() as g:
                 # Check if fifo1 has data and fifo2 can accept
-                has_input = g.call(fifo1, "notEmpty")
+                # For FIFO1, "full" = 1 means there's data (not empty)
+                has_input = g.call(fifo1, "full")
                 full2 = g.call(fifo2, "full")
                 can_output = g.not_(full2)
                 ready = g.and_(has_input, can_output)
@@ -155,7 +156,8 @@ def create_pipeline_circuit():
         with m.rule("stage2_add") as rule:
             with rule.guard() as g:
                 # Check if fifo2 has data and fifo3 can accept
-                has_input = g.call(fifo2, "notEmpty")
+                # For FIFO1, "full" = 1 means there's data (not empty)
+                has_input = g.call(fifo2, "full")
                 full3 = g.call(fifo3, "full")
                 can_output = g.not_(full3)
                 ready = g.and_(has_input, can_output)
@@ -178,7 +180,8 @@ def create_pipeline_circuit():
         with m.rule("stage3_square") as rule:
             with rule.guard() as g:
                 # Check if fifo3 has data and fifo4 can accept
-                has_input = g.call(fifo3, "notEmpty")
+                # For FIFO1, "full" = 1 means there's data (not empty)
+                has_input = g.call(fifo3, "full")
                 full4 = g.call(fifo4, "full")
                 can_output = g.not_(full4)
                 ready = g.and_(has_input, can_output)
@@ -201,7 +204,8 @@ def create_pipeline_circuit():
         with m.rule("sink_consume") as rule:
             with rule.guard() as g:
                 # Check if fifo4 has data to consume
-                has_input = g.call(fifo4, "notEmpty")
+                # For FIFO1, "full" = 1 means there's data (not empty)
+                has_input = g.call(fifo4, "full")
                 g.returns(has_input)
             with rule.body() as body:
                 # Dequeue result
@@ -284,18 +288,19 @@ def create_pipeline_circuit():
                 body.returns(enabled)
 
         # FIFO status values
+        # For FIFO1, "full" = 1 means there's data (not empty)
         with m.value("fifo1_hasData", returns=[UInt(1)]) as val:
             with val.guard() as g:
                 g.always()
             with val.body() as body:
-                status = body.call(fifo1, "notEmpty")
+                status = body.call(fifo1, "full")
                 body.returns(status)
 
         with m.value("fifo4_hasData", returns=[UInt(1)]) as val:
             with val.guard() as g:
                 g.always()
             with val.body() as body:
-                status = body.call(fifo4, "notEmpty")
+                status = body.call(fifo4, "full")
                 body.returns(status)
 
     return circuit

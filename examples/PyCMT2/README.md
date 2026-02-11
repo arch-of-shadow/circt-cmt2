@@ -33,7 +33,6 @@ PYTHONPATH=tools/circt/python_packages/circt_core python3 ../examples/PyCMT2/<na
 | File | Description |
 |------|-------------|
 | `proc.py` | Complete procedural control - steps, seq/par, if/while |
-| `proc_conflict.py` | Rule conflict detection and resolution |
 | `timing.py` | Static timing annotations for steps |
 | `static_proc.py` | **End-to-end** static proc with pipelined accumulator |
 
@@ -42,13 +41,14 @@ PYTHONPATH=tools/circt/python_packages/circt_core python3 ../examples/PyCMT2/<na
 | File | Description |
 |------|-------------|
 | `systolic.py` | **End-to-end** systolic array generator for matrix multiply |
+| `banked_gemm_dataflow.py` | **End-to-end** banked-memory tiled GEMM (load/compute/store dataflow tasks) |
 
 ### Simulation & Testing
 
 | File | Description |
 |------|-------------|
 | `simulation_workspace.py` | **Start here** - Verilator workspace generation |
-| `interpreter.py` | Pure Python simulation with callbacks |
+| `interpret.py` | cmt2-dbg interpreter script tests |
 | `proc_testbench.py` | Testbench DSL for verification |
 | `pipeline_fifo_testbench.py` | FIFO pipeline with full testbench |
 
@@ -95,25 +95,6 @@ ws.generate_placeholder()
 # Then: cd my_sim_workspace && make && make run
 ```
 
-### 3. Python Interpreter (interpreter.py)
-
-```python
-interp = circuit.interpreter()
-
-def my_guard(interp):
-    return True
-
-def my_body(interp):
-    val = interp.get_register("count")
-    interp.set_register("count", val + 1)
-
-interp.register_guard("increment", my_guard)
-interp.register_body("increment", my_body)
-
-for _ in range(10):
-    interp.step()
-```
-
 ## Generated Workspaces
 
 Examples that generate simulation workspaces will create directories with `_workspace` suffix.
@@ -126,11 +107,12 @@ sim_*/           # All sim_* directories
 
 ## API Reference
 
-See `docs/Dialects/Cmt2/` for full documentation:
+See `docs/Cmt2/` for full documentation:
 
-- `CMT2-Improvements-Plan.md` - PyCMT2 ecosystem overview
-- `RationaleCmt2.md` - CMT2 design philosophy
-- `ModuleLibrary.md` - STL module documentation
+- `docs/Cmt2/guides/QuickStart.md` - first runnable example
+- `docs/Cmt2/features/Concepts.md` - core semantics
+- `docs/Cmt2/features/STL.md` - standard library components
+- `docs/Cmt2/guides/Debugging.md` - debugger + simulation workspace
 
 ## Debugging
 

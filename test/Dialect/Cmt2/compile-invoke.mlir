@@ -40,14 +40,12 @@ builtin.module {
             // Check that a step was generated for the invoke (it gets placed before existing groups)
             // CHECK: cmt2.proc.step @__invoke_group_0
             // CHECK: cmt2.call @this @add
-            // CHECK: cmt2.proc.step_done
 
             // Existing steps should be preserved
             // CHECK: cmt2.proc.step @existing_group
             cmt2.proc.step @existing_group {
                 %a = cmt2.call @reg_a @read() : () -> !firrtl.uint<32>
                 %c1 = firrtl.constant 1 : !firrtl.uint<1>
-                cmt2.proc.step_done %c1 : !firrtl.uint<1>
             }
 
             // CHECK: cmt2.proc.method @add

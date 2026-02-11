@@ -35,9 +35,8 @@ void ModuleInterpreterRegistry::registerBuiltins() {
   // Register built-in interpreters
   registerInterpreter(std::make_unique<RegInterpreter>());
   registerInterpreter(std::make_unique<WireInterpreter>());
-  registerInterpreter(std::make_unique<FIFOInterpreter>());
   // MemoryInterpreter removed - will use MLIR-based behavioral models
-  // See docs/Dialects/Cmt2/tmp/InterpreterModularization-Design.md
+  // See docs/Cmt2/features/Interpreter.md
 
   LLVM_DEBUG(llvm::dbgs() << "ModuleInterpreterRegistry: registered "
                           << interpreters_.size() << " built-in interpreters\n");

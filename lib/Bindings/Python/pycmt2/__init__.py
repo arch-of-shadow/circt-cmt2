@@ -42,6 +42,7 @@ from .types import (
     Reset,
     AsyncReset,
     Bool,
+    SyncToken,
 )
 
 from .signals import Signal
@@ -63,6 +64,7 @@ from .stl import (
     FIFO1Push,
     FIFO1Pull,
     FIFO2I,
+    ShiftReg,
     Memory,
     get_stl_rtl_files,
     add_stl_rtl_to_workspace,
@@ -87,12 +89,32 @@ from .diagnostics import (
     format_diagnostic_with_source,
 )
 
-from .interpreter import (
-    Interpreter,
-    Breakpoint,
-    BreakpointType,
-    RuleResult,
-    CycleTrace,
+from .dataflow_builders import (
+    DataflowBuilder,
+    TaskBuilder,
+    Token,
+    pipeline_dataflow,
+)
+
+from .pipeline_builders import (
+    Pipeline,
+    ForkJoinPipeline,
+    PipelineStage,
+)
+
+from .timing import (
+    TimingInterval,
+    timing_interval,
+    single_cycle,
+    pipeline_timing,
+    interleaved_timing,
+    total_latency,
+    validate_timing,
+    timing_to_attr_tuple,
+    timing_list_to_tuples,
+    arg_timing,
+    result_timing,
+    IMMEDIATE,
 )
 
 __all__ = [
@@ -109,11 +131,34 @@ __all__ = [
     "Reset",
     "AsyncReset",
     "Bool",
+    "SyncToken",
     # Signals
     "Signal",
     # Builders
     "Circuit",
     "ModuleBuilder",
+    # Dataflow
+    "DataflowBuilder",
+    "TaskBuilder",
+    "Token",
+    "pipeline_dataflow",
+    # Pipeline shortcuts
+    "Pipeline",
+    "ForkJoinPipeline",
+    "PipelineStage",
+    # Timing helpers
+    "TimingInterval",
+    "timing_interval",
+    "single_cycle",
+    "pipeline_timing",
+    "interleaved_timing",
+    "total_latency",
+    "validate_timing",
+    "timing_to_attr_tuple",
+    "timing_list_to_tuples",
+    "arg_timing",
+    "result_timing",
+    "IMMEDIATE",
     # References
     "MethodRef",
     "ValueRef",
@@ -129,6 +174,10 @@ __all__ = [
     "Reg",
     "Wire",
     "FIFO",
+    "FIFO1Push",
+    "FIFO1Pull",
+    "FIFO2I",
+    "ShiftReg",
     "Memory",
     "get_stl_rtl_files",
     "add_stl_rtl_to_workspace",
@@ -152,10 +201,4 @@ __all__ = [
     "undefined_reference_error",
     "scheduling_conflict_warning",
     "format_diagnostic_with_source",
-    # Interpreter
-    "Interpreter",
-    "Breakpoint",
-    "BreakpointType",
-    "RuleResult",
-    "CycleTrace",
 ]

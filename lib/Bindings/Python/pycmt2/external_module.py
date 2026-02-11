@@ -17,8 +17,13 @@ Example:
     with circuit.external_module("Reg32") as reg:
         reg.clock("clk")
         reg.reset("rst")
-        reg.value("read", returns=[UInt(32)])
-        reg.method("write", args=[("data", UInt(32))])
+        reg.value("read", ready_name="read_ready", returns=[("data", UInt(32))])
+        reg.method(
+            "write",
+            enable_name="write_enable",
+            ready_name="write_ready",
+            args=[("data", UInt(32))],
+        )
         reg.sequence_before("read", "write")
 
     # Use it in a module
@@ -31,6 +36,7 @@ Example:
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING, Iterator
 
 from .types import Cmt2Type, UInt, ClockType, ResetType
@@ -51,7 +57,14 @@ class ExternalModuleBuilder:
     - Scheduling constraints (sequence before, conflict, conflict-free)
     """
 
-    def __init__(self, circuit: Circuit, name: str):
+    def __init__(
+        self,
+        circuit: Circuit,
+        name: str,
+        *,
+        rtl: str | Path | None = None,
+        rtl_files: list[str | Path] | None = None,
+    ):
         self._circuit = circuit
         self._name = name
         self._op = None
@@ -63,6 +76,14 @@ class ExternalModuleBuilder:
 
         # FIRRTL module name (defaults to same as CMT2 module name)
         self._firrtl_module_name: str | None = None
+
+        # Optional external RTL file(s) implementing the FIRRTL external module.
+        # These can be staged into a SimulationWorkspace automatically.
+        self._rtl_files: list[Path] = []
+        if rtl is not None:
+            self._rtl_files.append(Path(rtl))
+        if rtl_files:
+            self._rtl_files.extend(Path(p) for p in rtl_files)
 
         # Pending method bindings (added at finalize time)
         self._pending_values: list[dict] = []  # {name, ready_name, args, returns}
@@ -393,12 +414,15 @@ class ExternalModuleBuilder:
 
         mlir_ctx = self._circuit._ctx.mlir_context
 
+        # Use FlatSymbolRefAttr for scheduling attributes (expected by ConflictMatrixAnalysis)
+        from circt.ir import FlatSymbolRefAttr
+
         if self._sequence_before:
             pairs = []
             for before, after in self._sequence_before:
                 pairs.append(ArrayAttr.get([
-                    StringAttr.get(before, context=mlir_ctx),
-                    StringAttr.get(after, context=mlir_ctx),
+                    FlatSymbolRefAttr.get(before, context=mlir_ctx),
+                    FlatSymbolRefAttr.get(after, context=mlir_ctx),
                 ], context=mlir_ctx))
             self._op.attributes["sequenceBefore"] = ArrayAttr.get(pairs, context=mlir_ctx)
 
@@ -406,8 +430,8 @@ class ExternalModuleBuilder:
             pairs = []
             for m1, m2 in self._conflict:
                 pairs.append(ArrayAttr.get([
-                    StringAttr.get(m1, context=mlir_ctx),
-                    StringAttr.get(m2, context=mlir_ctx),
+                    FlatSymbolRefAttr.get(m1, context=mlir_ctx),
+                    FlatSymbolRefAttr.get(m2, context=mlir_ctx),
                 ], context=mlir_ctx))
             self._op.attributes["conflict"] = ArrayAttr.get(pairs, context=mlir_ctx)
 
@@ -415,8 +439,8 @@ class ExternalModuleBuilder:
             pairs = []
             for m1, m2 in self._conflict_free:
                 pairs.append(ArrayAttr.get([
-                    StringAttr.get(m1, context=mlir_ctx),
-                    StringAttr.get(m2, context=mlir_ctx),
+                    FlatSymbolRefAttr.get(m1, context=mlir_ctx),
+                    FlatSymbolRefAttr.get(m2, context=mlir_ctx),
                 ], context=mlir_ctx))
             self._op.attributes["conflictFree"] = ArrayAttr.get(pairs, context=mlir_ctx)
 

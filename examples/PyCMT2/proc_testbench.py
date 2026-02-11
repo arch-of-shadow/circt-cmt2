@@ -26,7 +26,7 @@ The testbench validates:
 Usage:
     cd circt-cmt2/build
     PYTHONPATH=tools/circt/python_packages/circt_core python3 \
-        ../examples/PyCMT2/proc_testbench_example.py
+        ../examples/PyCMT2/proc_testbench.py
 """
 
 import shutil
@@ -133,7 +133,6 @@ def create_proc_testable_circuit():
                     # Clear busy flag (dynamic step)
                     with mult_mod.step("clear_mult_busy") as clr_step:
                         clr_step.call(busy, "write", clr_step.const(0, 1))
-                        clr_step.done(clr_step.const(1, 1))
                     seq.enable(clr_step.ref())
 
     with circuit.module("ProcALU") as m:
@@ -168,12 +167,10 @@ def create_proc_testable_circuit():
         # Step: load_a - Load value into reg_a
         with m.step("load_a") as step:
             val = step.call(reg_a, "read")
-            step.done(step.const(1, 1))
 
         # Step: load_b - Load value into reg_b
         with m.step("load_b") as step:
             val = step.call(reg_b, "read")
-            step.done(step.const(1, 1))
 
         # Step: compute_add - Add reg_a and reg_b, store in reg_result
         with m.step("compute_add") as step:
@@ -181,7 +178,6 @@ def create_proc_testable_circuit():
             b = step.call(reg_b, "read")
             result = step.add(a, b)
             step.call(reg_result, "write", result)
-            step.done(step.const(1, 1))
 
         # Step: compute_sub - Subtract reg_b from reg_a
         with m.step("compute_sub") as step:
@@ -189,34 +185,28 @@ def create_proc_testable_circuit():
             b = step.call(reg_b, "read")
             result = step.sub(a, b)
             step.call(reg_result, "write", result)
-            step.done(step.const(1, 1))
 
         # Step: increment_counter - Increment the counter
         with m.step("increment_counter") as step:
             count = step.call(reg_counter, "read")
             new_count = step.add(count, step.const(1, 8))
             step.call(reg_counter, "write", new_count)
-            step.done(step.const(1, 1))
 
         # Step: set_done_flag - Set the done flag
         with m.step("set_done_flag") as step:
             step.call(reg_done, "write", step.const(1, 1))
-            step.done(step.const(1, 1))
 
         # Step: clear_done_flag - Clear the done flag
         with m.step("clear_done_flag") as step:
             step.call(reg_done, "write", step.const(0, 1))
-            step.done(step.const(1, 1))
 
         # Step: set_busy - Set busy flag
         with m.step("set_busy") as step:
             step.call(reg_busy, "write", step.const(1, 1))
-            step.done(step.const(1, 1))
 
         # Step: clear_busy - Clear busy flag
         with m.step("clear_busy") as step:
             step.call(reg_busy, "write", step.const(0, 1))
-            step.done(step.const(1, 1))
 
         # =====================================================================
         # Static Steps (fixed latency)
@@ -267,18 +257,11 @@ def create_proc_testable_circuit():
             # Call multiply - this triggers the computation in mult_unit
             # The method sets busy=1 and stores operands
             step.call(mult_unit, "multiply", a, b)
-            step.done(step.const(1, 1))
-
-        # Step: check_mult_busy - Check if mult_unit is still busy
-        with m.step("check_mult_busy") as step:
-            is_busy = step.call(mult_unit, "is_busy")
-            step.done(step.not_(is_busy))  # Done when not busy
 
         # Step: copy_mult_result - Copy result from mult_unit to reg_result
         with m.step("copy_mult_result") as step:
             result = step.call(mult_unit, "get_result")
             step.call(reg_result, "write", result)
-            step.done(step.const(1, 1))
 
         # =====================================================================
         # Proc Rule 1: Simple Sequential (seq_add_sub)
@@ -511,8 +494,7 @@ def create_proc_testable_circuit():
                     def mult_busy_cond(b):
                         return b.call(mult_unit, "is_busy")
                     with seq.while_(mult_busy_cond) as loop:
-                        # Just wait - check_mult_busy step completes when not busy
-                        loop.enable(m._steps["check_mult_busy"].ref())
+                        pass
                     # Copy result from mult_unit to reg_result
                     seq.enable(m._steps["copy_mult_result"].ref())
                     seq.enable(m._steps["set_done_flag"].ref())
@@ -645,7 +627,8 @@ def create_proc_testable_circuit():
 def create_proc_testbench(circuit):
     """Create a comprehensive testbench for procedural control testing."""
 
-    tb = Testbench(circuit)
+    # Enable auto_debug_ports for rule firing observation
+    tb = Testbench(circuit, auto_debug_ports=True)
 
     # =========================================================================
     # Test Sequence 1: Basic Initialization
@@ -1312,6 +1295,88 @@ def create_proc_testbench(circuit):
         seq.print("Complex par test - counter", "get_counter_res0")
         seq.print("Complex par test PASSED", "get_result_res0")
 
+    # =========================================================================
+    # Test Sequence 19: Debug Port Verification
+    # Verifies that rule firing debug ports work correctly
+    # =========================================================================
+
+    with tb.sequence("test_debug_ports") as seq:
+        seq.comment("=" * 60)
+        seq.comment("DEBUG PORT VERIFICATION TEST")
+        seq.comment("Verifies dbg_*_firing ports are working correctly")
+        seq.comment("=" * 60)
+        seq.reset(10)
+
+        # Test 1: Trigger seq_add_sub rule and verify debug port
+        seq.comment("Test 1: Verify seq_add_sub debug port fires")
+        seq.drive("load_a", 50)
+        seq.drive("load_b", 20)
+        seq.drive("load_enable", 1)
+        seq.wait(1)
+        seq.drive("load_enable", 0)
+        seq.wait(2)
+
+        seq.drive("select_op_op", 1)  # seq_add_sub
+        seq.drive("select_op_enable", 1)
+        seq.wait(1)
+        seq.drive("select_op_enable", 0)
+
+        # Wait a cycle and check that seq_add_sub is firing
+        seq.wait(1)
+        seq.print_rule_status("seq_add_sub_state0")
+        seq.wait_condition("dut->is_done_res0 == 1", timeout=30)
+        seq.wait(2)
+        seq.print("seq_add_sub debug port verification: completed")
+
+        # Reset for next test
+        seq.drive("reset_state_enable", 1)
+        seq.wait(1)
+        seq.drive("reset_state_enable", 0)
+        seq.wait(5)
+
+        # Test 2: Trigger par_load and verify debug port
+        seq.comment("Test 2: Verify par_load debug port fires")
+        seq.drive("select_op_op", 2)  # par_load
+        seq.drive("select_op_enable", 1)
+        seq.wait(1)
+        seq.drive("select_op_enable", 0)
+
+        seq.wait(1)
+        seq.print_rule_status("par_load_state0")
+        seq.wait(15)
+        seq.print("par_load debug port verification: completed")
+
+        # Reset for next test
+        seq.drive("reset_state_enable", 1)
+        seq.wait(1)
+        seq.drive("reset_state_enable", 0)
+        seq.wait(5)
+
+        # Test 3: Trigger mixed_compute (uses static steps)
+        seq.comment("Test 3: Verify mixed_compute debug port fires")
+        seq.drive("load_a", 6)
+        seq.drive("load_b", 7)
+        seq.drive("load_enable", 1)
+        seq.wait(1)
+        seq.drive("load_enable", 0)
+        seq.wait(2)
+
+        seq.drive("select_op_op", 5)  # mixed_compute
+        seq.drive("select_op_enable", 1)
+        seq.wait(1)
+        seq.drive("select_op_enable", 0)
+
+        seq.wait(1)
+        seq.print_rule_status("mixed_compute_state0")
+        seq.wait_condition("dut->is_done_res0 == 1", timeout=30)
+        seq.wait(2)
+        seq.expect("get_result_res0", 42, "6*7=42 from mixed_compute")
+        seq.print("mixed_compute debug port verification: completed")
+
+        seq.comment("=" * 60)
+        seq.print("DEBUG PORT VERIFICATION TEST PASSED")
+        seq.comment("=" * 60)
+
     return tb
 
 
@@ -1353,9 +1418,10 @@ def main():
     for seq in tb._sequences:
         print(f"      - {seq.name}: {len(seq._ops)} operations")
 
-    # Create simulation workspace
-    print("\n4. Creating simulation workspace...")
-    ws = SimulationWorkspace(circuit, workspace_dir)
+    # Create simulation workspace with debug ports enabled
+    # debug_ports=True adds output ports for each rule's firing signal
+    print("\n4. Creating simulation workspace with debug_ports=True...")
+    ws = SimulationWorkspace(circuit, workspace_dir, debug_ports=True)
 
     # Generate with testbench
     print("\n5. Generating workspace with testbench DSL...")
@@ -1424,6 +1490,9 @@ Test sequences included:
 
   Per-branch FSM tests (complex parallel control):
   18. test_complex_par         - Test par with nested seq (per-branch FSM)
+
+  Debug port verification:
+  19. test_debug_ports         - Verify rule firing debug ports are working
 
 To run the simulation:
     cd {workspace_dir}
