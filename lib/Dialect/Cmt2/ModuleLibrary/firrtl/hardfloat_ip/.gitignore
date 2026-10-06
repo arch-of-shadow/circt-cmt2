@@ -1,0 +1,6 @@
+HardFloat32_*.mlir
+HardFloat32_*.json
+HardFloat32_*.f
+HardFloat_w*.mlir
+HardFloat_w*.json
+HardFloat_w*.f

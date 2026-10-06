@@ -113,7 +113,8 @@ mlir::FunctionType getFunctionTypeFromBinding(
   
   mlir::Operation *topModule = extMod->template getParentOfType<mlir::ModuleOp>();
 
-  topModule->walk([&](circt::firrtl::FModuleOp firrtlMod) {
+  // Verilog blackboxes are FExtModuleOp; bind from the common port interface.
+  topModule->walk([&](circt::firrtl::FModuleLike firrtlMod) {
     if (firrtlMod.getModuleName() == firrtlModuleName) {
       // For each argument port, find its type in the FIRRTL module
       for (auto portName: argPorts) {

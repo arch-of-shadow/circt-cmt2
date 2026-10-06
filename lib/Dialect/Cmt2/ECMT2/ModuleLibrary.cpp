@@ -473,10 +473,9 @@ mlir::LogicalResult ModuleLibrary::insertModuleIntoCircuit(
     return mlir::failure();
   }
 
-  // Extract the actual FIRRTL module name (with parameters)
-  // This will be returned to the caller
+  // Both ordinary modules and Verilog externs are valid library roots.
   for (auto &op : loadedCircuit.getBodyBlock()->getOperations()) {
-    if (auto firrtlMod = mlir::dyn_cast<circt::firrtl::FModuleOp>(op)) {
+    if (auto firrtlMod = mlir::dyn_cast<circt::firrtl::FModuleLike>(op)) {
       actualModuleName = firrtlMod.getModuleName().str();
       break;
     }
@@ -502,10 +501,10 @@ mlir::LogicalResult ModuleLibrary::insertModuleIntoCircuit(
   // (the Cmt2ToFIRRTL pass will create/update the circuit later)
   if (!targetCircuit) {
     auto savedIP = builder.saveInsertionPoint();
-    // Get the first FModuleOp name from the loaded circuit as the circuit name
+    // Get the first module-like name from the loaded circuit as its name.
     llvm::StringRef circuitName = "Library";
     for (auto &op : loadedCircuit.getBodyBlock()->getOperations()) {
-      if (auto firrtlMod = mlir::dyn_cast<circt::firrtl::FModuleOp>(op)) {
+      if (auto firrtlMod = mlir::dyn_cast<circt::firrtl::FModuleLike>(op)) {
         circuitName = firrtlMod.getModuleName();
         break;
       }
@@ -516,12 +515,12 @@ mlir::LogicalResult ModuleLibrary::insertModuleIntoCircuit(
     builder.restoreInsertionPoint(savedIP);
   }
 
-  // Now insert the firrtl.module operations into the target circuit
+  // Import ordinary modules AND their external module dependencies.
   auto savedIP = builder.saveInsertionPoint();
   builder.setInsertionPointToEnd(targetCircuit.getBodyBlock());
 
   for (auto &op : loadedCircuit.getBodyBlock()->getOperations()) {
-    if (auto firrtlMod = mlir::dyn_cast<circt::firrtl::FModuleOp>(op)) {
+    if (auto firrtlMod = mlir::dyn_cast<circt::firrtl::FModuleLike>(op)) {
       // Clone the module and insert it into the firrtl.circuit
       if (firrtlModules_.contains(firrtlMod.getName())) {
         continue;

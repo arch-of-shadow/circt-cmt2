@@ -232,7 +232,7 @@ private:
                                  ImplicitLocOpBuilder &builder);
 
   // Helper utilities
-  FModuleOp findFIRRTLModule(StringRef moduleName, Operation *searchRoot);
+  FModuleLike findFIRRTLModule(StringRef moduleName, Operation *searchRoot);
   std::optional<size_t> getPortIndex(firrtl::InstanceOp &inst,
                                      std::string portName);
   std::optional<size_t> getPortIndex(firrtl::FModuleOp &fMod,
@@ -568,8 +568,8 @@ LogicalResult LowerCmt2ToFIRRTLPass::createInstances(
       return instOp.emitError("Referenced module not found: ")
              << instOp.getModuleName();
 
-    // Determine target FIRRTL module (external or converted cmt2 module)
-    FModuleOp firrtlMod;
+    // External bindings may refer to an FExtModuleOp (Verilog blackbox).
+    FModuleLike firrtlMod;
     StringRef targetModuleName;
     if (auto extModOp =
             dyn_cast<ExtModuleFirrtlOp>(referencedModule.getOperation())) {
@@ -1025,6 +1025,12 @@ Value LowerCmt2ToFIRRTLPass::generateReadySignal(
 
   // AND with ready signals of called functions
   func->walk([&](cmt2::CallOp call) {
+    // Call arguments are driven under the caller's fire signal. Readiness
+    // must therefore remain independent of those arguments, including branch
+    // predicates, to avoid a ready -> fire -> argument -> ready cycle.
+    auto requireReady = [&](Value calleeReady) {
+      ready = builder.create<AndPrimOp>(call.getLoc(), ready, calleeReady);
+    };
     InterfaceDeclOp interfaceDecl;
     for (auto &op : ctx.getCmt2Module().getBodyRegion().front()) {
       if (auto decl = dyn_cast<InterfaceDeclOp>(op)) {
@@ -1046,8 +1052,7 @@ Value LowerCmt2ToFIRRTLPass::generateReadySignal(
           getItfcDeclFunctionPortName(interfaceDecl, func, PortKind::Help, 0);
 
       if (auto readyPortIdx = getPortIndex(firrtlModule, readyPortName)) {
-        ready = builder.create<AndPrimOp>(
-            func.getLoc(), ready, firrtlModule.getArgument(*readyPortIdx));
+        requireReady(firrtlModule.getArgument(*readyPortIdx));
       }
     } else {
       // Regular instance call - external or cmt2.module
@@ -1101,8 +1106,7 @@ Value LowerCmt2ToFIRRTLPass::generateReadySignal(
                   getPortIndex(firrtlInst, readyPortName.getValue().str())) {
             LLVM_DEBUG(llvm::dbgs() << "ready port found from external: "
                                     << readyPortName << "\n");
-            ready = builder.create<AndPrimOp>(
-                call.getLoc(), ready, firrtlInst.getResult(*readyPortIdx));
+            requireReady(firrtlInst.getResult(*readyPortIdx));
           }
         }
       } else if (auto cmt2Mod = dyn_cast<cmt2::ModuleOp>(
@@ -1123,8 +1127,7 @@ Value LowerCmt2ToFIRRTLPass::generateReadySignal(
           LLVM_DEBUG(llvm::dbgs()
                      << "ready port found for " << referencedModule.moduleName()
                      << " : " << readyPortName << "\n");
-          ready = builder.create<AndPrimOp>(
-              call.getLoc(), ready, firrtlInst.getResult(*readyPortIdx));
+          requireReady(firrtlInst.getResult(*readyPortIdx));
         }
       }
     }
@@ -1623,9 +1626,13 @@ LowerCmt2ToFIRRTLPass::getFunctionPortName(cmt2::Cmt2FunctionLike function,
     else
       base = "ArgumentOutOfBound";
   } else if (portKind == PortKind::Result) {
-    if (index < function.getNumResults())
+    if (index < function.getNumResults()) {
       base = function.getResultName(index);
-    else
+      // ECMT2 builders leave unnamed results empty; use the same default as
+      // the textual parser so native and round-tripped exports share an ABI.
+      if (base.empty())
+        base = "res" + std::to_string(index);
+    } else
       base = "ResultOutOfBound";
   } else {
     if (index == 0) {
@@ -1662,13 +1669,13 @@ std::string LowerCmt2ToFIRRTLPass::getItfcDeclFunctionPortName(
   return declName + portName;
 }
 
-FModuleOp LowerCmt2ToFIRRTLPass::findFIRRTLModule(StringRef moduleName,
-                                                  Operation *searchRoot) {
-  FModuleOp result;
+FModuleLike LowerCmt2ToFIRRTLPass::findFIRRTLModule(StringRef moduleName,
+                                                Operation *searchRoot) {
+  FModuleLike result;
 
   // Search for FIRRTL module in circuits
   searchRoot->walk([&](firrtl::CircuitOp circuit) {
-    circuit.walk([&](FModuleOp mod) {
+    circuit.walk([&](FModuleLike mod) {
       if (mod.getModuleName() == moduleName) {
         result = mod;
         return WalkResult::interrupt();
@@ -1680,7 +1687,7 @@ FModuleOp LowerCmt2ToFIRRTLPass::findFIRRTLModule(StringRef moduleName,
 
   // If not found in circuits, search directly
   if (!result) {
-    searchRoot->walk([&](FModuleOp mod) {
+    searchRoot->walk([&](FModuleLike mod) {
       if (mod.getModuleName() == moduleName) {
         result = mod;
         return WalkResult::interrupt();
