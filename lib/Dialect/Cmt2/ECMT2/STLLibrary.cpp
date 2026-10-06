@@ -186,6 +186,16 @@ Module* STLLibrary::createFIFO1PushModule(unsigned dataWidth, Circuit& circuit) 
   });
   deqMethod->finalize();
 
+  // Non-consuming head inspection supports independently guarded consumers.
+  auto *firstVal = fifoMod->addValue("first", {dataType});
+  firstVal->guard([&](mlir::OpBuilder &b) {
+    b.create<circt::cmt2::ReturnOp>(fifoMod->getLoc(), fullReg->callValue("read", b));
+  });
+  firstVal->body([&](mlir::OpBuilder &b) {
+    b.create<circt::cmt2::ReturnOp>(fifoMod->getLoc(), reg->callValue("read", b));
+  });
+  firstVal->finalize();
+
   // Method: enq(data)
   // Guard: !full_reg.read() | deqed.read()
   auto *enqMethod = fifoMod->addMethod("enq", {{"data", dataType}}, {});
@@ -381,6 +391,11 @@ Module* STLLibrary::createFIFO1PullModule(unsigned dataWidth, Circuit& circuit) 
 
 Module* STLLibrary::createFIFO2IModule(unsigned dataWidth, Circuit& circuit) {
   std::string moduleName = "FIFO2_I_w" + std::to_string(dataWidth);
+  // Reuse the immutable parameterized definition. Instances still own their
+  // state; large elastic pipelines need thousands of instances, not thousands
+  // of identical definitions and repeated conflict/scheduler analyses.
+  if (auto existing = circuit.getModule(moduleName); succeeded(existing))
+    return *existing;
   auto *fifoMod = circuit.addModule(moduleName);
 
   Clock clk = fifoMod->addClockArgument("clk");
@@ -512,9 +527,9 @@ Module* STLLibrary::createFIFO2IModule(unsigned dataWidth, Circuit& circuit) {
           })
           .Else([&](mlir::OpBuilder &b) {
             auto valVals = enqValue->callValue("read", b);
-            auto reg0Vals = reg0->callValue("read", b);
-            reg1->callMethod("write", {reg0Vals[0]}, b);
-            reg0->callMethod("write", {valVals[0]}, b);
+            // reg0 is the oldest element. Append at the tail, rather than
+            // replacing the head and turning this two-entry FIFO into a stack.
+            reg1->callMethod("write", {valVals[0]}, b);
             auto c2State = UInt::constant(2, 2, b, fifoMod->getLoc());
             state->callMethod("write", {c2State.getValue()}, b);
           })

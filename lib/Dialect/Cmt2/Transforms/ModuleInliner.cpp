@@ -314,8 +314,10 @@ void ModuleInlinerPass::runOnOperation() {
       // Find all instances of this module by walking the IR
       SmallVector<InstanceOp> instancesToInline;
       circuit.walk([&](InstanceOp instance) {
-        auto refModule = instance.getReferencedModule();
-        if (refModule && refModule == module)
+        // Both symbols belong to this circuit. Comparing the reference is
+        // sufficient; resolving every instance by a linear symbol-table scan
+        // makes large, heavily partitioned designs prohibitively expensive.
+        if (instance.getModuleNameAttr().getAttr() == module.moduleNameAttr())
           instancesToInline.push_back(instance);
       });
 
@@ -350,8 +352,7 @@ void ModuleInlinerPass::runOnOperation() {
     // Check if module has any uses left by walking the IR
     bool hasUses = false;
     circuit.walk([&](InstanceOp instance) {
-      auto refModule = instance.getReferencedModule();
-      if (refModule && refModule == module) {
+      if (instance.getModuleNameAttr().getAttr() == module.moduleNameAttr()) {
         hasUses = true;
         return WalkResult::interrupt();
       }
