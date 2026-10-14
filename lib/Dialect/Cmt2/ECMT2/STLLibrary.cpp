@@ -512,9 +512,9 @@ Module* STLLibrary::createFIFO2IModule(unsigned dataWidth, Circuit& circuit) {
           })
           .Else([&](mlir::OpBuilder &b) {
             auto valVals = enqValue->callValue("read", b);
-            auto reg0Vals = reg0->callValue("read", b);
-            reg1->callMethod("write", {reg0Vals[0]}, b);
-            reg0->callMethod("write", {valVals[0]}, b);
+            // reg0 is the oldest item returned by deq. Append behind it;
+            // moving the new item to reg0 reverses a stalled FIFO's order.
+            reg1->callMethod("write", {valVals[0]}, b);
             auto c2State = UInt::constant(2, 2, b, fifoMod->getLoc());
             state->callMethod("write", {c2State.getValue()}, b);
           })
