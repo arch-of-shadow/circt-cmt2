@@ -1,10 +1,4 @@
-HardFloat32_*.mlir
-HardFloat32_*.json
-HardFloat32_*.f
-HardFloat_w*.mlir
-HardFloat_w*.json
-HardFloat_w*.f
-
-# Yosys/firtool workspaces, including interrupted conversions.
-/HardFloat32_*/
-/HardFloat_w*/
+# This directory holds generated IP and temporary conversion artifacts.
+/*
+!/.gitignore
+!/build.sh
