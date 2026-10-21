@@ -15,6 +15,7 @@
 #include "circt/Dialect/Cmt2/Cmt2Passes.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/IRMapping.h"
+#include "mlir/IR/SymbolTable.h"
 #include "mlir/Pass/Pass.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
@@ -278,6 +279,12 @@ void ModuleInlinerPass::inlineCalls(InstanceOp instance,
 
 void ModuleInlinerPass::runOnOperation() {
   circuit = getOperation();
+  SymbolTableCollection symbolTables;
+  auto resolveModule = [&](InstanceOp instance) {
+    auto owner = instance->getParentOfType<CircuitOp>();
+    return symbolTables.lookupSymbolIn<Cmt2ModuleLike>(
+        owner, instance.getModuleNameAttr());
+  };
 
   // Get analyses - we only use them for shouldNotInline check
   instanceGraph = &getAnalysis<InstanceGraph>();
@@ -314,7 +321,7 @@ void ModuleInlinerPass::runOnOperation() {
       // Find all instances of this module by walking the IR
       SmallVector<InstanceOp> instancesToInline;
       circuit.walk([&](InstanceOp instance) {
-        auto refModule = instance.getReferencedModule();
+        auto refModule = resolveModule(instance);
         if (refModule && refModule == module)
           instancesToInline.push_back(instance);
       });
@@ -350,7 +357,7 @@ void ModuleInlinerPass::runOnOperation() {
     // Check if module has any uses left by walking the IR
     bool hasUses = false;
     circuit.walk([&](InstanceOp instance) {
-      auto refModule = instance.getReferencedModule();
+      auto refModule = resolveModule(instance);
       if (refModule && refModule == module) {
         hasUses = true;
         return WalkResult::interrupt();
@@ -361,7 +368,8 @@ void ModuleInlinerPass::runOnOperation() {
     if (!hasUses) {
       LLVM_DEBUG(llvm::dbgs() << "Removing unused module: "
                               << module.moduleName() << "\n");
-      module->erase();
+      auto owner = module->getParentOfType<CircuitOp>();
+      symbolTables.getSymbolTable(owner).erase(module.getOperation());
     }
   }
 

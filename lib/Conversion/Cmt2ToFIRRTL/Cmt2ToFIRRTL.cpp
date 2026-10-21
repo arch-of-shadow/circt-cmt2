@@ -1025,6 +1025,9 @@ Value LowerCmt2ToFIRRTLPass::generateReadySignal(
 
   // AND with ready signals of called functions
   func->walk([&](cmt2::CallOp call) {
+    auto requireReady = [&](Value calleeReady) {
+      ready = builder.create<AndPrimOp>(call.getLoc(), ready, calleeReady);
+    };
     InterfaceDeclOp interfaceDecl;
     for (auto &op : ctx.getCmt2Module().getBodyRegion().front()) {
       if (auto decl = dyn_cast<InterfaceDeclOp>(op)) {
@@ -1046,8 +1049,7 @@ Value LowerCmt2ToFIRRTLPass::generateReadySignal(
           getItfcDeclFunctionPortName(interfaceDecl, func, PortKind::Help, 0);
 
       if (auto readyPortIdx = getPortIndex(firrtlModule, readyPortName)) {
-        ready = builder.create<AndPrimOp>(
-            func.getLoc(), ready, firrtlModule.getArgument(*readyPortIdx));
+        requireReady(firrtlModule.getArgument(*readyPortIdx));
       }
     } else {
       // Regular instance call - external or cmt2.module
@@ -1101,8 +1103,7 @@ Value LowerCmt2ToFIRRTLPass::generateReadySignal(
                   getPortIndex(firrtlInst, readyPortName.getValue().str())) {
             LLVM_DEBUG(llvm::dbgs() << "ready port found from external: "
                                     << readyPortName << "\n");
-            ready = builder.create<AndPrimOp>(
-                call.getLoc(), ready, firrtlInst.getResult(*readyPortIdx));
+            requireReady(firrtlInst.getResult(*readyPortIdx));
           }
         }
       } else if (auto cmt2Mod = dyn_cast<cmt2::ModuleOp>(
@@ -1123,8 +1124,7 @@ Value LowerCmt2ToFIRRTLPass::generateReadySignal(
           LLVM_DEBUG(llvm::dbgs()
                      << "ready port found for " << referencedModule.moduleName()
                      << " : " << readyPortName << "\n");
-          ready = builder.create<AndPrimOp>(
-              call.getLoc(), ready, firrtlInst.getResult(*readyPortIdx));
+          requireReady(firrtlInst.getResult(*readyPortIdx));
         }
       }
     }
