@@ -53,6 +53,8 @@ ExternalModule* STLLibrary::createWireModule(unsigned width, Circuit& circuit) {
 
 Module* STLLibrary::createWireDefaultModule(unsigned width, unsigned init, Circuit& circuit) {
   std::string moduleName = "WireDefault_w" + std::to_string(width) + "_i" + std::to_string(init);
+  if (auto existing = circuit.getModule(moduleName); succeeded(existing))
+    return *existing;
   auto *wireDefaultMod = circuit.addModule(moduleName);
   auto &builder = wireDefaultMod->getBuilder();
   auto loc = wireDefaultMod->getLoc();
@@ -133,6 +135,8 @@ ExternalModule* STLLibrary::createRegModule(unsigned width, unsigned init, Circu
 
 Module* STLLibrary::createFIFO1PushModule(unsigned dataWidth, Circuit& circuit) {
   std::string moduleName = "FIFO1_PUSH_w" + std::to_string(dataWidth);
+  if (auto existing = circuit.getModule(moduleName); succeeded(existing))
+    return *existing;
   auto *fifoMod = circuit.addModule(moduleName);
   fifoMod->setPrecedence({
       {"full", "deq"}, 
@@ -185,6 +189,16 @@ Module* STLLibrary::createFIFO1PushModule(unsigned dataWidth, Circuit& circuit) 
     b.create<circt::cmt2::ReturnOp>(fifoMod->getLoc(), mlir::ValueRange{dataVals[0]});
   });
   deqMethod->finalize();
+
+  // Non-consuming head inspection supports independently guarded consumers.
+  auto *firstVal = fifoMod->addValue("first", {dataType});
+  firstVal->guard([&](mlir::OpBuilder &b) {
+    b.create<circt::cmt2::ReturnOp>(fifoMod->getLoc(), fullReg->callValue("read", b));
+  });
+  firstVal->body([&](mlir::OpBuilder &b) {
+    b.create<circt::cmt2::ReturnOp>(fifoMod->getLoc(), reg->callValue("read", b));
+  });
+  firstVal->finalize();
 
   // Method: enq(data)
   // Guard: !full_reg.read() | deqed.read()
@@ -258,6 +272,8 @@ Module* STLLibrary::createFIFO1PushModule(unsigned dataWidth, Circuit& circuit) 
 
 Module* STLLibrary::createFIFO1PullModule(unsigned dataWidth, Circuit& circuit) {
   std::string moduleName = "FIFO1_PULL_w" + std::to_string(dataWidth);
+  if (auto existing = circuit.getModule(moduleName); succeeded(existing))
+    return *existing;
   auto *fifoMod = circuit.addModule(moduleName);
 
   Clock clk = fifoMod->addClockArgument("clk");
@@ -381,6 +397,8 @@ Module* STLLibrary::createFIFO1PullModule(unsigned dataWidth, Circuit& circuit) 
 
 Module* STLLibrary::createFIFO2IModule(unsigned dataWidth, Circuit& circuit) {
   std::string moduleName = "FIFO2_I_w" + std::to_string(dataWidth);
+  if (auto existing = circuit.getModule(moduleName); succeeded(existing))
+    return *existing;
   auto *fifoMod = circuit.addModule(moduleName);
 
   Clock clk = fifoMod->addClockArgument("clk");
@@ -512,9 +530,9 @@ Module* STLLibrary::createFIFO2IModule(unsigned dataWidth, Circuit& circuit) {
           })
           .Else([&](mlir::OpBuilder &b) {
             auto valVals = enqValue->callValue("read", b);
-            auto reg0Vals = reg0->callValue("read", b);
-            reg1->callMethod("write", {reg0Vals[0]}, b);
-            reg0->callMethod("write", {valVals[0]}, b);
+            // reg0 is the oldest item returned by deq. Append behind it;
+            // moving the new item to reg0 reverses a stalled FIFO's order.
+            reg1->callMethod("write", {valVals[0]}, b);
             auto c2State = UInt::constant(2, 2, b, fifoMod->getLoc());
             state->callMethod("write", {c2State.getValue()}, b);
           })
@@ -594,6 +612,29 @@ ExternalModule* STLLibrary::createMem1r1w1cModule( unsigned dataWidth, unsigned 
         .bindReset("rst", "reset")
         .bindMethod("rd0", "en", "", {"raddr"}, {})
         .bindValue("rd1", "rd1_valid", {}, {"rdata"})
+        .bindMethod("write", "wen", "", {"wdata", "waddr"}, {});
+
+  return memMod;
+}
+
+ExternalModule* STLLibrary::createMem1r1w1cARegModule( unsigned dataWidth, unsigned addrWidth, unsigned depth, Circuit& circuit) {
+  // Create external memory module with Mem1r1w binding
+  llvm::StringMap<int64_t> params;
+  params["data_width"] = dataWidth;
+  params["addr_width"] = addrWidth;
+  params["depth"] = depth;
+
+  auto *memMod = circuit.hasExternalModule("Mem1r1w1c_AReg", params);
+  if (memMod) {
+    return memMod;
+  }
+  memMod = circuit.addExternalModule("Mem1r1w1c_AReg", params);
+
+  // Bind memory interface
+  memMod->bindClock("clk", "clock")
+        .bindReset("rst", "reset")
+        .bindMethod("rd0", "ren", "", {"raddr"}, {})
+        .bindValue("rd1", "", {}, {"rdata"})
         .bindMethod("write", "wen", "", {"wdata", "waddr"}, {});
 
   return memMod;
