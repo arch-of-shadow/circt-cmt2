@@ -29,6 +29,10 @@ lit.site.cfg.py
 sim_*/
 examples/PyCMT2/*_workspace/
 examples/PyCMT2/sim_*/
+examples/JIT/*_workspace/
+examples/JIT/sim_*/
+examples/JIT/*_sim/
+examples/JIT/_logs/
 .ralph-loop/
 calyx
 

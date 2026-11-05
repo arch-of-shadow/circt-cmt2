@@ -17,6 +17,7 @@ if TYPE_CHECKING:
     from .module import ModuleBuilder
     from .signals import Signal
     from .types import Cmt2Type
+    from .interface import InterfaceBuilder
 
 
 class MethodRef:
@@ -303,3 +304,33 @@ class ExternalInstance:
 
     def __repr__(self) -> str:
         return f"ExternalInstance({self._name}: {self._module_name})"
+
+
+class InterfaceDecl:
+    """A declared interface instance inside a module (`cmt2.interface.decl`).
+
+    InterfaceDecl can be used as a call target in `RegionBuilder.call()`.
+    """
+
+    __slots__ = ("_name", "_interface", "_op", "_module")
+
+    def __init__(self, name: str, interface: "InterfaceBuilder", module: "ModuleBuilder", op=None):
+        self._name = name
+        self._interface = interface
+        self._module = module
+        self._op = op
+
+    @property
+    def name(self) -> str:
+        return self._name
+
+    @property
+    def interface(self) -> "InterfaceBuilder":
+        return self._interface
+
+    @property
+    def module(self) -> "ModuleBuilder":
+        return self._module
+
+    def __repr__(self) -> str:
+        return f"InterfaceDecl({self._name}: {self._interface.name})"

@@ -644,7 +644,6 @@ LogicalResult LowerCmt2ToFIRRTLPass::createInstances(
         }
 
       } else if ((*interfaceBinds).size() > 0) {
-        llvm::dbgs() << "reach here?\n";
         return instOp.emitError(
             "instantiate extern module with interface, illegal!");
       }
@@ -762,8 +761,6 @@ LogicalResult LowerCmt2ToFIRRTLPass::processInterfaceBinding(
            << interfaceDef.getInterface();
 
   if (interfaceDef) {
-
-    llvm::dbgs() << "reach A\n";
     // Process each method/value mapping in the interface definition
     for (auto methodEntry : interfaceDef.getMethods()) {
       auto methodArray = cast<mlir::ArrayAttr>(methodEntry);
@@ -780,8 +777,6 @@ LogicalResult LowerCmt2ToFIRRTLPass::processInterfaceBinding(
               declFuncRef.getLeafReference().getValue().str(),
               defFuncRef.getLeafReference().getValue().str(), interfaceDecl,
               iface, instOp, ctx, builder))) {
-        llvm::dbgs() << "reach B\n";
-
         return failure();
       }
     }
@@ -808,7 +803,6 @@ LogicalResult LowerCmt2ToFIRRTLPass::processInterfaceBinding(
                 firrtlInst, defRef.getLeafReference(),
                 func.functionName().str(), func.functionName().str(),
                 interfaceDecl, iface, instOp, ctx, builder))) {
-          llvm::dbgs() << "reach here C\n";
           return failure();
         }
       }

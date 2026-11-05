@@ -116,6 +116,14 @@ class RegionBuilder:
         """Convert an int to a Signal if needed."""
         if isinstance(val, Signal):
             return val
+        # Allow "signal-like" wrappers (e.g. JIT argument proxies) that expose
+        # the same `value`/`type` interface as Signal.
+        if hasattr(val, "value") and hasattr(val, "type"):
+            try:
+                if isinstance(getattr(val, "type"), Cmt2Type):
+                    return val  # type: ignore[return-value]
+            except Exception:
+                pass
         if width is None:
             raise ValueError("Cannot infer width for integer constant")
         return self.const(val, width)
@@ -507,7 +515,7 @@ class RegionBuilder:
         """
         from circt.ir import InsertionPoint, FlatSymbolRefAttr, StringAttr
         from circt.dialects import cmt2
-        from .refs import MethodRef, ValueRef, Instance
+        from .refs import MethodRef, ValueRef, Instance, InterfaceDecl
         from .external_module import ExternalModuleBuilder
 
         with InsertionPoint(self._block):
@@ -515,12 +523,19 @@ class RegionBuilder:
             if target is None:
                 callee = FlatSymbolRefAttr.get("this")
                 instance_module = None
+                interface = None
             elif isinstance(target, Instance):
                 callee = FlatSymbolRefAttr.get(target.name)
                 instance_module = target._module
+                interface = None
+            elif isinstance(target, InterfaceDecl):
+                callee = FlatSymbolRefAttr.get(target.name)
+                instance_module = None
+                interface = target.interface
             else:
                 callee = FlatSymbolRefAttr.get(target.name)
                 instance_module = getattr(target, "_ext_module", None)
+                interface = None
 
             # Determine method/value symbol
             if isinstance(method_or_value, (MethodRef, ValueRef)):
@@ -538,11 +553,27 @@ class RegionBuilder:
             result_types = []
             cmt2_return_types = []
             cmt2_arg_types = []
+            signature_known = False
 
             if method_builder is not None and hasattr(method_builder, "_return_types"):
                 cmt2_return_types = method_builder._return_types
                 if hasattr(method_builder, "_arg_types"):
                     cmt2_arg_types = method_builder._arg_types
+                    # MethodBuilder stores args as [(name, type), ...].
+                    if cmt2_arg_types and isinstance(cmt2_arg_types[0], tuple):
+                        cmt2_arg_types = [ty for _, ty in cmt2_arg_types]
+                signature_known = True
+            elif interface is not None:
+                func_builder = interface.get_function(method_name)
+                if func_builder is None:
+                    raise KeyError(
+                        f"Interface '{interface.name}' has no function '{method_name}'"
+                    )
+                cmt2_return_types = getattr(func_builder, "_return_types", [])
+                cmt2_arg_types = getattr(func_builder, "_arg_types", [])
+                if cmt2_arg_types and isinstance(cmt2_arg_types[0], tuple):
+                    cmt2_arg_types = [ty for _, ty in cmt2_arg_types]
+                signature_known = True
             elif isinstance(instance_module, ExternalModuleBuilder):
                 # Look up types from external module - try value first, then method
                 cmt2_return_types = instance_module.get_value_return_types(method_name)
@@ -550,22 +581,32 @@ class RegionBuilder:
                 if not cmt2_return_types and not cmt2_arg_types:
                     cmt2_return_types = instance_module.get_method_return_types(method_name)
                     cmt2_arg_types = instance_module.get_method_arg_types(method_name)
+                signature_known = bool(cmt2_return_types or cmt2_arg_types)
             elif instance_module is not None:
                 # Look up types from CMT2 module (ModuleBuilder)
                 # Check _values first, then _methods
                 if hasattr(instance_module, "_values") and method_name in instance_module._values:
                     val_builder = instance_module._values[method_name]
                     cmt2_return_types = val_builder._return_types
-                    cmt2_arg_types = []  # Values don't have args
+                    cmt2_arg_types = getattr(val_builder, "_arg_types", [])
+                    if cmt2_arg_types and isinstance(cmt2_arg_types[0], tuple):
+                        cmt2_arg_types = [ty for _, ty in cmt2_arg_types]
+                    signature_known = True
                 elif hasattr(instance_module, "_methods") and method_name in instance_module._methods:
                     meth_builder = instance_module._methods[method_name]
                     cmt2_return_types = meth_builder._return_types
                     cmt2_arg_types = [ty for _, ty in meth_builder._arg_types]
+                    signature_known = True
 
             result_types = [
                 ty.to_firrtl_type(self._ctx.mlir_context)
                 for ty in cmt2_return_types
             ]
+
+            if signature_known and len(cmt2_arg_types) != len(args):
+                raise TypeError(
+                    f"Call to '{method_name}' expected {len(cmt2_arg_types)} args, got {len(args)}"
+                )
 
             # Convert argument widths if needed
             converted_args = list(args)

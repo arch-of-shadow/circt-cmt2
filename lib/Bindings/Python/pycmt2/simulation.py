@@ -31,9 +31,12 @@ Example:
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import TYPE_CHECKING
 import re
+import shutil
+import subprocess
 
 if TYPE_CHECKING:
     from .circuit import Circuit
@@ -68,6 +71,10 @@ class SimulationWorkspace:
         output_dir: str | Path,
         top_module: str | None = None,
         debug_ports: bool = False,
+        trace: bool | None = None,
+        *,
+        use_circt_opt: bool | None = None,
+        circt_opt: str | None = None,
     ):
         """Create a simulation workspace generator.
 
@@ -80,12 +87,136 @@ class SimulationWorkspace:
                 These ports expose rule fire signals for debugging and testbench
                 assertions. Each rule gets a `dbg_<rule_name>_firing` output port.
                 Default is False.
+            trace: If True, enables VCD tracing (`--trace`) and emits a waveform
+                config in `waves/`. If False, disables VCD tracing for faster
+                Verilator builds. If None (default), respects environment
+                variable `PYCMT2_TRACE` (default: enabled).
+            use_circt_opt: If True, run the lowering pipeline via an external
+                `circt-opt` binary instead of the in-process Python pass
+                bindings. This is useful when Python bindings are unavailable
+                or out of date relative to the compiler.
+                If None (default), respects environment variable
+                `PYCMT2_USE_CIRCT_OPT` (default: disabled).
+            circt_opt: Optional explicit path to `circt-opt`. If not provided,
+                uses `PYCMT2_CIRCT_OPT`, then searches `PATH`, then falls back
+                to `./build/bin/circt-opt` when present.
         """
         self.circuit = circuit
         self.output_dir = Path(output_dir)
         self._top_module = top_module if top_module else self._get_top_module_name()
         self._external_rtl: dict[str, str] = {}  # filename -> content
         self._debug_ports = debug_ports
+        self._trace = (
+            trace
+            if trace is not None
+            else os.environ.get("PYCMT2_TRACE", "1").lower() not in ("0", "false", "no", "off")
+        )
+        self._use_circt_opt = (
+            use_circt_opt
+            if use_circt_opt is not None
+            else os.environ.get("PYCMT2_USE_CIRCT_OPT", "0").lower() in ("1", "true", "yes", "on")
+        )
+        self._circt_opt = self._resolve_circt_opt(circt_opt)
+
+    @staticmethod
+    def _resolve_circt_opt(explicit: str | None) -> str | None:
+        if explicit:
+            return explicit
+
+        env = os.environ.get("PYCMT2_CIRCT_OPT")
+        if env:
+            return env
+
+        found = shutil.which("circt-opt")
+        if found:
+            return found
+
+        local = Path.cwd() / "build" / "bin" / "circt-opt"
+        if local.exists():
+            return str(local)
+
+        return None
+
+    def _emit_verilog_via_circt_opt(self) -> str:
+        """Lower and export Verilog via an external `circt-opt` binary."""
+        if not self._circt_opt:
+            raise RuntimeError(
+                "PYCMT2_USE_CIRCT_OPT is enabled but no `circt-opt` was found. "
+                "Set `PYCMT2_CIRCT_OPT` or pass `circt_opt=...`."
+            )
+
+        rtl_dir = self.output_dir / "rtl"
+        rtl_dir.mkdir(parents=True, exist_ok=True)
+
+        mlir_in = rtl_dir / f"{self._top_module}.input.mlir"
+        mlir_lowered = rtl_dir / f"{self._top_module}.lowered.mlir"
+
+        mlir_in.write_text(self.circuit.emit_mlir())
+
+        cmt2_passes = [
+            "cmt2-compile-invoke",
+            "cmt2-dataflow-lowering",
+            "cmt2-token-lowering",
+            "cmt2-token-rtl-gen",
+            "cmt2-tdcc",
+            "cmt2-proc-stmt-to-action",
+            "cmt2-proc-to-gaa",
+        ]
+        if self._debug_ports:
+            cmt2_passes.append("cmt2-add-rule-firing-port")
+
+        # Match the in-process pipeline in `Circuit.emit_verilog()` but run it
+        # out-of-process so it does not depend on Python bindings.
+        pipeline = (
+            "builtin.module("
+            f"cmt2.circuit({','.join(cmt2_passes)}),"
+            "lower-cmt2-to-firrtl,"
+            "firrtl.circuit(firrtl-infer-resets,firrtl-lower-types),"
+            "any(any(firrtl-expand-whens)),"
+            "lower-firrtl-to-hw,"
+            "lower-seq-to-sv"
+            ")"
+        )
+
+        lower_cmd = [
+            self._circt_opt,
+            str(mlir_in),
+            f"--pass-pipeline={pipeline}",
+            "-o",
+            str(mlir_lowered),
+        ]
+        lower = subprocess.run(
+            lower_cmd,
+            capture_output=True,
+            text=True,
+            errors="replace",
+        )
+        if lower.returncode != 0:
+            raise RuntimeError(
+                "circt-opt lowering failed.\n"
+                f"Command: {' '.join(lower_cmd)}\n"
+                f"stdout:\n{lower.stdout}\n"
+                f"stderr:\n{lower.stderr}"
+            )
+
+        # `circt-opt` always prints the final IR. `--export-verilog` additionally
+        # prints Verilog to stdout. Discard the IR output to keep the captured
+        # stdout as pure Verilog.
+        export_cmd = [self._circt_opt, str(mlir_lowered), "--export-verilog", "-o", os.devnull]
+        export = subprocess.run(
+            export_cmd,
+            capture_output=True,
+            text=True,
+            errors="replace",
+        )
+        if export.returncode != 0:
+            raise RuntimeError(
+                "circt-opt Verilog export failed.\n"
+                f"Command: {' '.join(export_cmd)}\n"
+                f"stdout:\n{export.stdout}\n"
+                f"stderr:\n{export.stderr}"
+            )
+        return export.stdout
 
     def add_external_rtl(self, filename: str, content: str) -> "SimulationWorkspace":
         """Add external RTL file to the workspace.
@@ -207,6 +338,31 @@ class SimulationWorkspace:
             if filename not in self._external_rtl:
                 self.add_external_rtl(filename, verilog_content)
 
+    def _add_user_external_module_rtl(self) -> None:
+        """Stage user-provided RTL for custom external modules.
+
+        External modules can optionally register one or more RTL files via
+        `ExternalModuleBuilder.rtl_path(...)`. Those files are copied into the
+        workspace so Verilator can elaborate the design.
+        """
+        from pathlib import Path
+
+        for ext in getattr(self.circuit, "_external_modules", {}).values():
+            rtl_files = getattr(ext, "_rtl_files", None)
+            if not isinstance(rtl_files, dict) or not rtl_files:
+                continue
+            for filename, path in rtl_files.items():
+                if filename in self._external_rtl:
+                    continue
+                p = Path(path)
+                try:
+                    content = p.read_text()
+                except Exception as e:
+                    raise RuntimeError(
+                        f"Failed to read external RTL file for extern '{getattr(ext, 'name', '<ext>')}': {p}"
+                    ) from e
+                self.add_external_rtl(filename, content)
+
     @staticmethod
     def _extract_defined_modules(verilog: str) -> set[str]:
         return set(
@@ -264,7 +420,8 @@ class SimulationWorkspace:
         self._generate_placeholder_testbench()
         self._generate_makefile()
         self._generate_readme()
-        self.generate_waveform_config()
+        if self._trace:
+            self.generate_waveform_config()
 
         print(f"Simulation workspace generated at {self.output_dir}")
         print(f"Edit tb/testbench.cpp to add your test logic")
@@ -281,7 +438,8 @@ class SimulationWorkspace:
         self._generate_testbench_from_dsl(testbench)
         self._generate_makefile()
         self._generate_readme()
-        self.generate_waveform_config()
+        if self._trace:
+            self.generate_waveform_config()
 
         print(f"Simulation workspace generated at {self.output_dir}")
         print(f"Run 'make' to build and 'make run' to simulate")
@@ -297,6 +455,7 @@ class SimulationWorkspace:
             ["make", "-C", str(self.output_dir)],
             capture_output=True,
             text=True,
+            errors="replace",
         )
         if result.returncode != 0:
             print(f"Build failed:\n{result.stdout}\n{result.stderr}")
@@ -314,6 +473,7 @@ class SimulationWorkspace:
             ["make", "-C", str(self.output_dir), "run"],
             capture_output=True,
             text=True,
+            errors="replace",
         )
         output = result.stdout
         if result.stderr:
@@ -454,10 +614,13 @@ class SimulationWorkspace:
     def _generate_rtl(self):
         """Generate Verilog RTL files."""
         try:
-            verilog = self.circuit.emit_verilog(debug_ports=self._debug_ports)
+            if self._use_circt_opt:
+                verilog = self._emit_verilog_via_circt_opt()
+            else:
+                verilog = self.circuit.emit_verilog(debug_ports=self._debug_ports)
             self._last_emitted_verilog = verilog
             self._add_stl_rtl()
-            self._add_external_rtl_files_from_circuit()
+            self._add_user_external_module_rtl()
             rtl_file = self.output_dir / "rtl" / f"{self._top_module}.sv"
             rtl_file.write_text(verilog)
         except Exception as e:
@@ -485,6 +648,28 @@ endmodule
     def _generate_placeholder_testbench(self):
         """Generate a placeholder C++ testbench for Verilator."""
         top = self._top_module
+
+        trace_include = '#include "verilated_vcd_c.h"\n' if self._trace else ""
+        trace_setup = ""
+        trace_step = ""
+        trace_close = ""
+        if self._trace:
+            trace_setup = f"""
+    Verilated::traceEverOn(true);
+
+    // Create VCD trace
+    auto tfp = std::make_unique<VerilatedVcdC>();
+    dut->trace(tfp.get(), 99);
+    tfp->open("waves/{top}.vcd");
+"""
+            trace_step = """
+        tfp->dump(cycle * 10);
+"""
+            trace_close = """
+    // Finalize
+    tfp->close();
+"""
+
         tb_content = f'''\
 // Testbench for {top}
 // Generated by PyCMT2 SimulationWorkspace
@@ -493,7 +678,7 @@ endmodule
 
 #include "V{top}.h"
 #include "verilated.h"
-#include "verilated_vcd_c.h"
+{trace_include}
 
 #include <iostream>
 #include <memory>
@@ -505,15 +690,10 @@ constexpr int RESET_CYCLES = 5;
 int main(int argc, char** argv) {{
     // Initialize Verilator
     Verilated::commandArgs(argc, argv);
-    Verilated::traceEverOn(true);
 
     // Create DUT instance
     auto dut = std::make_unique<V{top}>();
-
-    // Create VCD trace
-    auto tfp = std::make_unique<VerilatedVcdC>();
-    dut->trace(tfp.get(), 99);
-    tfp->open("waves/{top}.vcd");
+{trace_setup}
 
     // Initialize signals
     dut->clk = 0;
@@ -531,7 +711,7 @@ int main(int argc, char** argv) {{
 
         // Evaluate
         dut->eval();
-        tfp->dump(cycle * 10);
+{trace_step}
 
         // Rising edge logic
         if (dut->clk) {{
@@ -563,8 +743,7 @@ int main(int argc, char** argv) {{
         cycle++;
     }}
 
-    // Finalize
-    tfp->close();
+{trace_close}
 
     if (passed) {{
         std::cout << "PASSED: Simulation completed successfully" << std::endl;
@@ -583,13 +762,30 @@ int main(int argc, char** argv) {{
         top = self._top_module
         sequences_code = self._generate_sequence_code(testbench)
 
+        trace_include = '#include "verilated_vcd_c.h"\n' if self._trace else ""
+        trace_setup = ""
+        trace_close = ""
+        if self._trace:
+            trace_setup = f"""
+    Verilated::traceEverOn(true);
+
+    auto tfp_owner = std::make_unique<VerilatedVcdC>();
+    tfp = tfp_owner.get();
+    dut->trace(tfp, 99);
+    tfp->open("waves/{top}.vcd");
+"""
+            trace_close = """
+    tfp->close();
+    tfp = nullptr;
+"""
+
         tb_content = f'''\
 // Testbench for {top}
 // Generated by PyCMT2 Testbench DSL
 
 #include "V{top}.h"
 #include "verilated.h"
-#include "verilated_vcd_c.h"
+{trace_include}
 
 #include <iostream>
 #include <memory>
@@ -608,10 +804,14 @@ static uint64_t sim_time;
 void tick() {{
     dut->clk = 0;
     dut->eval();
+#if VM_TRACE
     if (tfp) tfp->dump(sim_time++);
+#endif
     dut->clk = 1;
     dut->eval();
+#if VM_TRACE
     if (tfp) tfp->dump(sim_time++);
+#endif
     cycle++;
     cycle_count++;
 }}
@@ -644,14 +844,9 @@ void expect(const std::string& name, uint64_t actual, uint64_t expected) {{
 
 int main(int argc, char** argv) {{
     Verilated::commandArgs(argc, argv);
-    Verilated::traceEverOn(true);
 
     dut = new V{top}();
-
-    auto tfp_owner = std::make_unique<VerilatedVcdC>();
-    tfp = tfp_owner.get();
-    dut->trace(tfp, 99);
-    tfp->open("waves/{top}.vcd");
+{trace_setup}
 
     dut->clk = 0;
     dut->rst = 0;
@@ -664,8 +859,7 @@ int main(int argc, char** argv) {{
     // Run all sequences
     run_all_sequences();
 
-    tfp->close();
-    tfp = nullptr;
+{trace_close}
     delete dut;
 
     if (check_passed) {{
@@ -715,6 +909,40 @@ int main(int argc, char** argv) {{
     def _generate_makefile(self):
         """Generate Makefile for Verilator simulation."""
         top = self._top_module
+        verilator_output_split = os.environ.get("PYCMT2_VERILATOR_OUTPUT_SPLIT", "").strip().lower()
+        split_n: int | None = None
+        if verilator_output_split in ("", "0", "false", "no", "off"):
+            split_n = None
+        elif verilator_output_split in ("1", "true", "yes", "on"):
+            split_n = 20000
+        else:
+            try:
+                split_n = int(verilator_output_split)
+            except ValueError:
+                split_n = None
+
+        split_flags = ""
+        if split_n and split_n > 0:
+            split_flags = (
+                f"    --output-split {split_n} \\\n"
+                f"    --output-split-cfuncs {split_n} \\\n"
+            )
+
+        fast_build = os.environ.get("PYCMT2_FAST_BUILD", "").strip().lower() not in (
+            "",
+            "0",
+            "false",
+            "no",
+            "off",
+        )
+        fast_flags = "    -CFLAGS -O0 \\\n" if fast_build else ""
+
+        trace_flags = (
+            "    --trace --trace-structs $(VERILATOR_TRACE_UNDERSCORE_FLAG) \\\n"
+            if self._trace
+            else ""
+        )
+        extra_flags = f"{split_flags}{fast_flags}{trace_flags}"
         makefile_content = f'''\
 # Makefile for {top} simulation
 # Generated by PyCMT2 SimulationWorkspace
@@ -734,8 +962,7 @@ endif
 endif
 
 VERILATOR_FLAGS = --cc --exe --build -j 0 \\
-    --trace --trace-structs $(VERILATOR_TRACE_UNDERSCORE_FLAG) \\
-    -Wall -Wno-fatal \\
+{extra_flags}    -Wall -Wno-fatal \\
     --top-module {top}
 
 # Directories

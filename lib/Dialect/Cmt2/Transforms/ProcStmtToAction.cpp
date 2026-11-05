@@ -651,82 +651,13 @@ void ProcStmtToActionPass::generateStateRules(
       auto *parBlock = forkIt->second;
 
       if (parBlock->needsPerBranchFsm) {
-        // Per-branch FSM mode: Initialize branch FSMs conditionally
-        // Only initialize when branch FSMs are at 0 (not started yet)
-        // This prevents re-initialization on subsequent cycles at fork state
-
-        auto readSym = FlatSymbolRefAttr::get(builder.getContext(), "read");
-        auto writeSym = FlatSymbolRefAttr::get(builder.getContext(), "write");
-
-        // Check if any branch FSM is at 0 (need initialization)
-        Value anyBranchNotStarted = nullptr;
-
-        for (const auto &branch : parBlock->branches) {
-          auto branchFsmIt = branchFsmInstNames.find(branch.name);
-          if (branchFsmIt != branchFsmInstNames.end()) {
-            // Look up branch-specific FSM width
-            unsigned branchWidth = fsmWidth;  // Default to parent width
-            auto branchWidthIt = branchFsmWidths.find(branch.name);
-            if (branchWidthIt != branchFsmWidths.end()) {
-              branchWidth = branchWidthIt->second;
-            }
-            auto branchFsmType = firrtl::UIntType::get(builder.getContext(), branchWidth);
-            auto branchZeroConst = bodyBuilder.create<firrtl::ConstantOp>(
-                loc, branchFsmType, llvm::APInt(branchWidth, 0)).getResult();
-
-            auto branchInstanceSym = FlatSymbolRefAttr::get(
-                builder.getContext(), branchFsmIt->second);
-            auto branchFsmRead = bodyBuilder.create<CallOp>(
-                loc, SmallVector<Type>{branchFsmType}, ValueRange{},
-                branchInstanceSym, readSym,
-                ArrayAttr(), ArrayAttr());
-            auto branchAtZero = bodyBuilder.create<firrtl::EQPrimOp>(
-                loc, branchFsmRead.getResult(0), branchZeroConst).getResult();
-            if (!anyBranchNotStarted) {
-              anyBranchNotStarted = branchAtZero;
-            } else {
-              anyBranchNotStarted = bodyBuilder.create<firrtl::OrPrimOp>(
-                  loc, anyBranchNotStarted, branchAtZero).getResult();
-            }
-          }
-        }
-
-        // Initialize branch FSMs only if any is at 0 (first entry to fork)
-        // Use conditional write: write(anyNotStarted ? 1 : current_value)
-        for (const auto &branch : parBlock->branches) {
-          auto branchFsmIt = branchFsmInstNames.find(branch.name);
-          if (branchFsmIt != branchFsmInstNames.end()) {
-            // Look up branch-specific FSM width
-            unsigned branchWidth = fsmWidth;  // Default to parent width
-            auto branchWidthIt = branchFsmWidths.find(branch.name);
-            if (branchWidthIt != branchFsmWidths.end()) {
-              branchWidth = branchWidthIt->second;
-            }
-            auto branchFsmType = firrtl::UIntType::get(builder.getContext(), branchWidth);
-            auto branchZeroConst = bodyBuilder.create<firrtl::ConstantOp>(
-                loc, branchFsmType, llvm::APInt(branchWidth, 0)).getResult();
-
-            auto branchInstanceSym = FlatSymbolRefAttr::get(
-                builder.getContext(), branchFsmIt->second);
-            // Read current value
-            auto branchFsmRead = bodyBuilder.create<CallOp>(
-                loc, SmallVector<Type>{branchFsmType}, ValueRange{},
-                branchInstanceSym, readSym,
-                ArrayAttr(), ArrayAttr());
-            auto initStateConst = bodyBuilder.create<firrtl::ConstantOp>(
-                loc, branchFsmType, llvm::APInt(branchWidth, 1)).getResult();
-            // Conditional: init if at zero, keep current otherwise
-            auto branchAtZero = bodyBuilder.create<firrtl::EQPrimOp>(
-                loc, branchFsmRead.getResult(0), branchZeroConst).getResult();
-            auto valueToWrite = bodyBuilder.create<firrtl::MuxPrimOp>(
-                loc, branchAtZero, initStateConst, branchFsmRead.getResult(0)).getResult();
-            bodyBuilder.create<CallOp>(
-                loc, SmallVector<Type>{}, ValueRange{valueToWrite},
-                branchInstanceSym, writeSym,
-                ArrayAttr(), ArrayAttr());
-          }
-        }
-        // Main FSM stays at fork state - transition handled separately
+        // Per-branch FSM mode:
+        //
+        // Do NOT write branch FSM registers from the main FSM fork-state rule.
+        // Branch FSMs are started by dedicated branch-start rules generated in
+        // `generateBranchFsmRules()`. Writing here (even conditionally via a mux)
+        // can create write-write conflicts with branch state rules and prevent
+        // branch FSM progress.
       }
     }
 
@@ -1424,6 +1355,60 @@ void ProcStmtToActionPass::generateBranchFsmRules(
         branchWidth = branchWidthIt->second;
       }
       auto branchFsmType = firrtl::UIntType::get(ctx, branchWidth);
+
+      // Emit an explicit branch-start rule that transitions the branch FSM from
+      // idle (0) to the first active state (1) once the main FSM enters the fork
+      // state. This avoids the main fork-state rule continuously writing branch
+      // FSM registers (which can conflict with branch execution rules).
+      {
+        std::string startRuleName =
+            (procName + "_" + branchName + "_start").str();
+
+        auto funcType = builder.getFunctionType({}, {});
+        auto funcTypeAttr = TypeAttr::get(funcType);
+
+        auto startRule = builder.create<RuleOp>(
+            loc, builder.getStringAttr(startRuleName), funcTypeAttr,
+            builder.getArrayAttr({}), builder.getArrayAttr({}),
+            ArrayAttr(), ArrayAttr());
+
+        // Guard: main_fsm == fork_state AND branch_fsm == 0
+        Block *guardBlock = new Block();
+        startRule.getGuard().push_back(guardBlock);
+        OpBuilder guardBuilder(guardBlock, guardBlock->begin());
+
+        auto mainFsmRead = guardBuilder.create<CallOp>(
+            loc, SmallVector<Type>{mainFsmType}, ValueRange{},
+            mainInstanceSym, readSym, ArrayAttr(), ArrayAttr());
+        auto forkConst = guardBuilder.create<firrtl::ConstantOp>(
+            loc, mainFsmType, llvm::APInt(fsmWidth, forkState));
+        auto mainAtFork = guardBuilder.create<firrtl::EQPrimOp>(
+            loc, mainFsmRead.getResult(0), forkConst.getResult());
+
+        auto branchFsmRead = guardBuilder.create<CallOp>(
+            loc, SmallVector<Type>{branchFsmType}, ValueRange{},
+            branchInstanceSym, readSym, ArrayAttr(), ArrayAttr());
+        auto zeroConst = guardBuilder.create<firrtl::ConstantOp>(
+            loc, branchFsmType, llvm::APInt(branchWidth, 0));
+        auto branchAtZero = guardBuilder.create<firrtl::EQPrimOp>(
+            loc, branchFsmRead.getResult(0), zeroConst.getResult());
+
+        auto guardResult = guardBuilder.create<firrtl::AndPrimOp>(
+            loc, mainAtFork.getResult(), branchAtZero.getResult());
+        guardBuilder.create<ReturnOp>(loc, ValueRange{guardResult.getResult()});
+
+        // Body: branch_fsm := 1
+        Block *bodyBlock = new Block();
+        startRule.getBody().push_back(bodyBlock);
+        OpBuilder bodyBuilder(bodyBlock, bodyBlock->begin());
+
+        auto oneConst = bodyBuilder.create<firrtl::ConstantOp>(
+            loc, branchFsmType, llvm::APInt(branchWidth, 1)).getResult();
+        bodyBuilder.create<CallOp>(
+            loc, SmallVector<Type>{}, ValueRange{oneConst},
+            branchInstanceSym, writeSym, ArrayAttr(), ArrayAttr());
+        bodyBuilder.create<ReturnOp>(loc);
+      }
 
       // Build transition map: from_state -> to_state
       // For unconditional transitions (enables), prefer back-edges (lower state)

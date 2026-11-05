@@ -43,6 +43,8 @@ from .types import (
     AsyncReset,
     Bool,
     SyncToken,
+    LS,
+    LI,
 )
 
 from .signals import Signal
@@ -51,7 +53,9 @@ from .circuit import Circuit
 
 from .module import ModuleBuilder
 
-from .refs import MethodRef, ValueRef, StepRef, RuleRef, Instance
+from .refs import MethodRef, ValueRef, StepRef, RuleRef, Instance, InterfaceDecl
+
+from .interface import InterfaceBuilder, InterfaceDefBuilder
 
 from .simulation import SimulationWorkspace
 
@@ -132,11 +136,15 @@ __all__ = [
     "AsyncReset",
     "Bool",
     "SyncToken",
+    "LS",
+    "LI",
     # Signals
     "Signal",
     # Builders
     "Circuit",
     "ModuleBuilder",
+    "InterfaceBuilder",
+    "InterfaceDefBuilder",
     # Dataflow
     "DataflowBuilder",
     "TaskBuilder",
@@ -165,6 +173,7 @@ __all__ = [
     "StepRef",
     "RuleRef",
     "Instance",
+    "InterfaceDecl",
     # Simulation
     "SimulationWorkspace",
     # Testbench

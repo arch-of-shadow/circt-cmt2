@@ -171,3 +171,11 @@ Where `<checkbox>` is either `- [ ]` (not done) or `- [x]` (done).
 - [x] D11 `PyCMT2-Guide.md` matches the Python API surface and recommended workflow
 - [x] D12 `ECMT2-Guide.md` matches the C++ API surface and build usage
 - [x] D13 Internal design notes are not required for release docs
+
+---
+
+# Future / Design Notes (Non-release)
+
+- (none) JIT docs are release-facing:
+  - `docs/Cmt2/guides/JIT.md`
+  - `docs/Cmt2/reference/TypeSystem.md`
