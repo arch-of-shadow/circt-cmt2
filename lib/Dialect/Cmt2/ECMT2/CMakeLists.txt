@@ -8,7 +8,6 @@ add_circt_dialect_library(CIRCTECMT2
   Instance.cpp
   Interface.cpp
   Circuit.cpp
-  ModuleLibrary.cpp
   HighLevel/Circuit.cpp
   HighLevel/Module.cpp
   HighLevel/Instance.cpp
@@ -26,6 +25,7 @@ add_circt_dialect_library(CIRCTECMT2
 
   LINK_LIBS PUBLIC
   CIRCTCmt2
+  CIRCTCmt2ModuleLib
   CIRCTCmt2Transforms
   CIRCTFIRRTL
   CIRCTSeq
@@ -34,13 +34,3 @@ add_circt_dialect_library(CIRCTECMT2
   MLIRSupport
   MLIRParser
   )
-
-# Copy module library to build directory
-add_custom_target(cmt2-module-library
-  COMMAND ${CMAKE_COMMAND} -E copy_directory
-          ${CMAKE_CURRENT_SOURCE_DIR}/../ModuleLibrary
-          ${CMAKE_BINARY_DIR}/lib/Dialect/Cmt2/ModuleLibrary
-  COMMENT "Copying Cmt2 module library"
-)
-
-add_dependencies(CIRCTECMT2 cmt2-module-library)

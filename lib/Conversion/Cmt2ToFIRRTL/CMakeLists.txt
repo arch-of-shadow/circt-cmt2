@@ -9,6 +9,7 @@ add_circt_conversion_library(CIRCTCmt2ToFIRRTL
 
   LINK_LIBS PUBLIC
   CIRCTCmt2
+  CIRCTCmt2Analysis
   CIRCTComb
   CIRCTFIRRTL
   CIRCTSupport

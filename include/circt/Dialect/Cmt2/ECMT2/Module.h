@@ -32,6 +32,10 @@ class Value;
 class Instance;
 class InterfaceDecl;
 class InterfaceDef;
+class ProcStep;
+class ProcStaticStep;
+class ProcRule;
+class ProcMethod;
 
 /// Base module interface
 class ModuleBase {
@@ -108,6 +112,14 @@ public:
                    llvm::ArrayRef<mlir::Type> results);
   Value *addValue(llvm::StringRef name, llvm::ArrayRef<mlir::Type> results);
 
+  /// Procedural operations
+  ProcStep *addProcStep(llvm::StringRef name);
+  ProcStaticStep *addProcStaticStep(llvm::StringRef name, uint64_t latency);
+  ProcRule *addProcRule(llvm::StringRef name);
+  ProcMethod *addProcMethod(llvm::StringRef name,
+                            llvm::ArrayRef<std::pair<std::string, mlir::Type>> args,
+                            llvm::ArrayRef<mlir::Type> results);
+
   /// Interface support
   InterfaceDecl *defineInterfaceDecl(llvm::StringRef name, llvm::StringRef type);
   InterfaceDef *defineInterfaceDef(llvm::StringRef name,
@@ -139,6 +151,10 @@ private:
   std::vector<std::unique_ptr<Value>> values_;
   std::vector<std::unique_ptr<InterfaceDecl>> interfaces_;
   std::vector<std::unique_ptr<InterfaceDef>> interfaceDefs_;
+  std::vector<std::unique_ptr<ProcStep>> procSteps_;
+  std::vector<std::unique_ptr<ProcStaticStep>> procStaticSteps_;
+  std::vector<std::unique_ptr<ProcRule>> procRules_;
+  std::vector<std::unique_ptr<ProcMethod>> procMethods_;
 };
 
 } // namespace ecmt2

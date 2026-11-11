@@ -19,7 +19,7 @@ using namespace circt;
 using namespace cmt2;
 
 void circt::cmt2::populateCmt2ToFIRRTLPipeline(mlir::OpPassManager &pm) {
-  // Steps 1-3 run on CircuitOp, so create a nested pass manager
+  // Steps 1-6 run on CircuitOp, so create a nested pass manager
   auto &circuitPM = pm.nest<cmt2::CircuitOp>();
 
   // Step 1: Inline all private functions (functions called via @this)
@@ -31,6 +31,15 @@ void circt::cmt2::populateCmt2ToFIRRTLPipeline(mlir::OpPassManager &pm) {
   // Step 3: Verify that call sequences respect conflict matrix constraints
   circuitPM.addPass(createVerifyCallSequence());
 
-  // Step 4: Convert Cmt2 to FIRRTL (runs on ModuleOp)
+  // Step 4: Lower dataflow constructs to rules with tokens
+  circuitPM.addPass(createDataflowLowering());
+
+  // Step 5: Lower tokens (annotate with implementation info)
+  circuitPM.addPass(createTokenLowering());
+
+  // Step 6: Generate stall controllers for LS/LI boundaries
+  circuitPM.addPass(createStallControllerGen());
+
+  // Step 7: Convert Cmt2 to FIRRTL (runs on ModuleOp)
   pm.addPass(circt::createLowerCmt2ToFIRRTLPass());
 }

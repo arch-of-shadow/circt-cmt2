@@ -18,6 +18,19 @@ def Cmt2Dialect : Dialect {
     This dialect defines the `cmt2` dialect.
     // TODO: add more information
   }];
+
+  // Enable automatic attribute printer/parser generation
+  let useDefaultAttributePrinterParser = 1;
+
+  // Enable automatic type printer/parser generation
+  let useDefaultTypePrinterParser = 1;
+
+  let extraClassDeclaration = [{
+    /// Register all Cmt2 attributes.
+    void registerAttributes();
+    /// Register all Cmt2 types.
+    void registerTypes();
+  }];
 }
 
 // Base class for the operation in this dialect.

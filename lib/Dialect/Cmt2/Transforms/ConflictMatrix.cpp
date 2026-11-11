@@ -87,7 +87,7 @@ void ModuleConflictMatrix::print(llvm::raw_ostream &os,
 void ModuleConflictMatrix::print(llvm::raw_ostream &os, llvm::StringRef moduleName) const {
   os << "Conflict Matrix for @" << moduleName << ":\n";
 
-  // Group by relationship type
+  // Step by relationship type
   SmallVector<FunctionPair> conflicts, conflictFrees, sequentials;
   for (const auto &[pair, rel] : relationships) {
     switch (rel) {

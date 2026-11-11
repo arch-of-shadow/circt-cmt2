@@ -433,3 +433,39 @@ void Module::setPrecedence(
   // Set the precedence attribute on the ModuleOp
   op_->setAttr("precedence", builder_.getArrayAttr(precedenceAttrs));
 }
+
+//===----------------------------------------------------------------------===//
+// Procedural Operations
+//===----------------------------------------------------------------------===//
+
+ProcStep *Module::addProcStep(llvm::StringRef name) {
+  auto step = std::make_unique<ProcStep>(name, this);
+  auto *ptr = step.get();
+  procSteps_.push_back(std::move(step));
+  return ptr;
+}
+
+ProcStaticStep *Module::addProcStaticStep(llvm::StringRef name,
+                                          uint64_t latency) {
+  auto step = std::make_unique<ProcStaticStep>(name, latency, this);
+  auto *ptr = step.get();
+  procStaticSteps_.push_back(std::move(step));
+  return ptr;
+}
+
+ProcRule *Module::addProcRule(llvm::StringRef name) {
+  auto rule = std::make_unique<ProcRule>(name, this);
+  auto *ptr = rule.get();
+  procRules_.push_back(std::move(rule));
+  return ptr;
+}
+
+ProcMethod *
+Module::addProcMethod(llvm::StringRef name,
+                      llvm::ArrayRef<std::pair<std::string, mlir::Type>> args,
+                      llvm::ArrayRef<mlir::Type> results) {
+  auto method = std::make_unique<ProcMethod>(name, args, results, this);
+  auto *ptr = method.get();
+  procMethods_.push_back(std::move(method));
+  return ptr;
+}

@@ -126,19 +126,18 @@ builtin.module {
 // FIRRTL-LABEL: firrtl.circuit "hello"
 // FIRRTL: firrtl.module @Reg32
 // FIRRTL: firrtl.module @child
+// FIRRTL-SAME: in %reader_getData_res0
 // FIRRTL-SAME: in %reader_getData_ready
-// FIRRTL-SAME: out %reader_getData_enable
-// FIRRTL-SAME: out %reader_getData_result
 // FIRRTL: firrtl.module @hello
-// FIRRTL-SAME: out %writer_store_enable
 // FIRRTL-SAME: out %writer_store_data
 // FIRRTL-SAME: in %writer_store_ready
+// FIRRTL-SAME: out %writer_store_enable
 // FIRRTL: firrtl.instance x @Reg32
 // FIRRTL: firrtl.instance c @child
 
 // VERILOG-LABEL: module hello
-// VERILOG: output writer_store_enable
-// VERILOG: output [31:0] writer_store_data
+// VERILOG: writer_store_data
 // VERILOG: input writer_store_ready
+// VERILOG: output writer_store_enable
 // VERILOG: Reg32 x
 // VERILOG: child c

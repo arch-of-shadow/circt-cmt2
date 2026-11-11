@@ -1,0 +1,45 @@
+# PyCMT2 Proc Conflict Test Script
+# Tests conflict resolution between proc.rule and regular rule
+
+# Reset circuit
+reset
+
+# Check initial state
+state
+
+# Enable tracing to see which rules fire
+trace on
+
+# Run 10 cycles to observe behavior
+# Expected: counter oscillates 0 -> 1 -> 2 -> 3 -> 4 -> 2 -> 3 -> 4 -> 2 ...
+step
+state
+
+step
+state
+
+step
+state
+
+step
+state
+
+step
+state
+
+step
+state
+
+step
+state
+
+step
+state
+
+step
+state
+
+step
+state
+
+quit

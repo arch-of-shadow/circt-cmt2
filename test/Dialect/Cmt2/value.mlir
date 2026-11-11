@@ -2,6 +2,19 @@
 // RUN: circt-opt %s --lower-cmt2-to-firrtl | FileCheck %s --check-prefix=FIRRTL
 // RUN: circt-opt %s --lower-cmt2-to-firrtl | firtool --format=mlir --verilog | FileCheck %s --check-prefix=VERILOG
 
+// PARSE-LABEL: cmt2.circuit
+// PARSE: cmt2.module @child
+// PARSE: cmt2.value @add1
+// PARSE: cmt2.module @top
+// PARSE: cmt2.value @add_incr
+
+// FIRRTL-LABEL: firrtl.circuit "top"
+// FIRRTL: firrtl.module @child
+// FIRRTL: firrtl.module @top
+
+// VERILOG-LABEL: module child
+// VERILOG: module top
+
 // This test demonstrates the complete Cmt2 → FIRRTL → Verilog pipeline with:
 // 1. External FIRRTL modules from the module library
 // 2. Interface mechanism (InterfaceDecl, InterfaceDef, interface_binds)

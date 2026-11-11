@@ -109,6 +109,13 @@ typedef struct FIRRTLClassElement {
 MLIR_DECLARE_CAPI_DIALECT_REGISTRATION(FIRRTL, firrtl);
 
 //===----------------------------------------------------------------------===//
+// Pass API.
+//===----------------------------------------------------------------------===//
+
+/// Registers all FIRRTL passes with the global pass registry.
+MLIR_CAPI_EXPORTED void registerFIRRTLPasses(void);
+
+//===----------------------------------------------------------------------===//
 // Type API.
 //===----------------------------------------------------------------------===//
 

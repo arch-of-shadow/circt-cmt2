@@ -3,6 +3,7 @@ set(LLVM_OPTIONAL_SOURCES
   AIG.cpp
   Arc.cpp
   CHIRRTL.cpp
+  Cmt2.cpp
   Comb.cpp
   DC.cpp
   Debug.cpp
@@ -46,6 +47,15 @@ add_circt_public_c_api_library(CIRCTCAPIArc
   MLIRCAPIIR
   CIRCTArc
   CIRCTArcTransforms
+)
+
+add_circt_public_c_api_library(CIRCTCAPICmt2
+  Cmt2.cpp
+
+  LINK_LIBS PUBLIC
+  MLIRCAPIIR
+  CIRCTCmt2
+  CIRCTCmt2Transforms
 )
 
 add_circt_public_c_api_library(CIRCTCAPIComb

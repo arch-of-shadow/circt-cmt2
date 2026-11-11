@@ -1,3 +1,7 @@
+// RUN: circt-opt %s | FileCheck %s
+
+// CHECK-LABEL: cmt2.circuit
+// CHECK: cmt2.module @ScratchpadMemoryPool
 
 module {
   cmt2.circuit {
@@ -56,9 +60,9 @@ module {
     cmt2.module.extern.firrtl @Mem1r1w_w32_a8_d256 : @Mem1r1w_w32_a8_d256(%clk: !firrtl.clock, %rst: !firrtl.uint<1>) {
       cmt2.bind.bare %clk, @clock : !firrtl.clock
       cmt2.bind.bare %rst, @reset : !firrtl.uint<1>
-      cmt2.bind.method @rd0 : () -> ()[enable = @en, inputs = [@raddr], outputs = []] {arg_attrs = [], res_attrs = []}
-      cmt2.bind.value @rd1 : () -> ()[ready = @rd1_valid, data = [@rdata]] {arg_attrs = [], res_attrs = []}
-      cmt2.bind.method @write : () -> ()[enable = @wen, inputs = [@wdata, @waddr], outputs = []] {arg_attrs = [], res_attrs = []}
+      cmt2.bind.method @rd0 : () -> ()[enable = "en", arguments = ["raddr"], results = []] {arg_attrs = [], res_attrs = []}
+      cmt2.bind.value @rd1 : () -> ()[ready = "rd1_valid", arguments = [], results = ["rdata"]] {arg_attrs = [], res_attrs = []}
+      cmt2.bind.method @write : () -> ()[enable = "wen", arguments = ["wdata", "waddr"], results = []] {arg_attrs = [], res_attrs = []}
     } {conflict = [[@write, @write], [@rd0, @rd0]]}
     cmt2.module @BankWrapper_mem_a_0(%clk: !firrtl.clock, %rst: !firrtl.uint<1>) {
       cmt2.instance @mem_bank = @Mem1r1w_w32_a8_d256(%clk, %rst) : !firrtl.clock, !firrtl.uint<1> with []
@@ -169,8 +173,8 @@ module {
       }
     } {precedence = [[@write, @default], [@default, @read]]}
     cmt2.module.extern.firrtl @Wire_w1 : @Wire_w1 {
-      cmt2.bind.method @write : () -> ()[enable = @write_enable, inputs = [@write_data], outputs = []] {arg_attrs = [], res_attrs = []}
-      cmt2.bind.value @read : () -> ()[ data = [@read_data]] {arg_attrs = [], res_attrs = []}
+      cmt2.bind.method @write : () -> ()[enable = "write_enable", arguments = ["write_data"], results = []] {arg_attrs = [], res_attrs = []}
+      cmt2.bind.value @read : () -> ()[arguments = [], results = ["read_data"]] {arg_attrs = [], res_attrs = []}
     }
     cmt2.module @WireDefault_data_0 {
       cmt2.instance @inner = @Wire_w32 with []
@@ -198,8 +202,8 @@ module {
       }
     } {precedence = [[@write, @default], [@default, @read]]}
     cmt2.module.extern.firrtl @Wire_w32 : @Wire_w32 {
-      cmt2.bind.method @write : () -> ()[enable = @write_enable, inputs = [@write_data], outputs = []] {arg_attrs = [], res_attrs = []}
-      cmt2.bind.value @read : () -> ()[ data = [@read_data]] {arg_attrs = [], res_attrs = []}
+      cmt2.bind.method @write : () -> ()[enable = "write_enable", arguments = ["write_data"], results = []] {arg_attrs = [], res_attrs = []}
+      cmt2.bind.value @read : () -> ()[arguments = [], results = ["read_data"]] {arg_attrs = [], res_attrs = []}
     }
     cmt2.module @WireDefault_addr_0 {
       cmt2.instance @inner = @Wire_w8 with []
@@ -227,8 +231,8 @@ module {
       }
     } {precedence = [[@write, @default], [@default, @read]]}
     cmt2.module.extern.firrtl @Wire_w8 : @Wire_w8 {
-      cmt2.bind.method @write : () -> ()[enable = @write_enable, inputs = [@write_data], outputs = []] {arg_attrs = [], res_attrs = []}
-      cmt2.bind.value @read : () -> ()[ data = [@read_data]] {arg_attrs = [], res_attrs = []}
+      cmt2.bind.method @write : () -> ()[enable = "write_enable", arguments = ["write_data"], results = []] {arg_attrs = [], res_attrs = []}
+      cmt2.bind.value @read : () -> ()[arguments = [], results = ["read_data"]] {arg_attrs = [], res_attrs = []}
     }
     cmt2.module @BankWrapper_mem_a_1(%clk: !firrtl.clock, %rst: !firrtl.uint<1>) {
       cmt2.instance @mem_bank = @Mem1r1w_w32_a8_d256(%clk, %rst) : !firrtl.clock, !firrtl.uint<1> with []

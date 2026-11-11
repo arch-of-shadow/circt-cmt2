@@ -1,0 +1,450 @@
+//===- TimingInference.cpp - Infer cycle-precise timing --------*- C++ -*-===//
+//
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+//
+//===----------------------------------------------------------------------===//
+//
+// This file implements the TimingInference pass for the Cmt2 dialect.
+// It infers cycle-precise timing for methods and steps based on method
+// contracts and propagates timing information through the module hierarchy.
+//
+//===----------------------------------------------------------------------===//
+
+#include "circt/Dialect/Cmt2/Analysis/TimingAnalysis.h"
+#include "circt/Dialect/Cmt2/Analysis/TokenAnalysis.h"
+#include "circt/Dialect/Cmt2/Cmt2Ops.h"
+#include "circt/Dialect/Cmt2/Cmt2Passes.h"
+#include "mlir/IR/Builders.h"
+#include "mlir/Pass/Pass.h"
+#include "llvm/ADT/PostOrderIterator.h"
+#include "llvm/ADT/TypeSwitch.h"
+#include "llvm/Support/Debug.h"
+
+#define DEBUG_TYPE "cmt2-timing-inference"
+
+namespace circt {
+namespace cmt2 {
+#define GEN_PASS_DEF_TIMINGINFERENCE
+#include "circt/Dialect/Cmt2/Cmt2Passes.h.inc"
+} // namespace cmt2
+} // namespace circt
+
+using namespace circt;
+using namespace cmt2;
+using namespace mlir;
+
+namespace {
+
+//===----------------------------------------------------------------------===//
+// TimingInference Pass Implementation
+//===----------------------------------------------------------------------===//
+
+struct TimingInferencePass
+    : public circt::cmt2::impl::TimingInferenceBase<TimingInferencePass> {
+  using TimingInferenceBase::TimingInferenceBase;
+
+  void runOnOperation() override;
+
+private:
+  /// Process a single module for timing inference.
+  void processModule(cmt2::ModuleOp module, TimingAnalysis &analysis);
+
+  /// Infer timing for a ProcMethodOp and potentially promote to static.
+  void inferMethodTiming(ProcMethodOp method, TimingAnalysis &analysis);
+
+  /// Infer timing for a ProcStaticStepOp.
+  void inferStepTiming(ProcStaticStepOp step, TimingAnalysis &analysis);
+
+  /// Infer timing annotations for a CallOp.
+  void inferTimingForCall(CallOp call, cmt2::ModuleOp module, TimingAnalysis &analysis);
+
+  /// Compute required latency for a step based on its calls.
+  std::optional<int64_t> computeRequiredLatency(ProcStaticStepOp step,
+                                                 TimingAnalysis &analysis);
+
+  /// Check if a method's body has deterministic timing.
+  std::optional<int64_t> computeMethodLatency(ProcMethodOp method,
+                                               TimingAnalysis &analysis);
+
+  /// Process a proc.dataflow for timing inference.
+  void processDataflow(ProcDataflowOp dataflow);
+
+  /// Infer timing for dataflow tasks based on token dependencies.
+  void inferDataflowTaskTiming(ProcDataflowOp dataflow);
+};
+
+} // end anonymous namespace
+
+//===----------------------------------------------------------------------===//
+// Call Timing Inference
+//===----------------------------------------------------------------------===//
+
+void TimingInferencePass::inferTimingForCall(CallOp call, cmt2::ModuleOp module,
+                                              TimingAnalysis &analysis) {
+  // Infer only the missing timing pieces. This intentionally supports partial
+  // user annotations (e.g. arg_timing present but result_timing omitted).
+  bool needArgTiming = !call.getArgTiming();
+  bool needResultTiming = !call.getResultTiming() && !call.getOutputs().empty();
+  if (!needArgTiming && !needResultTiming)
+    return;
+
+  // Look up the method timing
+  auto methodTiming = analysis.lookupMethodTiming(
+      module, call.getCallee(), call.getMethodOrValueAttr());
+  if (!methodTiming || !methodTiming->isStatic())
+    return;
+
+  // Get parent step to determine step latency
+  auto parentStep = call->getParentOfType<ProcStaticStepOp>();
+  if (!parentStep)
+    return;
+
+  OpBuilder builder(call);
+  int64_t methodLatency = *methodTiming->latency;
+  int64_t callStart = 0;
+  if (auto callTiming = call.getCallTiming())
+    callStart = callTiming->getStart();
+
+  // Infer default arg timing: args are stable at the call issue cycle.
+  SmallVector<Attribute> argTimingAttrs;
+  if (needArgTiming) {
+    for (size_t i = 0; i < call.getInputs().size(); ++i) {
+      argTimingAttrs.push_back(
+          TimingIntervalAttr::get(builder.getContext(), callStart,
+                                  callStart + 1));
+    }
+  }
+
+  // Infer default result timing: results available at method latency
+  SmallVector<Attribute> resultTimingAttrs;
+  if (needResultTiming) {
+    for (size_t i = 0; i < call.getOutputs().size(); ++i) {
+      // Default: result available at (call_start + method latency), stable for 1
+      // cycle.
+      resultTimingAttrs.push_back(TimingIntervalAttr::get(
+          builder.getContext(), callStart + methodLatency,
+          callStart + methodLatency + 1));
+    }
+  }
+
+  // Set the inferred timing attributes
+  if (needArgTiming && !argTimingAttrs.empty())
+    call.setArgTimingAttr(builder.getArrayAttr(argTimingAttrs));
+  if (needResultTiming && !resultTimingAttrs.empty())
+    call.setResultTimingAttr(builder.getArrayAttr(resultTimingAttrs));
+
+  LLVM_DEBUG(llvm::dbgs() << "  Inferred timing for call to "
+                          << call.getCallee() << "." << call.getMethodOrValueAttr()
+                          << ": call@" << callStart << ", args@["
+                          << callStart << "," << callStart + 1
+                          << "), results@["
+                          << callStart + methodLatency << ","
+                          << callStart + methodLatency + 1 << ")\n");
+}
+
+//===----------------------------------------------------------------------===//
+// Step Timing Inference
+//===----------------------------------------------------------------------===//
+
+std::optional<int64_t>
+TimingInferencePass::computeRequiredLatency(ProcStaticStepOp step,
+                                            TimingAnalysis &analysis) {
+  int64_t maxCycle = 0;
+
+  step.getBody().walk([&](CallOp call) {
+    // Get the max cycle from explicit timing
+    int64_t callMax = getMaxCycleFromCall(call);
+    maxCycle = std::max(maxCycle, callMax);
+
+    // Also consider method latency if we need to read results
+    auto parentModule = step->getParentOfType<cmt2::ModuleOp>();
+    if (parentModule) {
+      auto methodTiming = analysis.lookupMethodTiming(
+          parentModule, call.getCallee(), call.getMethodOrValueAttr());
+      if (methodTiming && methodTiming->isStatic() &&
+          !call.getOutputs().empty()) {
+        int64_t callStart = 0;
+        if (auto callTiming = call.getCallTiming())
+          callStart = callTiming->getStart();
+        // Need enough room to capture the results (single-cycle interval).
+        maxCycle = std::max(maxCycle, callStart + *methodTiming->latency + 1);
+      }
+    }
+  });
+
+  // Latency must be at least 1
+  return maxCycle > 0 ? std::optional<int64_t>(maxCycle) : std::nullopt;
+}
+
+void TimingInferencePass::inferStepTiming(ProcStaticStepOp step,
+                                          TimingAnalysis &analysis) {
+  auto requiredLatency = computeRequiredLatency(step, analysis);
+
+  // Check if step latency is sufficient
+  int64_t stepLatency = step.getLatency();
+  if (requiredLatency && *requiredLatency > stepLatency) {
+    step.emitWarning() << "step latency (" << stepLatency
+                       << ") may be insufficient for contained calls (need "
+                       << *requiredLatency << ")";
+  }
+
+  LLVM_DEBUG(llvm::dbgs() << "  Step @" << step.getSymName()
+                          << ": declared latency=" << stepLatency
+                          << ", required=" << (requiredLatency ? std::to_string(*requiredLatency) : "unknown")
+                          << "\n");
+}
+
+//===----------------------------------------------------------------------===//
+// Method Timing Inference
+//===----------------------------------------------------------------------===//
+
+std::optional<int64_t>
+TimingInferencePass::computeMethodLatency(ProcMethodOp method,
+                                          TimingAnalysis &analysis) {
+  // If method already has static latency, use it
+  if (auto staticLat = method.getStaticLatency())
+    return *staticLat;
+
+  // Try to infer from control region
+  if (method.getControl().empty())
+    return std::nullopt;
+
+  // For now, simple heuristic: sum of all step latencies in seq control
+  int64_t totalLatency = 0;
+  bool allStatic = true;
+
+  method.getControl().walk([&](ProcEnableOp enable) {
+    // Find the referenced step
+    auto parentModule = method->getParentOfType<cmt2::ModuleOp>();
+    if (!parentModule)
+      return;
+
+    for (auto &op : parentModule.getBodyRegion().front()) {
+      if (auto staticStep = dyn_cast<ProcStaticStepOp>(op)) {
+        if (staticStep.getSymName() == enable.getStepName()) {
+          totalLatency += staticStep.getLatency();
+          return;
+        }
+      } else if (auto dynStep = dyn_cast<ProcStepOp>(op)) {
+        if (dynStep.getSymName() == enable.getStepName()) {
+          allStatic = false;
+          return;
+        }
+      }
+    }
+  });
+
+  if (allStatic && totalLatency > 0)
+    return totalLatency;
+
+  return std::nullopt;
+}
+
+void TimingInferencePass::inferMethodTiming(ProcMethodOp method,
+                                            TimingAnalysis &analysis) {
+  // Skip if already has static latency
+  if (method.getStaticLatency())
+    return;
+
+  // Try to compute latency from control
+  auto inferredLatency = computeMethodLatency(method, analysis);
+
+  if (inferredLatency && this->promoteToStatic) {
+    OpBuilder builder(method);
+    method.setStaticLatencyAttr(builder.getI64IntegerAttr(*inferredLatency));
+    LLVM_DEBUG(llvm::dbgs() << "  Promoted method @" << method.getSymName()
+                            << " to static with latency=" << *inferredLatency
+                            << "\n");
+  }
+}
+
+//===----------------------------------------------------------------------===//
+// Dataflow Timing Inference
+//===----------------------------------------------------------------------===//
+
+void TimingInferencePass::inferDataflowTaskTiming(ProcDataflowOp dataflow) {
+  OpBuilder builder(dataflow.getContext());
+
+  // Build a map from task name to task op for easy lookup
+  llvm::DenseMap<StringRef, DataflowTaskOp> taskMap;
+  dataflow.walk([&](DataflowTaskOp task) {
+    taskMap[task.getSymName()] = task;
+  });
+
+  // Track inferred timing per task
+  llvm::DenseMap<DataflowTaskOp, int64_t> inferredStart;
+  llvm::DenseMap<DataflowTaskOp, int64_t> inferredEnd;
+
+  // Initialize tasks without token inputs at cycle 0
+  dataflow.walk([&](DataflowTaskOp task) {
+    if (task.getTokenInputs().empty()) {
+      // Source task - starts at cycle 0
+      if (!task.getTiming()) {
+        inferredStart[task] = 0;
+        inferredEnd[task] = 1; // Default 1-cycle latency
+      } else {
+        auto timing = task.getTiming();
+        inferredStart[task] = timing->getStart();
+        inferredEnd[task] = timing->getEnd();
+      }
+    }
+  });
+
+  // Propagate timing through token dependencies (iterate until fixpoint)
+  bool changed = true;
+  int maxIterations = 100;
+  int iteration = 0;
+
+  while (changed && iteration < maxIterations) {
+    changed = false;
+    iteration++;
+
+    dataflow.walk([&](DataflowTaskOp task) {
+      if (task.getTokenInputs().empty())
+        return; // Already handled
+
+      // Check if all input token producers have timing
+      int64_t maxInputEnd = 0;
+      bool allInputsKnown = true;
+
+      for (Value tokenInput : task.getTokenInputs()) {
+        Operation *producer = tokenInput.getDefiningOp();
+        if (!producer) {
+          allInputsKnown = false;
+          break;
+        }
+
+        // Find the producer task
+        DataflowTaskOp producerTask = dyn_cast<DataflowTaskOp>(producer);
+        if (!producerTask) {
+          // Could be from elsewhere, use timing attribute if available
+          if (auto timing = producer->getAttrOfType<TimingIntervalAttr>("timing")) {
+            maxInputEnd = std::max(maxInputEnd, timing.getEnd());
+          } else {
+            allInputsKnown = false;
+            break;
+          }
+          continue;
+        }
+
+        // Check if producer has inferred timing
+        auto it = inferredEnd.find(producerTask);
+        if (it == inferredEnd.end()) {
+          allInputsKnown = false;
+          break;
+        }
+        maxInputEnd = std::max(maxInputEnd, it->second);
+      }
+
+      if (!allInputsKnown)
+        return;
+
+      // Infer timing for this task
+      int64_t taskLatency = 1; // Default 1-cycle latency
+
+      // Check if task already has timing
+      if (auto existingTiming = task.getTiming()) {
+        taskLatency = existingTiming->getEnd() - existingTiming->getStart();
+      }
+
+      int64_t newStart = maxInputEnd;
+      int64_t newEnd = newStart + taskLatency;
+
+      // Update if changed
+      auto startIt = inferredStart.find(task);
+      if (startIt == inferredStart.end() || startIt->second != newStart) {
+        inferredStart[task] = newStart;
+        inferredEnd[task] = newEnd;
+        changed = true;
+      }
+    });
+  }
+
+  // Apply inferred timing to tasks that don't have it
+  dataflow.walk([&](DataflowTaskOp task) {
+    if (task.getTiming())
+      return; // Already has timing
+
+    auto startIt = inferredStart.find(task);
+    auto endIt = inferredEnd.find(task);
+    if (startIt == inferredStart.end() || endIt == inferredEnd.end())
+      return;
+
+    // Set timing attribute
+    auto timing = TimingIntervalAttr::get(builder.getContext(),
+                                           startIt->second, endIt->second);
+    task->setAttr("timing", timing);
+
+    LLVM_DEBUG(llvm::dbgs() << "  Inferred timing for task @" << task.getSymName()
+                            << ": [" << startIt->second << ", " << endIt->second
+                            << ")\n");
+  });
+}
+
+void TimingInferencePass::processDataflow(ProcDataflowOp dataflow) {
+  LLVM_DEBUG(llvm::dbgs() << "Processing dataflow @" << dataflow.getSymName()
+                          << "\n");
+
+  // Infer timing for tasks
+  inferDataflowTaskTiming(dataflow);
+}
+
+//===----------------------------------------------------------------------===//
+// Module Processing
+//===----------------------------------------------------------------------===//
+
+void TimingInferencePass::processModule(cmt2::ModuleOp module,
+                                        TimingAnalysis &analysis) {
+  LLVM_DEBUG(llvm::dbgs() << "Processing module @" << module.getSymName()
+                          << "\n");
+
+  // Phase 1: Infer timing for all calls in static steps
+  if (this->inferCallTiming) {
+    module.walk([&](ProcStaticStepOp step) {
+      step.getBody().walk([&](CallOp call) {
+        inferTimingForCall(call, module, analysis);
+      });
+    });
+  }
+
+  // Phase 2: Infer timing for static steps
+  module.walk([&](ProcStaticStepOp step) {
+    inferStepTiming(step, analysis);
+  });
+
+  // Phase 3: Try to promote methods to static
+  if (this->promoteToStatic) {
+    module.walk([&](ProcMethodOp method) {
+      inferMethodTiming(method, analysis);
+    });
+  }
+}
+
+//===----------------------------------------------------------------------===//
+// Pass Entry Point
+//===----------------------------------------------------------------------===//
+
+void TimingInferencePass::runOnOperation() {
+  CircuitOp circuit = getOperation();
+
+  // Create timing analysis for the circuit
+  TimingAnalysis analysis(circuit);
+
+  // Process modules in post-order (bottom-up through instance hierarchy)
+  // This ensures child module timing is known before parent
+  // For simplicity, just process all modules in order for now
+  // TODO: Use InstanceGraph for proper post-order traversal
+
+  for (auto &op : circuit.getBodyRegion().front()) {
+    if (auto module = dyn_cast<cmt2::ModuleOp>(op)) {
+      processModule(module, analysis);
+
+      // Also process any proc.dataflow operations in this module
+      module.walk([&](ProcDataflowOp dataflow) {
+        processDataflow(dataflow);
+      });
+    }
+  }
+}

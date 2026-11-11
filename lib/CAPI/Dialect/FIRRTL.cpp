@@ -16,6 +16,7 @@
 #include "circt/Dialect/FIRRTL/FIRRTLOps.h"
 #include "circt/Dialect/FIRRTL/FIRRTLTypes.h"
 #include "circt/Dialect/FIRRTL/Import/FIRAnnotations.h"
+#include "circt/Dialect/FIRRTL/Passes.h"
 #include "mlir/CAPI/IR.h"
 #include "mlir/CAPI/Registration.h"
 #include "mlir/CAPI/Support.h"
@@ -464,3 +465,9 @@ bool firrtlImportAnnotationsFromJSONRaw(
   *importedAnnotationsArray = wrap(ArrayAttr::get(ctxUnwrapped, annos));
   return true;
 }
+
+//===----------------------------------------------------------------------===//
+// Pass API.
+//===----------------------------------------------------------------------===//
+
+void registerFIRRTLPasses() { circt::firrtl::registerPasses(); }

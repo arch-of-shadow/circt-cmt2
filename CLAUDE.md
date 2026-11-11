@@ -2,22 +2,88 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Before Starting Any Task
+
+**IMPORTANT**: When working on implementation tasks:
+1. **Read the docs first** - Start at `docs/Cmt2/_index.md` and the relevant `docs/Cmt2/features/*` page for the work area
+2. **Follow the skill workflow** - See `.claude/skills/mlir-ops-passes/SKILL.md` for the standard workflow when adding/modifying MLIR ops, attributes, or passes
+3. **Update tracking after completion** - Mark tasks as completed and document changes in the tracker
+
+
+
+## Codex CLI for Code Analysis
+
+Use [OpenAI Codex CLI](https://developers.openai.com/codex/cli/) (`codex exec`) for non-interactive code analysis, code review, architecture review, design evaluation, and implementation planning tasks.
+
+### When to Use Codex
+
+- **Code Review**: Quality assessment, bug detection, best practices
+- **Architecture Analysis**: Design patterns, coupling, modularity
+- **Issue Identification**: Security vulnerabilities, performance issues
+- **Document Analysis**: Reviewing specs, requirements, design documents
+- **Design Feedback**: API design evaluation, interface decisions
+- **Implementation Planning**: Breaking down features, planning changes
+
+### codex exec Command
+
+Use `codex exec` (alias: `codex e`) for scripted, non-interactive runs:
+
+```bash
+# Basic non-interactive execution
+codex exec "Analyze the dispatch mechanism in pto_instr.hpp"
+
+# With image input (architecture diagrams, screenshots)
+codex exec -i diagram.png "Explain this architecture"
+
+# Enable web search for external context
+codex exec --search "Compare this CSP design with industry patterns"
+
+# Full-auto mode (workspace-write sandbox + on-request approvals)
+codex exec --full-auto "Fix all type errors in the codebase"
+
+# Read prompt from stdin
+echo "Review this code" | codex exec -
+
+# JSON output for parsing
+codex exec --json "List all TODO comments"
+
+# Save final message to file
+codex exec -o result.md "Summarize the codebase architecture"
+
+# Resume previous session with follow-up
+codex exec resume --last "Continue the analysis"
+```
+
+### Key CLI Options
+
+| Flag | Description |
+| ---- | ----------- |
+| `-i, --image` | Attach image files to the prompt |
+| `-m, --model` | Override model (e.g., `gpt-5-codex`) |
+| `-s, --sandbox` | `read-only`, `workspace-write`, `danger-full-access` |
+| `-a, --ask-for-approval` | `untrusted`, `on-failure`, `on-request`, `never` |
+| `--full-auto` | Low-friction mode (workspace-write + on-request) |
+| `--search` | Enable web search tool |
+| `-C, --cd` | Set working directory |
+| `--json` | Output newline-delimited JSON events |
+| `-o, --output-last-message` | Write final message to file |
+| `-c, --config` | Override config values (repeatable) |
+
 ## Project Overview
 
 CIRCT (Circuit IR Compilers and Tools) is an experimental project applying MLIR and LLVM development methodology to hardware design tools. The project provides various dialects for representing and transforming hardware designs, from high-level abstractions down to Verilog generation.
 
 ## Cmt2 Dialect
 
-Cmt2 implements Guarded Atomic Actions (GAA) with One-Rule-At-A-Time (ORAAT) semantics for hardware design. See `docs/Dialects/Cmt2/RationaleCmt2.md` for design philosophy.
+Cmt2 implements Guarded Atomic Actions (GAA) with One-Rule-At-A-Time (ORAAT) semantics for hardware design. See `docs/Cmt2/features/Concepts.md` for the user-facing model.
 
-### Documentation (`docs/Dialects/Cmt2`)
+### Documentation (`docs/Cmt2`)
 
-- `_index.md` - Overview and quick start
-- `RationaleCmt2.md` - Design rationale and GAA semantics
-- `ecmt2-EDSL.md` - Low-level C++ embedded DSL API
-- `ecmt2-Class-API.md` - High-level declarative class-based API
-- `ModuleLibrary.md` - STL and FIRRTL module library
-- `VirtualInterfaceUsage.md` - Interface patterns for module composition
+- Start here: `docs/Cmt2/_index.md`
+- Concepts + features: `docs/Cmt2/features/*`
+- Guides: `docs/Cmt2/guides/*`
+- Reference: `docs/Cmt2/reference/*`
+- Examples: `docs/Cmt2/examples/Examples.md`
 
 ### Core Operations
 
@@ -169,7 +235,7 @@ Located in `lib/Bindings/Python/`. Build with `-DCIRCT_BINDINGS_PYTHON_ENABLED=O
 
 1. Add factory method declaration in `include/circt/Dialect/Cmt2/ECMT2/STLLibrary.h`
 2. Implement in `lib/Dialect/Cmt2/ECMT2/STLLibrary.cpp`
-3. Update documentation in `docs/Dialects/Cmt2/ModuleLibrary.md`
+3. Update documentation in `docs/Cmt2/features/STL.md`
 
 ### Adding New ECMT2 Features
 
@@ -178,12 +244,27 @@ Located in `lib/Bindings/Python/`. Build with `-DCIRCT_BINDINGS_PYTHON_ENABLED=O
 3. Update headers in `include/circt/Dialect/Cmt2/ECMT2/`
 4. Add tests in `test/Dialect/Cmt2/`
 
-### Adding New Operations
+### Adding New Operations / Attributes / Passes
 
-1. Define in `include/circt/Dialect/Cmt2/Cmt2Ops.td`
-2. Implement in `lib/Dialect/Cmt2/Cmt2Ops.cpp`
-3. If interface-related, update `Cmt2OpInterfaces.td` and `Cmt2OpInterfaces.cpp`
-4. Add conversion logic in `lib/Dialect/Cmt2/Transforms/Cmt2ToFIRRTL.cpp`
+**IMPORTANT**: See `.claude/skills/mlir-ops-passes/SKILL.md` for the complete workflow.
+
+Quick checklist:
+1. Edit TableGen definitions (`.td` files)
+2. Edit C++ implementations (`.h` and `.cpp` files)
+3. Update CMakeLists.txt if new files added
+4. Build: `ninja -C build` and fix errors
+5. Add backward-compatible builders if modifying existing ops
+6. Add verifiers (`hasVerifier = 1` in .td, implement in .cpp)
+7. Write tests in `test/Dialect/Cmt2/`
+8. Run tests: `build/bin/llvm-lit -v test/Dialect/Cmt2/my-test.mlir`
+9. Validate: Check IR dumps, run simulation/interpretation if hardware
+10. Update tracking documentation
+
+Key files for Cmt2:
+- Ops: `include/circt/Dialect/Cmt2/Cmt2Ops.td` → `lib/Dialect/Cmt2/Cmt2Ops.cpp`
+- Attrs: `include/circt/Dialect/Cmt2/Cmt2Attributes.td` → `lib/Dialect/Cmt2/Cmt2Attributes.cpp`
+- Passes: `include/circt/Dialect/Cmt2/Cmt2Passes.td` → `lib/Dialect/Cmt2/Transforms/*.cpp`
+- Analysis: `include/circt/Dialect/Cmt2/Analysis/*.h` → `lib/Dialect/Cmt2/Analysis/*.cpp`
 
 ### Running Cmt2 Tests
 

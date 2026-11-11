@@ -226,7 +226,7 @@ private:
 
   // Signal generation
   Value generateReadySignal(Cmt2FunctionLike func, Value guardResult,
-                            const ScheduleGroup &group,
+                            const ScheduleStep &step,
                             ModuleConversionContext &ctx,
                             ImplicitLocOpBuilder &builder);
   Value generateFireSignal(Cmt2FunctionLike func, Value readySignal,
@@ -251,6 +251,9 @@ private:
 
   // Helper utilities
   FModuleOp findFIRRTLModule(StringRef moduleName, Operation *searchRoot);
+  firrtl::FExtModuleOp findFIRRTLExtModule(StringRef moduleName, Operation *searchRoot);
+  FModuleLike findFIRRTLModuleLike(StringRef moduleName, Operation *searchRoot);
+  LogicalResult createExtModules(cmt2::CircuitOp circuit, firrtl::CircuitOp firrtlCircuit);
   std::optional<size_t> getPortIndex(firrtl::InstanceOp &inst,
                                      std::string portName);
   std::optional<size_t> getPortIndex(firrtl::FModuleOp &fMod,
@@ -380,6 +383,11 @@ LogicalResult LowerCmt2ToFIRRTLPass::convertCircuit(cmt2::CircuitOp circuit) {
     firrtlCircuit.setNameAttr(topModuleName);
   }
 
+  // Create FIRRTL external modules from CMT2 ExtModuleFirrtlOp
+  if (failed(createExtModules(circuit, firrtlCircuit))) {
+    return failure();
+  }
+
   // Map to track converted Cmt2 modules to their FIRRTL equivalents
   DenseMap<StringAttr, FModuleOp> convertedModules;
 
@@ -489,8 +497,8 @@ LogicalResult LowerCmt2ToFIRRTLPass::convertModule(
   }
 
   // Process each function in scheduled order
-  for (const auto &group : schedule->getGroups()) {
-    for (auto funcName : group.getFunctions()) {
+  for (const auto &step : schedule->getSteps()) {
+    for (auto funcName : step.getFunctions()) {
       // Find the function operation
       auto func = sourceSymbols->lookupSymbolIn<Cmt2FunctionLike>(
           module, funcName);
@@ -567,6 +575,16 @@ void LowerCmt2ToFIRRTLPass::createFunctionPorts(
                                {}, func.getLoc()));
     }
   }
+
+  // Add debug firing ports if requested (via debug.firing_ports attribute)
+  if (auto firingPortsAttr = module->getAttrOfType<ArrayAttr>("debug.firing_ports")) {
+    for (auto attr : firingPortsAttr) {
+      auto portName = cast<StringAttr>(attr).getValue();
+      ports.push_back(PortInfo(builder.getStringAttr(portName),
+                               UIntType::get(builder.getContext(), 1),
+                               Direction::Out, {}, module.getLoc()));
+    }
+  }
 }
 
 LogicalResult LowerCmt2ToFIRRTLPass::createInstances(
@@ -576,8 +594,8 @@ LogicalResult LowerCmt2ToFIRRTLPass::createInstances(
 
   // The set/order of FIRRTL modules is fixed throughout instance creation.
   // Limit this cache to that epoch: the next convertModule inserts a module,
-  // which could change findFIRRTLModule's first-match lookup semantics.
-  DenseMap<StringAttr, FModuleOp> externalModules;
+  // which could change findFIRRTLModuleLike's first-match lookup semantics.
+  DenseMap<StringAttr, FModuleLike> externalModules;
 
   // For each cmt2.instance, create a corresponding firrtl.instance
   for (auto &op : module.getBodyRegion().front()) {
@@ -594,7 +612,7 @@ LogicalResult LowerCmt2ToFIRRTLPass::createInstances(
              << instOp.getModuleName();
 
     // Determine target FIRRTL module (external or converted cmt2 module)
-    FModuleOp firrtlMod;
+    FModuleLike firrtlMod;
     StringRef targetModuleName;
     if (auto extModOp =
             dyn_cast<ExtModuleFirrtlOp>(referencedModule.getOperation())) {
@@ -602,7 +620,7 @@ LogicalResult LowerCmt2ToFIRRTLPass::createInstances(
       auto name = builder.getStringAttr(targetModuleName);
       auto [it, inserted] = externalModules.try_emplace(name);
       if (inserted)
-        it->second = findFIRRTLModule(
+        it->second = findFIRRTLModuleLike(
             targetModuleName, module->getParentOfType<mlir::ModuleOp>());
       firrtlMod = it->second;
       if (!firrtlMod)
@@ -677,7 +695,7 @@ void LowerCmt2ToFIRRTLPass::connectInstanceModuleArguments(
 
   auto instanceArgs = instOp.getArgs();
   if (auto extModOp = dyn_cast<ExtModuleFirrtlOp>(referencedModule)) {
-    // External FIRRTL module - use bind bare operations to get port names
+    // External FIRRTL module - use bind.bare operations to get port names
     size_t barePortIdx = 0;
     for (auto &bodyOp : extModOp.getBodyRegion().front()) {
       auto bindBare = dyn_cast<BindBareOp>(bodyOp);
@@ -871,6 +889,55 @@ LowerCmt2ToFIRRTLPass::connectOutputPorts(cmt2::ModuleOp module,
                                     bodyResults[idx]);
         }
       }
+    } else {
+      // Rules: wire arg input ports and result output ports
+      // Rules with results need their computed values wired to output ports
+      auto funcType = cast<FunctionType>(func.getFunctionType());
+      portIndex += funcType.getInputs().size();   // Skip arg ports
+
+      // Connect result outputs (for rules that return values, e.g., from
+      // dataflow pipelines)
+      ArrayRef<Value> bodyResults =
+          ctx.getSignalTracker().getBodyResults(func.functionNameAttr());
+      for (auto [idx, _] : llvm::enumerate(funcType.getResults())) {
+        Value resultPort =
+            firrtlModule.getBodyBlock()->getArgument(portIndex++);
+        if (idx < bodyResults.size() && bodyResults[idx]) {
+          builder.create<ConnectOp>(func.getLoc(), resultPort,
+                                    bodyResults[idx]);
+        }
+      }
+    }
+  }
+
+  // Connect debug firing ports
+  if (auto firingPortsAttr = module->getAttrOfType<ArrayAttr>("debug.firing_ports")) {
+    for (auto attr : firingPortsAttr) {
+      auto firingPortName = cast<StringAttr>(attr).getValue();
+      Value firingPort = firrtlModule.getBodyBlock()->getArgument(portIndex++);
+
+      // Find the rule with this debug.firing_port attribute
+      Value fireSignal;
+      for (auto &op : module.getBodyRegion().front()) {
+        if (auto rule = dyn_cast<RuleOp>(op)) {
+          if (auto debugAttr = rule->getAttrOfType<StringAttr>("debug.firing_port")) {
+            if (debugAttr.getValue() == firingPortName) {
+              auto func = cast<Cmt2FunctionLike>(rule.getOperation());
+              fireSignal = ctx.getSignalTracker().getFire(func.functionNameAttr());
+              break;
+            }
+          }
+        }
+      }
+
+      if (fireSignal) {
+        builder.create<ConnectOp>(module.getLoc(), firingPort, fireSignal);
+      } else {
+        // No fire signal found - connect to constant 0
+        Value zero = builder.create<ConstantOp>(
+            module.getLoc(), UIntType::get(builder.getContext(), 1), APInt(1, 0));
+        builder.create<ConnectOp>(module.getLoc(), firingPort, zero);
+      }
     }
   }
 
@@ -908,22 +975,22 @@ LowerCmt2ToFIRRTLPass::processFunction(Cmt2FunctionLike func,
                                        APInt(1, 1))
           : guardResults[0];
 
-  // Find the schedule group containing this function
-  const ScheduleGroup *containingGroup = nullptr;
-  for (const auto &group : ctx.getSchedule()->getGroups()) {
-    if (llvm::is_contained(group.getFunctions(), func.functionNameAttr())) {
-      containingGroup = &group;
+  // Find the schedule step containing this function
+  const ScheduleStep *containingStep = nullptr;
+  for (const auto &step : ctx.getSchedule()->getSteps()) {
+    if (llvm::is_contained(step.getFunctions(), func.functionNameAttr())) {
+      containingStep = &step;
       break;
     }
   }
 
-  if (!containingGroup) {
-    return func.emitError("Function not found in any schedule group");
+  if (!containingStep) {
+    return func.emitError("Function not found in any schedule step");
   }
 
   // Generate control signals
   Value readySignal =
-      generateReadySignal(func, guardResult, *containingGroup, ctx, builder);
+      generateReadySignal(func, guardResult, *containingStep, ctx, builder);
   ctx.getSignalTracker().setReady(func.functionNameAttr(), readySignal);
 
   Value fireSignal = generateFireSignal(func, readySignal, ctx, builder);
@@ -934,12 +1001,12 @@ LowerCmt2ToFIRRTLPass::processFunction(Cmt2FunctionLike func,
     Region &bodyRegion = func->getRegion(1);
 
     // Create wires for result values (to escape the when block's region)
-    // Only create wires for Methods and Values (which have output ports), not
-    // for Rules
+    // Methods, Values, and Rules with results need output port wiring
     auto funcType = cast<FunctionType>(func.getFunctionType());
     SmallVector<Value> resultWires;
     bool needsResultWires = (func.getFunctionKind() == FunctionKind::Method ||
-                             func.getFunctionKind() == FunctionKind::Value) &&
+                             func.getFunctionKind() == FunctionKind::Value ||
+                             func.getFunctionKind() == FunctionKind::Rule) &&
                             !funcType.getResults().empty();
 
     if (needsResultWires) {
@@ -1018,7 +1085,7 @@ void LowerCmt2ToFIRRTLPass::mapFunctionArgumentsToPorts(
 Value LowerCmt2ToFIRRTLPass::generateReadySignal(
     Cmt2FunctionLike func, Value guardResult,
     // const SmallVector<CallInfo> &calls,
-    const ScheduleGroup &group, ModuleConversionContext &ctx,
+    const ScheduleStep &step, ModuleConversionContext &ctx,
     ImplicitLocOpBuilder &builder) {
 
   // ready = guard ∧ called_readies ∧ ¬(conflicting_fires)
@@ -1101,8 +1168,8 @@ Value LowerCmt2ToFIRRTLPass::generateReadySignal(
 
   // AND with NOT(preceding conflicting functions fired)
   // Only ConflictMatrix relationships prevent concurrent firing
-  // const auto &funcs = group.getFunctions();
-  const auto &preventing = group.getPreventingFirings();
+  // const auto &funcs = step.getFunctions();
+  const auto &preventing = step.getPreventingFirings();
   auto funcName = func.functionNameAttr();
 
   for (auto prevent : preventing) {
@@ -1259,6 +1326,16 @@ LogicalResult LowerCmt2ToFIRRTLPass::cloneRegionOps(
       continue;
     }
 
+    // NOTE: Token operations (token.create, token.valid, token.data, token.join)
+    // should be eliminated by the cmt2-token-materialize pass BEFORE this pass runs.
+    // If token ops reach here, it means the pass pipeline is misconfigured.
+    // See docs/Cmt2/features/Lowering.md (dataflow/proc lowering overview).
+    if (isa<TokenCreateOp, TokenValidOp, TokenDataOp, TokenJoinOp>(op)) {
+      return op.emitError("Token operation reached cmt2-to-firrtl. "
+                          "Run cmt2-token-materialize pass first to convert "
+                          "token ops to storage instances and calls.");
+    }
+
     // Clone other operations normally
     Operation *cloned = builder.clone(op, ctx.getIRMapping());
     for (auto [oldResult, newResult] :
@@ -1395,15 +1472,41 @@ LogicalResult LowerCmt2ToFIRRTLPass::connectMethodCall(
     CallOp callOp, BindMethodOp bindMethod, firrtl::InstanceOp firrtlInst,
     ModuleConversionContext &ctx, ImplicitLocOpBuilder &builder) {
 
+  bool isGetRes = false;
+  if (auto callTy = callOp->getAttrOfType<StringAttr>("call_ty"))
+    isGetRes = callTy.getValue() == "GetRes";
+
+  auto createSafeDontCareForPortType = [&](Type portType) -> Value {
+    // For GetRes clones we intentionally do not want to drive unknown/X values
+    // onto the callee's argument ports since some implementations may not
+    // strictly guard internal combinational logic behind enable. Use a typed
+    // zero constant for common scalar int ports; fall back to invalid for
+    // aggregate/unsupported types.
+    if (auto uintTy = dyn_cast<UIntType>(portType)) {
+      auto width = uintTy.getBitWidthOrSentinel();
+      if (width >= 0)
+        return builder.create<ConstantOp>(callOp.getLoc(), uintTy,
+                                          APInt(width, 0));
+    }
+    if (auto sintTy = dyn_cast<SIntType>(portType)) {
+      auto width = sintTy.getBitWidthOrSentinel();
+      if (width >= 0)
+        return builder.create<ConstantOp>(callOp.getLoc(), sintTy,
+                                          APInt(width, 0));
+    }
+    return builder.create<InvalidValueOp>(callOp.getLoc(), portType);
+  };
+
   // Drive enable signal to 1
   if (auto enableAttr = bindMethod.getEnableName()) {
     StringAttr enablePortName = builder.getStringAttr(enableAttr.value());
     if (auto enablePortIdx =
             getPortIndex(firrtlInst, enablePortName.getValue().str())) {
-      Value one = builder.create<ConstantOp>(
-          callOp.getLoc(), UIntType::get(builder.getContext(), 1), APInt(1, 1));
+      Value en = builder.create<ConstantOp>(
+          callOp.getLoc(), UIntType::get(builder.getContext(), 1),
+          APInt(1, isGetRes ? 0 : 1));
       builder.create<ConnectOp>(callOp.getLoc(),
-                                firrtlInst.getResult(*enablePortIdx), one);
+                                firrtlInst.getResult(*enablePortIdx), en);
     } else {
       return callOp.emitError("Enable port not found: ") << enablePortName;
     }
@@ -1424,14 +1527,19 @@ LogicalResult LowerCmt2ToFIRRTLPass::connectMethodCall(
       return callOp.emitError("Input port not found: ") << portAttr;
     }
 
-    Value mappedOperand = ctx.getIRMapping().lookupOrDefault(operand);
-    if (!mappedOperand) {
-      return callOp.emitError(
-          "Call operand was not properly mapped to FIRRTL context");
+    Value portValue = firrtlInst.getResult(*portIdx);
+    Value mappedOperand;
+    if (isGetRes) {
+      mappedOperand = createSafeDontCareForPortType(portValue.getType());
+    } else {
+      mappedOperand = ctx.getIRMapping().lookupOrDefault(operand);
+      if (!mappedOperand) {
+        return callOp.emitError(
+            "Call operand was not properly mapped to FIRRTL context");
+      }
     }
 
-    builder.create<ConnectOp>(callOp.getLoc(), firrtlInst.getResult(*portIdx),
-                              mappedOperand);
+    builder.create<ConnectOp>(callOp.getLoc(), portValue, mappedOperand);
   }
 
   // Read output results
@@ -1591,6 +1699,7 @@ FModuleOp LowerCmt2ToFIRRTLPass::findFIRRTLModule(StringRef moduleName,
 
   // Search for FIRRTL module in circuits
   searchRoot->walk([&](firrtl::CircuitOp circuit) {
+    // First search for regular modules (FModuleOp)
     circuit.walk([&](FModuleOp mod) {
       if (mod.getModuleName() == moduleName) {
         result = mod;
@@ -1598,6 +1707,19 @@ FModuleOp LowerCmt2ToFIRRTLPass::findFIRRTLModule(StringRef moduleName,
       }
       return WalkResult::advance();
     });
+    if (result)
+      return WalkResult::interrupt();
+
+    // Also search for external modules (FExtModuleOp)
+    circuit.walk([&](firrtl::FExtModuleOp extMod) {
+      if (extMod.getModuleName() == moduleName) {
+        // For external modules, we create a stub FModuleOp to satisfy
+        // the interface requirements. The caller will handle this case.
+        return WalkResult::interrupt();
+      }
+      return WalkResult::advance();
+    });
+
     return result ? WalkResult::interrupt() : WalkResult::advance();
   });
 
@@ -1613,6 +1735,173 @@ FModuleOp LowerCmt2ToFIRRTLPass::findFIRRTLModule(StringRef moduleName,
   }
 
   return result;
+}
+
+firrtl::FExtModuleOp LowerCmt2ToFIRRTLPass::findFIRRTLExtModule(
+    StringRef moduleName, Operation *searchRoot) {
+  firrtl::FExtModuleOp result;
+
+  // Search for FIRRTL external module in circuits
+  searchRoot->walk([&](firrtl::CircuitOp circuit) {
+    circuit.walk([&](firrtl::FExtModuleOp extMod) {
+      if (extMod.getModuleName() == moduleName) {
+        result = extMod;
+        return WalkResult::interrupt();
+      }
+      return WalkResult::advance();
+    });
+    return result ? WalkResult::interrupt() : WalkResult::advance();
+  });
+
+  return result;
+}
+
+FModuleLike LowerCmt2ToFIRRTLPass::findFIRRTLModuleLike(
+    StringRef moduleName, Operation *searchRoot) {
+  // First try to find a regular module
+  if (auto mod = findFIRRTLModule(moduleName, searchRoot))
+    return mod;
+  // Then try external module
+  return findFIRRTLExtModule(moduleName, searchRoot);
+}
+
+LogicalResult LowerCmt2ToFIRRTLPass::createExtModules(
+    cmt2::CircuitOp circuit, firrtl::CircuitOp firrtlCircuit) {
+  OpBuilder builder(firrtlCircuit.getBodyBlock(),
+                    firrtlCircuit.getBodyBlock()->begin());
+
+  // Find all ExtModuleFirrtlOp in the CMT2 circuit and create corresponding
+  // FIRRTL FExtModuleOp
+  for (auto &op : circuit.getBodyRegion().front()) {
+    auto extMod = dyn_cast<ExtModuleFirrtlOp>(op);
+    if (!extMod)
+      continue;
+
+    StringRef extModName = extMod.getExtModuleName();
+
+    // Check if already exists (either as FExtModule or regular FModule)
+    if (findFIRRTLModuleLike(extModName, firrtlCircuit))
+      continue;
+
+    // Build port list from the external module's arguments and bindings
+    SmallVector<PortInfo> ports;
+
+    // Add ports from the external module block arguments (clock, reset, etc.).
+    // Use the CMT2 extmodule argument types directly (no name-based guessing),
+    // so nonstandard clock/reset names still get correct FIRRTL types.
+    auto modArgNames = extMod.getArgNames();
+    auto &bodyBlock = extMod.getBodyRegion().front();
+    if (modArgNames.size() != bodyBlock.getNumArguments()) {
+      return extMod.emitOpError("argNames size (")
+             << modArgNames.size()
+             << ") does not match number of block arguments ("
+             << bodyBlock.getNumArguments() << ")";
+    }
+    for (size_t i = 0; i < modArgNames.size(); ++i) {
+      StringRef portName = cast<StringAttr>(modArgNames[i]).getValue();
+      Type portType = bodyBlock.getArgument(i).getType();
+      ports.push_back({builder.getStringAttr(portName), portType, Direction::In,
+                       {}, extMod.getLoc()});
+    }
+
+    // Add ports from bind.value and bind.method operations
+    // Port names are taken directly from argNames/bodyResNames - they should be unique
+    for (auto &bodyOp : extMod.getBodyRegion().front()) {
+      if (auto bindValue = dyn_cast<BindValueOp>(bodyOp)) {
+        // Value methods: add argument inputs (if any), ready output, and result
+        // outputs.
+
+        // Ready port (use readyName if specified)
+        if (auto readyName = bindValue.getReadyNameAttr()) {
+          ports.push_back({readyName, firrtl::UIntType::get(builder.getContext(), 1),
+                           Direction::Out, {}, bindValue.getLoc()});
+        }
+
+        // Argument inputs - use names directly from argNames.
+        auto funcType = bindValue.getFunctionType();
+        auto argNames = bindValue.getArgNames();
+        if (!argNames.empty()) {
+          if (argNames.size() != funcType.getNumInputs()) {
+            return bindValue.emitOpError("argNames size (")
+                   << argNames.size() << ") does not match function type inputs ("
+                   << funcType.getNumInputs() << ")";
+          }
+          for (size_t i = 0; i < argNames.size(); ++i) {
+            StringRef portName = cast<StringAttr>(argNames[i]).getValue();
+            Type portType = funcType.getInput(i);
+            ports.push_back({builder.getStringAttr(portName), portType,
+                             Direction::In, {}, bindValue.getLoc()});
+          }
+        }
+
+        // Result outputs - use names directly from bodyResNames
+        auto resNames = bindValue.getBodyResNames();
+        if (resNames.size() != funcType.getNumResults()) {
+          return bindValue.emitOpError("bodyResNames size (")
+                 << resNames.size() << ") does not match function type results ("
+                 << funcType.getNumResults() << ")";
+        }
+        for (size_t i = 0; i < funcType.getNumResults(); ++i) {
+          StringRef portName = cast<StringAttr>(resNames[i]).getValue();
+          ports.push_back({builder.getStringAttr(portName), funcType.getResult(i),
+                           Direction::Out, {}, bindValue.getLoc()});
+        }
+      } else if (auto bindMethod = dyn_cast<BindMethodOp>(bodyOp)) {
+        // Action methods: add enable input, ready output, arg inputs, result outputs
+
+        // Enable port
+        if (auto enableName = bindMethod.getEnableNameAttr()) {
+          ports.push_back({enableName, firrtl::UIntType::get(builder.getContext(), 1),
+                           Direction::In, {}, bindMethod.getLoc()});
+        }
+
+        // Ready port
+        if (auto readyName = bindMethod.getReadyNameAttr()) {
+          ports.push_back({readyName, firrtl::UIntType::get(builder.getContext(), 1),
+                           Direction::Out, {}, bindMethod.getLoc()});
+        }
+
+        // Argument inputs - use names directly from argNames
+        auto funcType = bindMethod.getFunctionType();
+        auto methodArgNames = bindMethod.getArgNames();
+        if (methodArgNames.size() != funcType.getNumInputs()) {
+          return bindMethod.emitOpError("argNames size (")
+                 << methodArgNames.size()
+                 << ") does not match function type inputs ("
+                 << funcType.getNumInputs() << ")";
+        }
+        for (size_t i = 0; i < funcType.getNumInputs(); ++i) {
+          StringRef portName = cast<StringAttr>(methodArgNames[i]).getValue();
+          ports.push_back({builder.getStringAttr(portName), funcType.getInput(i),
+                           Direction::In, {}, bindMethod.getLoc()});
+        }
+
+        // Result outputs - use names directly from bodyResNames
+        auto resNames = bindMethod.getBodyResNames();
+        if (resNames.size() != funcType.getNumResults()) {
+          return bindMethod.emitOpError("bodyResNames size (")
+                 << resNames.size()
+                 << ") does not match function type results ("
+                 << funcType.getNumResults() << ")";
+        }
+        for (size_t i = 0; i < funcType.getNumResults(); ++i) {
+          StringRef portName = cast<StringAttr>(resNames[i]).getValue();
+          ports.push_back({builder.getStringAttr(portName), funcType.getResult(i),
+                           Direction::Out, {}, bindMethod.getLoc()});
+        }
+      }
+    }
+
+    // Create the FIRRTL external module
+    builder.create<firrtl::FExtModuleOp>(
+        extMod.getLoc(),
+        builder.getStringAttr(extModName),
+        firrtl::ConventionAttr::get(builder.getContext(), Convention::Internal),
+        ports,
+        ArrayAttr() /* knownLayers */);
+  }
+
+  return success();
 }
 
 std::optional<size_t>

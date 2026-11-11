@@ -1,7 +1,26 @@
 add_circt_dialect_library(CIRCTCmt2Transforms
   # GenerateConflictMatrix.cpp
   # InferRules.cpp
+  AddRuleFiringPort.cpp
   Test.cpp
+  CompileInvoke.cpp
+  CompileStatic.cpp
+  ControlCollapsing.cpp
+  DataflowLowering.cpp
+  TokenLowering.cpp
+  TokenRTLGen.cpp
+  ModuleGenerator.cpp
+  StallControllerGen.cpp
+  Diagnostics.cpp
+  SimplifyStaticGuards.cpp
+  StaticFSMAllocation.cpp
+  StaticInference.cpp
+  StaticPromotion.cpp
+  TimingInference.cpp
+  TimingValidation.cpp
+  TDCC.cpp
+  ProcStmtToAction.cpp
+  ProcToGAA.cpp
   InstanceGraph.cpp
   CallInfo.cpp
   ConflictMatrix.cpp
@@ -11,7 +30,6 @@ add_circt_dialect_library(CIRCTCmt2Transforms
   ModuleInliner.cpp
   PrivateFuncAnalysis.cpp
   InlinePrivateFuncs.cpp
-  Scheduler.cpp
   PrintScheduler.cpp
   VerifyPrivateFuncsInlined.cpp
   VerifyCallSequence.cpp
@@ -23,8 +41,11 @@ add_circt_dialect_library(CIRCTCmt2Transforms
   LINK_LIBS PUBLIC
   CIRCTComb
   CIRCTHW
+  CIRCTFIRRTL
   CIRCTSupport
   CIRCTCmt2
+  CIRCTCmt2ModuleLib
+  CIRCTCmt2Analysis
   CIRCTCmt2ToFIRRTL
   MLIRIR
   MLIRPass

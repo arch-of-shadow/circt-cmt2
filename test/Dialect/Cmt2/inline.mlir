@@ -7,17 +7,17 @@ cmt2.circuit {
   // CHECK-LABEL: cmt2.module @SynthModule
   cmt2.module @SynthModule(%clk: !firrtl.uint<1>, %rst: !firrtl.uint<1>) attributes {synthesis = true} {
     cmt2.method @store(%data: !firrtl.uint<32>) -> () {
-      %c1_i1 = hw.constant 1 : !firrtl.uint<1>
+      %c1_i1 = firrtl.constant 1 : !firrtl.uint<1>
       cmt2.return %c1_i1 : !firrtl.uint<1>
     } {
       cmt2.return
     }
 
     cmt2.value @load() -> (!firrtl.uint<32>) {
-      %c1_i1 = hw.constant 1 : !firrtl.uint<1>
+      %c1_i1 = firrtl.constant 1 : !firrtl.uint<1>
       cmt2.return %c1_i1 : !firrtl.uint<1>
     } {
-      %c0_i32 = hw.constant 0 : !firrtl.uint<32>
+      %c0_i32 = firrtl.constant 0 : !firrtl.uint<32>
       cmt2.return %c0_i32 : !firrtl.uint<32>
     }
   }
@@ -27,18 +27,19 @@ cmt2.circuit {
     cmt2.instance @storage = @SynthModule (%clk, %rst) : !firrtl.uint<1>,  !firrtl.uint<1>
 
     cmt2.method @increment(%data: !firrtl.uint<32>) -> () {
-      %c1_i1 = hw.constant 1 : !firrtl.uint<1>
+      %c1_i1 = firrtl.constant 1 : !firrtl.uint<1>
       cmt2.return %c1_i1 : !firrtl.uint<1>
     } {
       // Add one to the data
-      %c1_i32 = hw.constant 1 : !firrtl.uint<32>
-      %sum = comb.add %data, %c1_i32 : !firrtl.uint<32>
-      cmt2.call @storage @store(%sum) : (!firrtl.uint<32>) -> ()
+      %c1_i32 = firrtl.constant 1 : !firrtl.uint<32>
+      %sum = firrtl.add %data, %c1_i32 : (!firrtl.uint<32>, !firrtl.uint<32>) -> !firrtl.uint<33>
+      %sum32 = firrtl.bits %sum 31 to 0 : (!firrtl.uint<33>) -> !firrtl.uint<32>
+      cmt2.call @storage @store(%sum32) : (!firrtl.uint<32>) -> ()
       cmt2.return
     }
 
     cmt2.value @get() -> (!firrtl.uint<32>) {
-      %c1_i1 = hw.constant 1 : !firrtl.uint<1>
+      %c1_i1 = firrtl.constant 1 : !firrtl.uint<1>
       cmt2.return %c1_i1 : !firrtl.uint<1>
     } {
       %0 = cmt2.call @storage @load() : () -> (!firrtl.uint<32>)
@@ -51,7 +52,7 @@ cmt2.circuit {
     cmt2.instance @leaf = @LeafModule (%clk, %rst) : !firrtl.uint<1>,  !firrtl.uint<1>
 
     cmt2.method @doWork(%val: !firrtl.uint<32>) -> () {
-      %c1_i1 = hw.constant 1 : !firrtl.uint<1>
+      %c1_i1 = firrtl.constant 1 : !firrtl.uint<1>
       cmt2.return %c1_i1 : !firrtl.uint<1>
     } {
       cmt2.call @leaf @increment(%val) : (!firrtl.uint<32>) -> ()
@@ -59,7 +60,7 @@ cmt2.circuit {
     }
 
     cmt2.value @result() -> (!firrtl.uint<32>) {
-      %c1_i1 = hw.constant 1 : !firrtl.uint<1>
+      %c1_i1 = firrtl.constant 1 : !firrtl.uint<1>
       cmt2.return %c1_i1 : !firrtl.uint<1>
     } {
       %0 = cmt2.call @leaf @get() : () -> (!firrtl.uint<32>)
@@ -76,11 +77,11 @@ cmt2.circuit {
     // CHECK-NOT: cmt2.instance @mid =
     cmt2.instance @mid = @MiddleModule (%clk, %rst) : !firrtl.uint<1>,  !firrtl.uint<1>
 
-    cmt2.rule @runRule() -> !firrtl.uint<1> {
-      %c1_i1 = hw.constant 1 : !firrtl.uint<1>
+    cmt2.rule @runRule () -> () {
+      %c1_i1 = firrtl.constant 1 : !firrtl.uint<1>
       cmt2.return %c1_i1 : !firrtl.uint<1>
     } {
-      %c42 = hw.constant 42 : !firrtl.uint<32>
+      %c42 = firrtl.constant 42 : !firrtl.uint<32>
       // Calls to inlined modules should be replaced
       cmt2.call @mid @doWork(%c42) : (!firrtl.uint<32>) -> ()
       %res = cmt2.call @mid @result() : () -> (!firrtl.uint<32>)

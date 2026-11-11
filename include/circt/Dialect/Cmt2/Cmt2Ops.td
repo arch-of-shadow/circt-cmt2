@@ -19,6 +19,54 @@ include "mlir/Interfaces/CallInterfaces.td"
 def FIRRTLBaseType : Type<CPred<"llvm::isa<::circt::firrtl::FIRRTLBaseType>($_self)">,
                           "a FIRRTL base type", "::circt::firrtl::FIRRTLBaseType">;
 
+//===----------------------------------------------------------------------===//
+// Timing Attribute Constraints
+//===----------------------------------------------------------------------===//
+
+// Timing interval attribute for call-site timing guards
+def Cmt2_TimingIntervalAttr : Attr<
+  CPred<"llvm::isa<::circt::cmt2::TimingIntervalAttr>($_self)">,
+  "timing interval attribute"> {
+  let storageType = "::circt::cmt2::TimingIntervalAttr";
+  let returnType = "::circt::cmt2::TimingIntervalAttr";
+  let convertFromStorage = "$_self";
+}
+
+// Latency attribute for port timing
+def Cmt2_LatencyAttr : Attr<
+  CPred<"llvm::isa<::circt::cmt2::LatencyAttr>($_self)">,
+  "latency attribute"> {
+  let storageType = "::circt::cmt2::LatencyAttr";
+  let returnType = "::circt::cmt2::LatencyAttr";
+  let convertFromStorage = "$_self";
+}
+
+// Initiation interval attribute for pipelined methods
+def Cmt2_IntervalAttr : Attr<
+  CPred<"llvm::isa<::circt::cmt2::IntervalAttr>($_self)">,
+  "initiation interval attribute"> {
+  let storageType = "::circt::cmt2::IntervalAttr";
+  let returnType = "::circt::cmt2::IntervalAttr";
+  let convertFromStorage = "$_self";
+}
+
+// Port timing attribute (go, done, stable, data)
+def Cmt2_PortTimingAttr : Attr<
+  CPred<"llvm::isa<::circt::cmt2::PortTimingAttr>($_self)">,
+  "port timing attribute"> {
+  let storageType = "::circt::cmt2::PortTimingAttr";
+  let returnType = "::circt::cmt2::PortTimingAttr";
+  let convertFromStorage = "$_self";
+}
+
+// Array of timing interval attributes (for call sites)
+def Cmt2_TimingArrayAttr : TypedArrayAttrBase<Cmt2_TimingIntervalAttr,
+  "array of timing interval attributes">;
+
+// Array of port timing attributes (for method signatures)
+def Cmt2_PortTimingArrayAttr : TypedArrayAttrBase<Cmt2_PortTimingAttr,
+  "array of port timing attributes">;
+
 // MethodSymbol is an attribute constraint. It has the form (instance, method).
 def CircuitOp : Cmt2Op<
   "circuit", [
@@ -207,7 +255,7 @@ def BindMethodOp : Cmt2Op<
   ]> {
   let summary = "Binding a method";
   let description = [{
-    The "cmt2.bind.method" operation binds a method to firrtl.module logic. 
+    The "cmt2.bind.method" operation binds a method to firrtl.module logic.
     The method follows the ready-enable protocol.
 
     Arguments:
@@ -218,16 +266,31 @@ def BindMethodOp : Cmt2Op<
     - `argNames`: Names of the shared input arguments.
     - `bodyResNames`: Names of the body region results.
 
+    Timing attributes (optional, for cycle-precise static methods):
+    - `static_latency`: Total latency in cycles for static methods.
+    - `interval`: Initiation interval for pipelined methods.
+    - `arg_port_timing`: Per-argument port timing attributes (go, data, etc.).
+    - `result_port_timing`: Per-result port timing attributes (done, stable, etc.).
+
     Results: None
 
     Assembly format:
     ```mlir
+    // Dynamic method (no static_latency)
     cmt2.bind.method @methodName : (i1, i32) -> (i1, i32) [
-      enable = %enableSignal,
-      ready = %readySignal,
-      arguments = [%input1, %input2],
-      results = [%output1, %output2]
+      enable = "enableSignal",
+      ready = "readySignal",
+      arguments = ["input1", "input2"],
+      results = ["output1", "output2"]
     ]
+
+    // Static method with 4-cycle latency
+    cmt2.bind.method @multiply static<4> : (!firrtl.uint<32>, !firrtl.uint<32>) -> !firrtl.uint<32> [
+      enable = "go",
+      ready = "done",
+      arguments = ["left", "right"],
+      results = ["out"]
+    ] {interval = #cmt2.interval<3>}
     ```
   }];
 
@@ -239,16 +302,58 @@ def BindMethodOp : Cmt2Op<
     StrArrayAttr:$argNames,
     StrArrayAttr:$bodyResNames,
     OptionalAttr<ArrayAttr>:$arg_attrs,
-    OptionalAttr<ArrayAttr>:$res_attrs
+    OptionalAttr<ArrayAttr>:$res_attrs,
+    // Timing attributes for cycle-precise static methods
+    OptionalAttr<I64Attr>:$static_latency,
+    OptionalAttr<Cmt2_IntervalAttr>:$interval,
+    OptionalAttr<Cmt2_PortTimingArrayAttr>:$arg_port_timing,
+    OptionalAttr<Cmt2_PortTimingArrayAttr>:$result_port_timing
   );
 
   let assemblyFormat = [{
-    $sym_name `:` $function_type `[` 
-      (`enable` `=` $enableName^ `,`)? 
-      (`ready` `=` $readyName^ `,`)? 
-      `arguments` `=` $argNames `,` 
-      `results` `=` $bodyResNames 
+    $sym_name (`static` `<` $static_latency^ `>`)? `:` $function_type `[`
+      (`enable` `=` $enableName^ `,`)?
+      (`ready` `=` $readyName^ `,`)?
+      `arguments` `=` $argNames `,`
+      `results` `=` $bodyResNames
     `]` attr-dict
+  }];
+
+  // Custom builders for backward compatibility (without timing attributes)
+  let builders = [
+    OpBuilder<(ins "::mlir::StringAttr":$sym_name,
+                   "::mlir::TypeAttr":$function_type,
+                   "::mlir::StringAttr":$enableName,
+                   "::mlir::StringAttr":$readyName,
+                   "::mlir::ArrayAttr":$argNames,
+                   "::mlir::ArrayAttr":$bodyResNames,
+                   "::mlir::ArrayAttr":$arg_attrs,
+                   "::mlir::ArrayAttr":$res_attrs), [{
+      build($_builder, $_state, sym_name, function_type, enableName, readyName,
+            argNames, bodyResNames, arg_attrs, res_attrs,
+            /*static_latency=*/nullptr, /*interval=*/nullptr,
+            /*arg_port_timing=*/nullptr, /*result_port_timing=*/nullptr);
+    }]>
+  ];
+
+  let extraClassDeclaration = [{
+    /// Returns true if this method has static timing (known latency)
+    bool isStatic() { return getStaticLatency().has_value(); }
+
+    /// Get the latency or 0 if dynamic
+    int64_t getLatencyOrZero() {
+      return getStaticLatency().value_or(0);
+    }
+
+    /// Returns true if this method is pipelined (has initiation interval)
+    bool isPipelined() { return getInterval().has_value(); }
+
+    /// Get the initiation interval or 1 (fully pipelined by default)
+    int64_t getInitiationInterval() {
+      if (auto interval = getInterval())
+        return interval->getCycles();
+      return 1;
+    }
   }];
 
   let extraClassDefinition = [{
@@ -257,6 +362,7 @@ def BindMethodOp : Cmt2Op<
     }
   }];
 
+  let hasVerifier = 1;
 }
 
 def ModuleOp : Cmt2Op<
@@ -418,7 +524,7 @@ def ReturnOp : Cmt2Op<
   "return", [
     Terminator,
     ReturnLike,
-    ParentOneOf<["RuleOp", "MethodOp", "ValueOp"]>,
+    ParentOneOf<["RuleOp", "MethodOp", "ValueOp", "ProcRuleOp", "ProcMethodOp"]>,
   ]> {
   let summary = "Return from a value/action/rule.";
   let description = [{
@@ -473,6 +579,9 @@ def RuleOp : Cmt2Op<
     - `function_type`: The function type of the rule (typically no arguments).
     - `argNames`: Names of the shared input arguments (typically empty for rules).
     - `bodyResNames`: Names of the body region results.
+    - `token_in_types`: Types of input tokens for synchronization.
+    - `token_in_names`: Names of input token arguments.
+    - `token_out_types`: Types of output tokens produced by the rule.
 
     Results: None
 
@@ -482,7 +591,15 @@ def RuleOp : Cmt2Op<
 
     Assembly format:
     ```mlir
+    // Basic rule without tokens
     cmt2.rule @rule1() -> (i1) { guard } { body }
+
+    // Rule with token inputs and outputs
+    cmt2.rule @consumer(%data_arg: !firrtl.uint<8>)
+        tokens_in(%tok_a: !cmt2.sync_token<data = !firrtl.uint<32>>,
+                  %tok_b: !cmt2.sync_token<data = !firrtl.uint<16>>)
+        tokens_out(!cmt2.sync_token<data = !firrtl.uint<32>>)
+        -> (!firrtl.uint<8>) { guard } { body }
     ```
   }];
   let regions = (region
@@ -495,14 +612,58 @@ def RuleOp : Cmt2Op<
     StrArrayAttr:$argNames,
     StrArrayAttr:$bodyResNames,
     OptionalAttr<ArrayAttr>:$arg_attrs,
-    OptionalAttr<ArrayAttr>:$res_attrs
+    OptionalAttr<ArrayAttr>:$res_attrs,
+    // Token-based synchronization for pipelined dataflow
+    OptionalAttr<TypeArrayAttr>:$token_in_types,
+    OptionalAttr<StrArrayAttr>:$token_in_names,
+    OptionalAttr<TypeArrayAttr>:$token_out_types
   );
 
   let hasCustomAssemblyFormat = 1;
 
+  // Backward-compatible builder (without token attributes)
+  let builders = [
+    OpBuilder<(ins "::mlir::StringAttr":$sym_name,
+                   "::mlir::TypeAttr":$function_type,
+                   "::mlir::ArrayAttr":$argNames,
+                   "::mlir::ArrayAttr":$bodyResNames,
+                   "::mlir::ArrayAttr":$arg_attrs,
+                   "::mlir::ArrayAttr":$res_attrs), [{
+      build($_builder, $_state, sym_name, function_type, argNames, bodyResNames,
+            arg_attrs, res_attrs,
+            /*token_in_types=*/nullptr, /*token_in_names=*/nullptr,
+            /*token_out_types=*/nullptr);
+    }]>
+  ];
+
   let extraClassDeclaration = [{
     void getAsmBlockArgumentNames(mlir::Region &region,
                                   mlir::OpAsmSetValueNameFn setNameFn);
+
+    /// Returns true if this rule has token inputs
+    bool hasTokenInputs() {
+      return getTokenInTypes() && !getTokenInTypes()->empty();
+    }
+
+    /// Returns true if this rule has token outputs
+    bool hasTokenOutputs() {
+      return getTokenOutTypes() && !getTokenOutTypes()->empty();
+    }
+
+    /// Get the number of token input arguments
+    size_t getNumTokenInputs() {
+      return getTokenInTypes() ? getTokenInTypes()->size() : 0;
+    }
+
+    /// Get the number of token output types
+    size_t getNumTokenOutputs() {
+      return getTokenOutTypes() ? getTokenOutTypes()->size() : 0;
+    }
+
+    /// Get all block arguments (regular args + token args)
+    size_t getNumAllBlockArgs() {
+      return getFunctionType().getNumInputs() + getNumTokenInputs();
+    }
   }];
 
   let extraClassDefinition = [{
@@ -628,16 +789,18 @@ def MethodOp : Cmt2Op<
     }
   }];
 
+  let hasVerifier = 1;
 }
 
 def CallOp : Cmt2Op<
   "call", [
-    ParentOneOf<["MethodOp", "RuleOp", "ValueOp", "IfOp"]>,
+    ParentOneOf<["MethodOp", "RuleOp", "ValueOp", "IfOp", "ProcStepOp", "ProcStaticStepOp", "ProcRuleOp", "ProcMethodOp", "ProcWhileOp", "ProcCondIfOp", "DataflowTaskOp"]>,
     DeclareOpInterfaceMethods<CallOpInterface>
   ]> {
   let summary = "Call Method/Value.";
   let description = [{
     The `cmt2.call` operation is used to invoke a `MethodOp` or `ValueOp` within a `RuleOp`, `MethodOp`, or `ValueOp`.
+    It can also be used within the condition region of a `ProcWhileOp` or `ProcCondIfOp` to compute loop/branch conditions.
 
     This operation implements CallOpInterface, providing standard call-like operation features:
     - getCallableForCallee(): Returns the callee symbol reference
@@ -649,13 +812,26 @@ def CallOp : Cmt2Op<
       - `callee`: The symbol name of the instance being called. A special case is the `@this` callee, which refers to the current module itself.
       - `methodOrValue`: The symbol name of the method or value being called.
 
+    Timing attributes (optional, for cycle-precise static steps):
+      - `call_timing`: Timing interval for when the call is issued (start pulse).
+      - `arg_timing`: Array of timing intervals for when each argument is driven.
+      - `result_timing`: Array of timing intervals for when each result is captured.
+      - `call_ty`: Lowering-only tag for per-cycle clones ("Enable" vs "GetRes").
+
     Results:
       - `outputs`: The list of output signals (values) returned by the method or value being called.
 
     Assembly format:
 
     ```mlir
+    // Dynamic call (no timing)
     %output1, %output2 = cmt2.call @callee @methodName(%input1, %input2, ...) : <function_type>
+
+    // Static call with timing guards (inside a static_step)
+    %r = cmt2.call @mult @multiply(%a, %b) : (!firrtl.uint<32>, !firrtl.uint<32>) -> !firrtl.uint<32>
+        {call_timing = #cmt2.timing<[0, 1]>,
+         arg_timing = [#cmt2.timing<[0, 1]>, #cmt2.timing<[0, 1]>],
+         result_timing = [#cmt2.timing<[4, 5]>]}
     ```
   }];
   let arguments = (ins
@@ -663,19 +839,68 @@ def CallOp : Cmt2Op<
     SymbolRefAttr:$callee,
     SymbolRefAttr:$methodOrValue,
     OptionalAttr<ArrayAttr>:$arg_attrs,
-    OptionalAttr<ArrayAttr>:$res_attrs
+    OptionalAttr<ArrayAttr>:$res_attrs,
+    // Call issue time (static_step only)
+    OptionalAttr<Cmt2_TimingIntervalAttr>:$call_timing,
+    // Timing guards for cycle-precise static steps
+    OptionalAttr<Cmt2_TimingArrayAttr>:$arg_timing,
+    OptionalAttr<Cmt2_TimingArrayAttr>:$result_timing,
+    // Lowering-only tag for per-cycle clones
+    OptionalAttr<StrAttr>:$call_ty
   );
   let results = (outs Variadic<FIRRTLBaseType>:$outputs);
   let assemblyFormat = [{
     $callee $methodOrValue `(` $inputs `)` attr-dict `:` functional-type($inputs, results)
   }];
 
+  // Custom builders for backward compatibility (without timing attributes)
+  let builders = [
+    OpBuilder<(ins "::mlir::TypeRange":$resultTypes,
+                   "::mlir::ValueRange":$inputs,
+                   "::mlir::SymbolRefAttr":$callee,
+                   "::mlir::SymbolRefAttr":$methodOrValue,
+                   "::mlir::ArrayAttr":$arg_attrs,
+                   "::mlir::ArrayAttr":$res_attrs), [{
+      build($_builder, $_state, resultTypes, inputs, callee, methodOrValue,
+            arg_attrs, res_attrs, /*call_timing=*/nullptr, /*arg_timing=*/nullptr,
+            /*result_timing=*/nullptr, /*call_ty=*/nullptr);
+    }]>
+  ];
+
   let extraClassDeclaration = [{
     /// Get the methodOrValue symbol as the primary callee
     mlir::SymbolRefAttr getMethodOrValueSymbol() {
       return getMethodOrValueAttr();
     }
+
+    /// Returns true if this call has timing guards
+    bool hasTiming() {
+      return getCallTiming().has_value() || getArgTiming().has_value() ||
+             getResultTiming().has_value();
+    }
+
+    /// Get timing for a specific argument, or nullptr
+    TimingIntervalAttr getArgTimingAt(unsigned idx) {
+      if (auto timing = getArgTiming()) {
+        auto arr = *timing;
+        if (idx < arr.size())
+          return llvm::dyn_cast<TimingIntervalAttr>(arr[idx]);
+      }
+      return nullptr;
+    }
+
+    /// Get timing for a specific result, or nullptr
+    TimingIntervalAttr getResultTimingAt(unsigned idx) {
+      if (auto timing = getResultTiming()) {
+        auto arr = *timing;
+        if (idx < arr.size())
+          return llvm::dyn_cast<TimingIntervalAttr>(arr[idx]);
+      }
+      return nullptr;
+    }
   }];
+
+  let hasVerifier = 1;
 }
 
 def InterfaceOp : Cmt2Op<
@@ -689,7 +914,7 @@ def InterfaceOp : Cmt2Op<
   ]> {
   let summary = "represent a Cmt2 interface.";
   let description = [{
-    The `cmt2.interface` is a container to group methods.
+    The `cmt2.interface` is a container to step methods.
 
     Arguments:
     - `sym_name`: The symbol name of the interface.
@@ -888,6 +1113,1109 @@ def YieldOp : Cmt2Op<
   let builders = [OpBuilder<(ins), [{
     build($_builder, $_state, mlir::ValueRange());
   }]>];
+}
+
+//===----------------------------------------------------------------------===//
+// Procedural Layer Operations (cmt2.proc.*)
+//===----------------------------------------------------------------------===//
+
+/// Trait for procedural control operations (seq, par, if, while, enable, invoke)
+/// Note: We can't use NativeOpTrait with custom namespace easily, so we remove
+/// the trait for now - it can be added via interface if needed later.
+
+
+def ProcStepOp : Cmt2Op<
+  "proc.step", [
+    HasParent<"ModuleOp">,
+    Symbol,
+    SingleBlock,
+    NoTerminator,
+    NoRegionArguments
+  ]> {
+  let summary = "Dynamic step (single-fire)";
+  let description = [{
+    A dynamic step bundles operations that execute atomically when enabled by
+    procedural control. The step executes when the corresponding state rule
+    fires (i.e. when the rule is ready), and the proc FSM transitions to the
+    next state in the same cycle.
+
+    Unlike older versions of CMT2, dynamic steps do not use an explicit
+    `step_done` signal. Runtime waiting/looping is expressed via explicit
+    control flow (`proc.while`, `proc.cond_if`) rather than step-local done
+    conditions.
+
+    Assembly format:
+    ```mlir
+    cmt2.proc.step @compute {
+      %a = cmt2.call @reg_a @read() : () -> !firrtl.uint<32>
+      %b = cmt2.call @reg_b @read() : () -> !firrtl.uint<32>
+      %sum = firrtl.add %a, %b : (!firrtl.uint<32>, !firrtl.uint<32>) -> !firrtl.uint<33>
+      cmt2.call @reg_out @write(%sum) : (!firrtl.uint<33>) -> ()
+    }
+    ```
+  }];
+  let arguments = (ins SymbolNameAttr:$sym_name);
+  let regions = (region SizedRegion<1>:$body);
+  let assemblyFormat = [{
+    $sym_name $body attr-dict
+  }];
+}
+
+def ProcStaticStepOp : Cmt2Op<
+  "proc.static_step", [
+    HasParent<"ModuleOp">,
+    Symbol,
+    SingleBlock,
+    NoTerminator,
+    NoRegionArguments
+  ]> {
+  let summary = "Static step with fixed latency";
+  let description = [{
+    A static step has a known fixed latency specified at compile time.
+    Unlike dynamic steps, static steps do not need done signals at runtime
+    because the completion time is known statically.
+
+    Attributes:
+    - `latency`: The fixed number of cycles this step takes to complete.
+    - `interval`: Optional initiation interval for pipelined steps.
+
+    Assembly format:
+    ```mlir
+    // Simple static step
+    cmt2.proc.static_step @multiply <4> {
+      // Operations with timing guards...
+    }
+
+    // Pipelined static step with II=2
+    cmt2.proc.static_step @pipelined <8> {
+      // ...
+    } {interval = #cmt2.interval<2>}
+    ```
+  }];
+  let arguments = (ins
+    SymbolNameAttr:$sym_name,
+    I64Attr:$latency,
+    OptionalAttr<Cmt2_IntervalAttr>:$interval
+  );
+  let regions = (region SizedRegion<1>:$body);
+  let assemblyFormat = [{
+    $sym_name `<` $latency `>` $body attr-dict
+  }];
+
+  // Custom builders for backward compatibility (without interval attribute)
+  let builders = [
+    OpBuilder<(ins "::mlir::StringAttr":$sym_name,
+                   "uint64_t":$latency), [{
+      build($_builder, $_state, sym_name, $_builder.getI64IntegerAttr(latency),
+            /*interval=*/nullptr);
+    }]>
+  ];
+
+  let extraClassDeclaration = [{
+    /// Returns true if this step is pipelined (has initiation interval)
+    bool isPipelined() { return getInterval().has_value(); }
+
+    /// Get the initiation interval or latency (for non-pipelined)
+    int64_t getInitiationInterval() {
+      if (auto ii = getInterval())
+        return ii->getCycles();
+      return getLatency();
+    }
+  }];
+
+  let hasVerifier = 1;
+}
+
+def ProcAssignOp : Cmt2Op<
+  "proc.assign", [
+    HasParent<"ProcStepOp">
+  ]> {
+  let summary = "Guarded assignment within procedural groups";
+  let description = [{
+    Assigns a value to a destination when the guard is true.
+    Used in TDCC-generated steps to express state-dependent
+    assignments to FSM registers and step go signals.
+
+    This operation is specific to the procedural layer and should
+    NOT be confused with regular cmt2 method calls. Use `cmt2.call`
+    for invoking methods on instances; use `cmt2.proc.assign` for
+    direct port/signal assignments in synthesized control logic.
+
+    Assembly format:
+    ```mlir
+    cmt2.proc.assign %fsm.in = %guard ? %new_state : !firrtl.uint<2>, !firrtl.uint<1>, !firrtl.uint<2>
+    ```
+  }];
+  let arguments = (ins
+    FIRRTLBaseType:$dest,
+    FIRRTLBaseType:$guard,
+    FIRRTLBaseType:$src
+  );
+  let assemblyFormat = [{
+    $dest `=` $guard `?` $src `:` qualified(type($dest)) `,` qualified(type($guard)) `,` qualified(type($src)) attr-dict
+  }];
+}
+
+def ProcSeqOp : Cmt2Op<
+  "proc.seq", [
+    ParentOneOf<["ProcRuleOp", "ProcMethodOp", "ProcSeqOp", "ProcParOp", "ProcIfOp", "ProcCondIfOp", "ProcWhileOp", "ProcStaticRepeatOp", "ProcStaticIfOp", "DataflowTaskOp"]>,
+    SingleBlock,
+    NoTerminator,
+    NoRegionArguments
+  ]> {
+  let summary = "Sequential composition";
+  let description = [{
+    Executes children sequentially. Each child's done triggers the next.
+    TDCC assigns consecutive state IDs to each Enable.
+
+    Assembly format:
+    ```mlir
+    cmt2.proc.seq {
+      cmt2.proc.enable @A
+      cmt2.proc.enable @B
+      cmt2.proc.enable @C
+    }
+    ```
+
+    After TDCC compilation, states are assigned: A=0, B=1, C=2.
+    Transitions: 0→1 when A[done], 1→2 when B[done], etc.
+  }];
+  let regions = (region SizedRegion<1>:$body);
+  let assemblyFormat = [{
+    $body attr-dict
+  }];
+}
+
+def ProcParOp : Cmt2Op<
+  "proc.par", [
+    ParentOneOf<["ProcRuleOp", "ProcMethodOp", "ProcSeqOp", "ProcParOp", "ProcIfOp", "ProcCondIfOp", "ProcWhileOp", "ProcStaticRepeatOp", "ProcStaticIfOp", "DataflowTaskOp"]>,
+    SingleBlock,
+    NoTerminator,
+    NoRegionArguments
+  ]> {
+  let summary = "Parallel composition";
+  let description = [{
+    Executes children concurrently. Each branch gets independent FSM.
+    Done when all branches complete.
+
+    Assembly format:
+    ```mlir
+    cmt2.proc.par {
+      cmt2.proc.enable @A
+      cmt2.proc.seq { cmt2.proc.enable @B; cmt2.proc.enable @C }
+    }
+    ```
+
+    TDCC creates done registers (pd) for each child to track completion.
+    Par is done when all pd registers are set.
+  }];
+  let regions = (region SizedRegion<1>:$body);
+  let assemblyFormat = [{
+    $body attr-dict
+  }];
+}
+
+def ProcIfOp : Cmt2Op<
+  "proc.if", [
+    ParentOneOf<["ProcRuleOp", "ProcMethodOp", "ProcSeqOp", "ProcParOp", "ProcIfOp", "ProcCondIfOp", "ProcWhileOp", "ProcStaticRepeatOp", "ProcStaticIfOp", "DataflowTaskOp"]>,
+    NoRegionArguments,
+    NoTerminator
+  ]> {
+  let summary = "Conditional execution in procedural control";
+  let description = [{
+    Evaluates condition and executes one branch.
+    TDCC adds condition to transition guards.
+
+    Assembly format:
+    ```mlir
+    cmt2.proc.if %cond : !firrtl.uint<1> {
+      cmt2.proc.enable @A
+    } else {
+      cmt2.proc.enable @B
+    }
+    ```
+
+    State transitions:
+    - (prev, A_state, cond=true)
+    - (prev, B_state, cond=false)
+  }];
+  let arguments = (ins FIRRTLBaseType:$cond);
+  let regions = (region
+    SizedRegion<1>:$thenRegion,
+    AnyRegion:$elseRegion
+  );
+  let assemblyFormat = [{
+    $cond `:` qualified(type($cond)) $thenRegion (`else` $elseRegion^)? attr-dict
+  }];
+}
+
+def ProcCondIfOp : Cmt2Op<
+  "proc.cond_if", [
+    ParentOneOf<["ProcRuleOp", "ProcMethodOp", "ProcSeqOp", "ProcParOp", "ProcIfOp", "ProcCondIfOp", "ProcWhileOp", "ProcStaticRepeatOp", "ProcStaticIfOp", "DataflowTaskOp"]>,
+    NoRegionArguments,
+    NoTerminator
+  ]> {
+  let summary = "Conditional execution with condition region";
+  let description = [{
+    Evaluates condition in a dedicated region (supporting cmt2.call operations)
+    and executes the appropriate branch based on the result.
+
+    This is similar to `proc.if` but allows runtime-dependent conditions that
+    require reading from instances (e.g., checking register values).
+
+    Assembly format:
+    ```mlir
+    cmt2.proc.cond_if {
+      %val = cmt2.call @reg @read() : () -> !firrtl.uint<8>
+      %zero = firrtl.constant 0 : !firrtl.uint<8>
+      %cond = firrtl.neq %val, %zero : (!firrtl.uint<8>, !firrtl.uint<8>) -> !firrtl.uint<1>
+      cmt2.proc.cond_if_yield %cond : !firrtl.uint<1>
+    } then {
+      cmt2.proc.enable @handle_nonzero
+    } else {
+      cmt2.proc.enable @handle_zero
+    }
+    ```
+
+    The condition region is evaluated when control reaches this statement.
+    Unlike `proc.while`, the condition is only evaluated once (not repeatedly).
+
+    TDCC adds condition to transition guards:
+    - (prev, then_state, cond=true)
+    - (prev, else_state, cond=false)
+  }];
+  let regions = (region
+    SizedRegion<1>:$condRegion,
+    SizedRegion<1>:$thenRegion,
+    AnyRegion:$elseRegion
+  );
+  let assemblyFormat = [{
+    $condRegion `then` $thenRegion (`else` $elseRegion^)? attr-dict
+  }];
+
+  let extraClassDeclaration = [{
+    /// Get the condition value from the condition region's terminator.
+    mlir::Value getCond();
+  }];
+}
+
+def ProcCondIfYieldOp : Cmt2Op<
+  "proc.cond_if_yield", [
+    Terminator,
+    HasParent<"ProcCondIfOp">
+  ]> {
+  let summary = "Yield condition value from cond_if condition region";
+  let description = [{
+    Terminates the condition region of a `cmt2.proc.cond_if` operation,
+    yielding the boolean condition value that determines branch selection.
+
+    Assembly format:
+    ```mlir
+    cmt2.proc.cond_if_yield %cond : !firrtl.uint<1>
+    ```
+  }];
+  let arguments = (ins FIRRTLBaseType:$cond);
+  let assemblyFormat = [{
+    $cond `:` qualified(type($cond)) attr-dict
+  }];
+}
+
+def ProcWhileOp : Cmt2Op<
+  "proc.while", [
+    ParentOneOf<["ProcRuleOp", "ProcMethodOp", "ProcSeqOp", "ProcParOp", "ProcIfOp", "ProcCondIfOp", "ProcWhileOp", "ProcStaticRepeatOp", "ProcStaticIfOp", "DataflowTaskOp"]>,
+    NoRegionArguments
+  ]> {
+  let summary = "Loop control with condition region";
+  let description = [{
+    Repeatedly executes body while condition is true.
+    The condition region computes the loop condition and can contain
+    cmt2.call operations to read from instances.
+
+    Assembly format:
+    ```mlir
+    cmt2.proc.while {
+      %cnt = cmt2.call @counter @read() : () -> !firrtl.uint<32>
+      %ten = firrtl.constant 10 : !firrtl.uint<32>
+      %cond = firrtl.lt %cnt, %ten : (!firrtl.uint<32>, !firrtl.uint<32>) -> !firrtl.uint<1>
+      cmt2.proc.while_cond %cond : !firrtl.uint<1>
+    } do {
+      cmt2.proc.enable @body
+    }
+    ```
+
+    The condition region is evaluated each cycle to determine whether to:
+    - Continue looping (condition true): execute body and re-check
+    - Exit loop (condition false): proceed to next statement
+
+    TDCC creates backward edges guarded by condition.
+    Transitions:
+    - (prev, body_state, cond=true) - enter/continue loop
+    - (body_state, next_state, body_done & cond=false) - exit loop
+  }];
+  let regions = (region
+    SizedRegion<1>:$condRegion,
+    SizedRegion<1>:$body
+  );
+  let assemblyFormat = [{
+    $condRegion `do` $body attr-dict
+  }];
+
+  let extraClassDeclaration = [{
+    /// Get the condition value from the condition region's terminator.
+    mlir::Value getCond();
+  }];
+}
+
+def ProcWhileCondYieldOp : Cmt2Op<
+  "proc.while_cond", [
+    Terminator,
+    HasParent<"ProcWhileOp">
+  ]> {
+  let summary = "Yield condition value from while condition region";
+  let description = [{
+    Terminates the condition region of a `cmt2.proc.while` operation,
+    yielding the boolean condition value that determines loop continuation.
+
+    Assembly format:
+    ```mlir
+    cmt2.proc.while_cond %cond : !firrtl.uint<1>
+    ```
+  }];
+  let arguments = (ins FIRRTLBaseType:$cond);
+  let assemblyFormat = [{
+    $cond `:` qualified(type($cond)) attr-dict
+  }];
+}
+
+def ProcYieldOp : Cmt2Op<
+  "proc.yield", [
+    Terminator,
+    ParentOneOf<["ProcWhileOp"]>
+  ]> {
+  let summary = "Terminate while body region";
+  let description = [{
+    Terminates the body region of a `cmt2.proc.while` operation.
+    This is a no-op that simply marks the end of the loop body.
+
+    Assembly format:
+    ```mlir
+    cmt2.proc.yield
+    ```
+  }];
+  let assemblyFormat = [{
+    attr-dict
+  }];
+}
+
+def ProcStaticRepeatOp : Cmt2Op<
+  "proc.static_repeat", [
+    ParentOneOf<["ProcRuleOp", "ProcMethodOp", "ProcSeqOp", "ProcParOp", "ProcIfOp", "ProcCondIfOp", "ProcWhileOp", "ProcStaticRepeatOp", "ProcStaticIfOp", "DataflowTaskOp"]>,
+    SingleBlock,
+    NoTerminator,
+    NoRegionArguments
+  ]> {
+  let summary = "Static fixed-iteration loop with known total latency";
+  let description = [{
+    Executes body a fixed number of times with known total latency.
+    Total latency = count * body_latency.
+
+    Unlike dynamic `while` loops:
+    - No loop counter register at runtime
+    - No loop condition evaluation
+    - FSM advances automatically based on static timing
+    - Body must have known static latency
+
+    This is useful for:
+    - Unrolled loops with fixed iterations
+    - Fixed-depth pipeline stages
+    - Matrix operations with known dimensions
+
+    Attributes:
+    - `count`: Number of iterations (must be > 0)
+    - `body_latency`: Optional explicit body latency. If not specified,
+                      inferred from body contents.
+
+    Assembly format:
+    ```mlir
+    cmt2.proc.static_repeat 4 {
+      cmt2.proc.enable @step_3cycle  // latency = 3
+    } // total latency = 4 * 3 = 12 cycles
+    ```
+
+    With explicit body latency:
+    ```mlir
+    cmt2.proc.static_repeat 4 <3> {
+      cmt2.proc.enable @step_3cycle
+    }
+    ```
+  }];
+  let arguments = (ins
+    I64Attr:$count,
+    OptionalAttr<I64Attr>:$body_latency
+  );
+  let regions = (region SizedRegion<1>:$body);
+  let assemblyFormat = [{
+    $count (`<` $body_latency^ `>`)? $body attr-dict
+  }];
+
+  let hasVerifier = 1;
+}
+
+def ProcStaticIfOp : Cmt2Op<
+  "proc.static_if", [
+    ParentOneOf<["ProcRuleOp", "ProcMethodOp", "ProcSeqOp", "ProcParOp", "ProcIfOp", "ProcCondIfOp", "ProcWhileOp", "ProcStaticRepeatOp", "ProcStaticIfOp", "DataflowTaskOp"]>,
+    NoRegionArguments,
+    NoTerminator
+  ]> {
+  let summary = "Static conditional with known branch latencies";
+  let description = [{
+    Conditional execution where both branches have known static latencies.
+    Total latency = max(then_latency, else_latency).
+
+    Unlike dynamic `if`:
+    - Both branches have deterministic execution time
+    - No done signal checking at runtime
+    - FSM advances based on static timing
+    - Shorter branch is padded to match longer branch
+
+    This enables efficient scheduling when branch timing is known,
+    eliminating the need for dynamic synchronization.
+
+    Attributes:
+    - `then_latency`: Optional explicit then-branch latency
+    - `else_latency`: Optional explicit else-branch latency
+
+    Assembly format:
+    ```mlir
+    cmt2.proc.static_if %cond : !firrtl.uint<1> {
+      cmt2.proc.enable @branch_a  // latency = 5
+    } else {
+      cmt2.proc.enable @branch_b  // latency = 3
+    } // total latency = max(5, 3) = 5 cycles
+    ```
+
+    With explicit latencies:
+    ```mlir
+    cmt2.proc.static_if %cond : !firrtl.uint<1> <5, 3> {
+      cmt2.proc.enable @branch_a
+    } else {
+      cmt2.proc.enable @branch_b
+    }
+    ```
+  }];
+  let arguments = (ins
+    FIRRTLBaseType:$cond,
+    OptionalAttr<I64Attr>:$then_latency,
+    OptionalAttr<I64Attr>:$else_latency
+  );
+  let regions = (region
+    SizedRegion<1>:$thenRegion,
+    AnyRegion:$elseRegion
+  );
+  let assemblyFormat = [{
+    $cond `:` qualified(type($cond))
+    (`<` $then_latency^ `,` $else_latency `>`)?
+    $thenRegion (`else` $elseRegion^)? attr-dict
+  }];
+
+  let hasVerifier = 1;
+
+  let extraClassDeclaration = [{
+    /// Get the total latency of this static if (max of branch latencies)
+    uint64_t getTotalLatency() {
+      uint64_t thenLat = getThenLatency() ? *getThenLatency() : 0;
+      uint64_t elseLat = getElseLatency() ? *getElseLatency() : 0;
+      return std::max(thenLat, elseLat);
+    }
+  }];
+}
+
+def ProcEnableOp : Cmt2Op<
+  "proc.enable", [
+    ParentOneOf<["ProcRuleOp", "ProcMethodOp", "ProcSeqOp", "ProcParOp", "ProcIfOp", "ProcCondIfOp", "ProcWhileOp", "ProcStaticRepeatOp", "ProcStaticIfOp", "DataflowTaskOp"]>
+  ]> {
+  let summary = "Enable a step";
+  let description = [{
+    Activates a step. Gets a unique NODE_ID during TDCC.
+    A dynamic step completes when its enabled state rule fires; there is no
+    step-local done protocol.
+
+    Assembly format:
+    ```mlir
+    cmt2.proc.enable @stepName
+    ```
+  }];
+  let arguments = (ins FlatSymbolRefAttr:$stepName);
+  let assemblyFormat = [{
+    $stepName attr-dict
+  }];
+}
+
+def ProcInvokeOp : Cmt2Op<
+  "proc.invoke", [
+    ParentOneOf<["ProcRuleOp", "ProcMethodOp", "ProcSeqOp", "ProcParOp", "ProcIfOp", "ProcCondIfOp", "ProcWhileOp", "ProcStaticRepeatOp", "ProcStaticIfOp", "DataflowTaskOp"]>
+  ]> {
+  let summary = "Invoke a method on an instance within procedural control";
+  let description = [{
+    Invokes a method on an instance within procedural control.
+    Can invoke either:
+    - Single-cycle methods (regular cmt2.method)
+    - Multi-cycle procedural methods (cmt2.proc.method)
+
+    For multi-cycle methods, this operation waits until the
+    method's FSM returns to idle before proceeding.
+
+    CompileInvoke pass converts this to:
+    1. A generated step containing the cmt2.call
+    2. A ProcEnableOp referencing the generated group
+
+    Assembly format:
+    ```mlir
+    %result = cmt2.proc.invoke @instance @method(%arg1, %arg2) : (!firrtl.uint<32>, !firrtl.uint<32>) -> !firrtl.uint<32>
+    ```
+  }];
+  let arguments = (ins
+    FlatSymbolRefAttr:$instance,
+    FlatSymbolRefAttr:$method,
+    Variadic<FIRRTLBaseType>:$inputs
+  );
+  let results = (outs Variadic<FIRRTLBaseType>:$outputs);
+  let assemblyFormat = [{
+    $instance $method `(` $inputs `)` attr-dict `:` functional-type($inputs, results)
+  }];
+}
+
+def ProcControlEndOp : Cmt2Op<
+  "proc.control_end", [
+    Terminator,
+    ParentOneOf<["ProcRuleOp", "ProcMethodOp"]>
+  ]> {
+  let summary = "Terminate a procedural control region";
+  let description = [{
+    The `cmt2.proc.control_end` operation terminates the control region
+    of a procedural rule or method. It is implicitly added at the end of
+    control regions during parsing.
+
+    Assembly format:
+    ```mlir
+    cmt2.proc.control_end
+    ```
+  }];
+  let assemblyFormat = "attr-dict";
+}
+
+def ProcRuleOp : Cmt2Op<
+  "proc.rule", [
+    IsolatedFromAbove,
+    HasParent<"ModuleOp">,
+    Symbol,
+    OpAsmOpInterface
+  ]> {
+  let summary = "Procedural rule with guard and control regions";
+  let description = [{
+    The `cmt2.proc.rule` defines a procedural rule, which extends
+    regular rules with multi-cycle control flow. The rule fires when
+    its guard is true AND the internal FSM is idle.
+
+    After lowering (ProcToGAA pass), this generates:
+    - An FSM state register
+    - Multiple regular GAA rules for state transitions
+    - @name__idle() value to check if FSM is idle
+    - @name__running() value to check if FSM is running
+
+    Arguments:
+    - `sym_name`: The symbol name of the rule.
+    - `function_type`: The function type (typically no args/results for rules).
+    - `argNames`: Names of shared input arguments.
+
+    Regions:
+    - `guard`: Guard region returning i1 (ready condition).
+    - `control`: Control region with procedural control flow.
+
+    Assembly format:
+    ```mlir
+    cmt2.proc.rule @compute() {
+      %ready = cmt2.call @input @valid() : () -> !firrtl.uint<1>
+      cmt2.return %ready : !firrtl.uint<1>
+    } control {
+      cmt2.proc.seq {
+        cmt2.proc.enable @load
+        cmt2.proc.enable @process
+        cmt2.proc.enable @store
+      }
+    }
+    ```
+  }];
+  let regions = (region
+    SizedRegion<1>:$guard,
+    SizedRegion<1>:$control
+  );
+  let arguments = (ins
+    SymbolNameAttr:$sym_name,
+    TypeAttrOf<FunctionType>:$function_type,
+    StrArrayAttr:$argNames,
+    OptionalAttr<ArrayAttr>:$arg_attrs,
+    OptionalAttr<ArrayAttr>:$res_attrs
+  );
+
+  let hasCustomAssemblyFormat = 1;
+
+  let extraClassDeclaration = [{
+    void getAsmBlockArgumentNames(mlir::Region &region,
+                                  mlir::OpAsmSetValueNameFn setNameFn);
+  }];
+}
+
+def ProcMethodOp : Cmt2Op<
+  "proc.method", [
+    IsolatedFromAbove,
+    HasParent<"ModuleOp">,
+    Symbol,
+    OpAsmOpInterface
+  ]> {
+  let summary = "Procedural method (multi-cycle action method)";
+  let description = [{
+    The `cmt2.proc.method` defines a procedural method, which extends
+    regular methods with multi-cycle control flow. It can be called
+    via cmt2.proc.invoke from other procedural constructs.
+
+    After lowering (ProcToGAA pass), this generates:
+    - An FSM state register
+    - Argument registers to hold inputs across cycles
+    - Result register to hold output
+    - Entry method that latches args and starts FSM
+    - Multiple regular GAA rules for state transitions
+    - Result value method
+
+    Arguments:
+    - `sym_name`: The symbol name of the method.
+    - `function_type`: The function type including args and results.
+    - `argNames`: Names of shared input arguments.
+    - `bodyResNames`: Names of the body region results.
+
+    Timing attributes (optional):
+    - `static_latency`: Total latency for static methods.
+    - `interval`: Initiation interval for pipelined methods.
+
+    Regions:
+    - `guard`: Guard region returning i1 (ready condition).
+    - `control`: Control region with procedural control flow.
+
+    Assembly format:
+    ```mlir
+    // Dynamic method
+    cmt2.proc.method @multiply(%a: !firrtl.uint<32>, %b: !firrtl.uint<32>) -> (!firrtl.uint<32>) {
+      %idle = cmt2.call @mult_fsm @isIdle() : () -> !firrtl.uint<1>
+      cmt2.return %idle : !firrtl.uint<1>
+    } control {
+      cmt2.proc.seq {
+        cmt2.proc.enable @start_mult
+        cmt2.proc.enable @wait_result
+      }
+    }
+
+    // Static method with known latency
+    cmt2.proc.method @fast_mult static<4>(%a: !firrtl.uint<32>, %b: !firrtl.uint<32>) -> (!firrtl.uint<32>) {
+      // ...
+    } control {
+      // ...
+    }
+    ```
+  }];
+  let regions = (region
+    SizedRegion<1>:$guard,
+    SizedRegion<1>:$control
+  );
+  let arguments = (ins
+    SymbolNameAttr:$sym_name,
+    TypeAttrOf<FunctionType>:$function_type,
+    StrArrayAttr:$argNames,
+    StrArrayAttr:$bodyResNames,
+    OptionalAttr<ArrayAttr>:$arg_attrs,
+    OptionalAttr<ArrayAttr>:$res_attrs,
+    // Timing attributes for cycle-precise static methods
+    OptionalAttr<I64Attr>:$static_latency,
+    OptionalAttr<Cmt2_IntervalAttr>:$interval
+  );
+
+  let hasCustomAssemblyFormat = 1;
+
+  // Custom builders for backward compatibility (without timing attributes)
+  let builders = [
+    OpBuilder<(ins "::mlir::StringAttr":$sym_name,
+                   "::mlir::TypeAttr":$function_type,
+                   "::mlir::ArrayAttr":$argNames,
+                   "::mlir::ArrayAttr":$bodyResNames,
+                   "::mlir::ArrayAttr":$arg_attrs,
+                   "::mlir::ArrayAttr":$res_attrs), [{
+      build($_builder, $_state, sym_name, function_type, argNames, bodyResNames,
+            arg_attrs, res_attrs, /*static_latency=*/nullptr, /*interval=*/nullptr);
+    }]>
+  ];
+
+  let extraClassDeclaration = [{
+    void getAsmBlockArgumentNames(mlir::Region &region,
+                                  mlir::OpAsmSetValueNameFn setNameFn);
+
+    /// Returns true if this method has static timing (known latency)
+    bool isStatic() { return getStaticLatency().has_value(); }
+
+    /// Get the latency or 0 if dynamic
+    int64_t getLatencyOrZero() {
+      return getStaticLatency().value_or(0);
+    }
+
+    /// Returns true if this method is pipelined
+    bool isPipelined() { return getInterval().has_value(); }
+
+    /// Get the initiation interval or latency (for non-pipelined)
+    int64_t getInitiationInterval() {
+      if (auto ii = getInterval())
+        return ii->getCycles();
+      return getLatencyOrZero();
+    }
+  }];
+}
+
+//===----------------------------------------------------------------------===//
+// Token Operations for Pipelined Dataflow
+//===----------------------------------------------------------------------===//
+
+def TokenValidOp : Cmt2Op<"token.valid", [Pure]> {
+  let summary = "Extract valid signal from a sync token";
+  let description = [{
+    The `cmt2.token.valid` operation extracts the valid signal from a
+    synchronization token. This is typically used in rule guards to
+    check if a token is ready.
+
+    Example:
+    ```mlir
+    %valid = cmt2.token.valid %tok : !cmt2.sync_token<data = !firrtl.uint<32>> -> !firrtl.uint<1>
+    ```
+  }];
+
+  let arguments = (ins AnySyncTokenType:$token);
+  let results = (outs FIRRTLBaseType:$valid);
+
+  let assemblyFormat = [{
+    $token attr-dict `:` qualified(type($token)) `->` qualified(type($valid))
+  }];
+
+  let hasVerifier = 1;
+}
+
+def TokenDataOp : Cmt2Op<"token.data", [Pure]> {
+  let summary = "Extract data payload from a sync token";
+  let description = [{
+    The `cmt2.token.data` operation extracts the data payload from a
+    synchronization token. This should only be used in rule bodies
+    after the guard has ensured the token is valid.
+
+    The token must carry data (i.e., have a dataType parameter).
+
+    Example:
+    ```mlir
+    %data = cmt2.token.data %tok : !cmt2.sync_token<data = !firrtl.uint<32>> -> !firrtl.uint<32>
+    ```
+  }];
+
+  let arguments = (ins AnySyncTokenType:$token);
+  let results = (outs AnyType:$data);
+
+  let assemblyFormat = [{
+    $token attr-dict `:` qualified(type($token)) `->` qualified(type($data))
+  }];
+
+  let hasVerifier = 1;
+}
+
+def TokenCreateOp : Cmt2Op<"token.create", [Pure]> {
+  let summary = "Create a sync token with optional data payload";
+  let description = [{
+    The `cmt2.token.create` operation creates a new synchronization token,
+    optionally carrying a data payload. The token mode (LS/LI) is specified
+    in the result type.
+
+    Examples:
+    ```mlir
+    // Token without data
+    %tok = cmt2.token.create : !cmt2.sync_token
+
+    // Token with data
+    %tok = cmt2.token.create %data : !firrtl.uint<32> -> !cmt2.sync_token<data = !firrtl.uint<32>>
+    ```
+  }];
+
+  let arguments = (ins Optional<AnyType>:$data);
+  let results = (outs AnySyncTokenType:$token);
+
+  let hasCustomAssemblyFormat = 1;
+  let hasVerifier = 1;
+
+  let builders = [
+    // Token without data
+    OpBuilder<(ins "::mlir::Type":$tokenType), [{
+      $_state.addTypes(tokenType);
+    }]>,
+    // Token with data
+    OpBuilder<(ins "::mlir::Type":$tokenType, "::mlir::Value":$data), [{
+      $_state.addTypes(tokenType);
+      if (data)
+        $_state.addOperands(data);
+    }]>
+  ];
+}
+
+def TokenJoinOp : Cmt2Op<"token.join", [Pure]> {
+  let summary = "Join multiple sync tokens into one";
+  let description = [{
+    The `cmt2.token.join` operation synchronizes multiple tokens into a
+    single output token. All input tokens must be valid for the output
+    to be valid.
+
+    Mode inference: if any input token is LI (latency-insensitive),
+    the output token is also LI.
+
+    Example:
+    ```mlir
+    %joined = cmt2.token.join %tok_a, %tok_b : (!cmt2.sync_token<data = !firrtl.uint<32>>,
+                                                 !cmt2.sync_token<data = !firrtl.uint<16>>)
+                                              -> !cmt2.sync_token
+    ```
+  }];
+
+  let arguments = (ins Variadic<AnySyncTokenType>:$tokens);
+  let results = (outs AnySyncTokenType:$result);
+
+  let assemblyFormat = [{
+    $tokens attr-dict `:` functional-type($tokens, $result)
+  }];
+
+  let hasVerifier = 1;
+}
+
+//===----------------------------------------------------------------------===//
+// Dataflow Pipeline Operations (cmt2.proc.dataflow, cmt2.dataflow.*)
+//===----------------------------------------------------------------------===//
+
+def ProcDataflowOp : Cmt2Op<
+  "proc.dataflow", [
+    ParentOneOf<["ModuleOp", "DataflowTaskOp"]>,
+    IsolatedFromAbove,
+    Symbol,
+    SymbolTable,
+    SingleBlock,
+    NoTerminator,
+    OpAsmOpInterface
+  ]> {
+  let summary = "Dataflow pipeline container";
+  let description = [{
+    The `cmt2.proc.dataflow` operation defines a dataflow pipeline, which
+    contains tasks connected by synchronization tokens. Tasks execute when
+    their input tokens are valid and produce output tokens for downstream
+    tasks.
+
+    This is the unified construct for all pipeline/dataflow patterns:
+    - Linear pipelines (stage0 -> stage1 -> ... -> stageN)
+    - Fork-join patterns (one producer, multiple consumers)
+    - Variable latency flows (LS/LI token mixing)
+    - Nested dataflows (dataflow inside task for hierarchical design)
+
+    Nested dataflows: A `cmt2.proc.dataflow` can appear inside a
+    `cmt2.dataflow.task` to model hierarchical pipeline structures.
+    These are automatically flattened during lowering.
+
+    Attributes:
+    - `sym_name`: The symbol name of the dataflow.
+    - `interval`: Optional initiation interval (defaults to 1).
+
+    Arguments:
+    - Block arguments are the dataflow's inputs.
+
+    Regions:
+    - `body`: Contains DataflowTaskOp operations connected by tokens.
+
+    Assembly format:
+    ```mlir
+    cmt2.proc.dataflow @divider(%dividend: !firrtl.uint<32>, %divisor: !firrtl.uint<32>)
+        -> !firrtl.uint<32> {
+      %tok0 = cmt2.dataflow.task @stage0(...) tokens_out(...) {...}
+      %tok1 = cmt2.dataflow.task @stage1() tokens_in(%tok0) tokens_out(...) {...}
+      // ...
+      cmt2.dataflow.task @final() tokens_in(%tokN) {
+        // ...
+        cmt2.dataflow.return %result : !firrtl.uint<32>
+      }
+    }
+    ```
+  }];
+
+  let arguments = (ins
+    SymbolNameAttr:$sym_name,
+    TypeAttrOf<FunctionType>:$function_type,
+    StrArrayAttr:$argNames,
+    OptionalAttr<I64Attr>:$interval
+  );
+
+  let regions = (region SizedRegion<1>:$body);
+
+  let hasCustomAssemblyFormat = 1;
+
+  let extraClassDeclaration = [{
+    void getAsmBlockArgumentNames(mlir::Region &region,
+                                  mlir::OpAsmSetValueNameFn setNameFn);
+
+    /// Get the initiation interval (default 1)
+    int64_t getInitiationInterval() {
+      return getInterval().value_or(1);
+    }
+
+    /// Get the result types of the dataflow
+    mlir::TypeRange getResultTypes() {
+      return getFunctionType().getResults();
+    }
+
+    /// Get the argument types of the dataflow
+    mlir::TypeRange getArgumentTypes() {
+      return getFunctionType().getInputs();
+    }
+  }];
+
+  let hasVerifier = 1;
+}
+
+def DataflowTaskOp : Cmt2Op<
+  "dataflow.task", [
+    HasParent<"ProcDataflowOp">,
+    Symbol,
+    SymbolTable,
+    SingleBlock,
+    OpAsmOpInterface
+  ]> {
+  let summary = "Task within a dataflow pipeline";
+  let description = [{
+    The `cmt2.dataflow.task` operation defines a task within a dataflow
+    pipeline. Tasks consume input tokens, perform computation, and produce
+    output tokens for downstream tasks.
+
+    Tasks are connected via synchronization tokens:
+    - Input tokens (tokens_in): Tokens this task waits for
+    - Output tokens (results): Tokens this task produces
+
+    Attributes:
+    - `sym_name`: The symbol name of the task.
+    - `timing`: Optional timing interval (start, end cycles).
+
+    Multi-consumer pattern: A token can be used by multiple tasks,
+    implying synchronization between them (fork pattern).
+
+    Assembly format:
+    ```mlir
+    // Task with explicit token connections
+    %tok_out = cmt2.dataflow.task @stage1()
+        tokens_in(%tok_in: !cmt2.sync_token<data = !firrtl.uint<32>>)
+        -> !cmt2.sync_token<data = !firrtl.uint<32>>
+        {timing = #cmt2.timing<1, 2>} {
+      %data = cmt2.token.data %tok_in : ...
+      %result = firrtl.add %data, %data : ...
+      %tok = cmt2.token.create %result : ...
+      cmt2.dataflow.yield %tok : !cmt2.sync_token<data = !firrtl.uint<32>>
+    }
+
+    // Final task with return
+    cmt2.dataflow.task @final()
+        tokens_in(%tok: !cmt2.sync_token<data = !firrtl.uint<32>>)
+        {timing = #cmt2.timing<7, 8>} {
+      %data = cmt2.token.data %tok : ...
+      cmt2.dataflow.return %data : !firrtl.uint<32>
+    }
+    ```
+  }];
+
+  let arguments = (ins
+    SymbolNameAttr:$sym_name,
+    Variadic<AnySyncTokenType>:$token_inputs,
+    StrArrayAttr:$token_in_names,
+    OptionalAttr<Cmt2_TimingIntervalAttr>:$timing
+  );
+
+  let results = (outs Variadic<AnySyncTokenType>:$token_outputs);
+
+  let regions = (region SizedRegion<1>:$body);
+
+  let hasCustomAssemblyFormat = 1;
+
+  let extraClassDeclaration = [{
+    void getAsmBlockArgumentNames(mlir::Region &region,
+                                  mlir::OpAsmSetValueNameFn setNameFn);
+
+    /// Get the number of input tokens
+    size_t getNumTokenInputs() { return getTokenInputs().size(); }
+
+    /// Get the number of output tokens
+    size_t getNumTokenOutputs() { return getTokenOutputs().size(); }
+
+    /// Check if this task has timing specified
+    bool hasTiming() { return getTiming().has_value(); }
+  }];
+
+  let hasVerifier = 1;
+}
+
+def DataflowYieldOp : Cmt2Op<
+  "dataflow.yield", [
+    Terminator,
+    HasParent<"DataflowTaskOp">
+  ]> {
+  let summary = "Yield tokens from a dataflow task";
+  let description = [{
+    The `cmt2.dataflow.yield` operation terminates a dataflow task and
+    yields the output tokens. The number and types of yielded tokens must
+    match the task's result types.
+
+    Assembly format:
+    ```mlir
+    cmt2.dataflow.yield %tok1, %tok2 : !cmt2.sync_token<data = !firrtl.uint<32>>,
+                                        !cmt2.sync_token<data = !firrtl.uint<16>>
+    ```
+  }];
+
+  let arguments = (ins Variadic<AnySyncTokenType>:$tokens);
+
+  let assemblyFormat = [{
+    attr-dict ($tokens^ `:` qualified(type($tokens)))?
+  }];
+
+  let hasVerifier = 1;
+}
+
+def DataflowReturnOp : Cmt2Op<
+  "dataflow.return", [
+    Terminator,
+    HasParent<"DataflowTaskOp">
+  ]> {
+  let summary = "Return final result from a dataflow pipeline";
+  let description = [{
+    The `cmt2.dataflow.return` operation terminates the final task in a
+    dataflow pipeline and returns the result values. This is used instead
+    of `dataflow.yield` when a task produces the pipeline's output rather
+    than tokens for further processing.
+
+    The return types must match the enclosing ProcDataflowOp's result types.
+
+    Assembly format:
+    ```mlir
+    cmt2.dataflow.return %result : !firrtl.uint<32>
+    ```
+  }];
+
+  let arguments = (ins Variadic<AnyType>:$results);
+
+  let assemblyFormat = [{
+    attr-dict ($results^ `:` qualified(type($results)))?
+  }];
+
+  let hasVerifier = 1;
 }
 
 #endif // CIRCT_DIALECT_Cmt2_Cmt2OPS_TD
