@@ -123,8 +123,8 @@ ExternalModule* STLLibrary::createRegModule(unsigned width, unsigned init, Circu
   regMod = circuit.addExternalModule("FIRRTLReg", params);
 
   // Apply the same binding pattern used in APS
-  regMod->bindClock("clk", "clock")
-        .bindReset("rst", "reset")
+  regMod->bindClock("clk", "clk")
+        .bindReset("rst", "rst")
         .bindValue("read", "read_ready", {}, {"read_data"})
         .bindMethod("write", "write_enable", "write_ready", {"write_data"}, {})
         ;

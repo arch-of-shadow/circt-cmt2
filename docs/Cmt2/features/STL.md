@@ -85,6 +85,9 @@ These bindings ensure the compiler knows:
 
 ## Reg (Register)
 
+The ECMT2 register factory binds clock and reset arguments to the generated
+FIRRTL register's `clk` and `rst` ports.
+
 ```python
 from circt.pycmt2.stl import Reg
 
