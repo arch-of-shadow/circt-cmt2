@@ -151,6 +151,9 @@ public:
 
   SignalTracker &getSignalTracker() { return signalTracker; }
   IRMapping &getIRMapping() { return irMapping; }
+  DenseMap<std::pair<Value, Value>, Value> &getNonFiringPrefixes() {
+    return nonFiringPrefixes;
+  }
 
   void registerInstance(StringAttr name, firrtl::InstanceOp firrtlInst) {
     instances[name] = firrtlInst;
@@ -168,6 +171,7 @@ private:
   SignalTracker signalTracker;
   IRMapping irMapping;
   DenseMap<StringAttr, firrtl::InstanceOp> instances;
+  DenseMap<std::pair<Value, Value>, Value> nonFiringPrefixes;
 };
 
 //===----------------------------------------------------------------------===//
@@ -1171,21 +1175,32 @@ Value LowerCmt2ToFIRRTLPass::generateReadySignal(
   // const auto &funcs = step.getFunctions();
   const auto &preventing = step.getPreventingFirings();
   auto funcName = func.functionNameAttr();
+  Value unblocked;
 
+  // Keep priority prefixes independent of each function's private readiness.
+  // Every cached value is defined in the module body before subsequent users.
   for (auto prevent : preventing) {
     if (prevent.later == funcName) {
       if (auto precedingFire =
               ctx.getSignalTracker().getFire(prevent.earlier)) {
-        Value notFired = builder.create<XorPrimOp>(
-            func.getLoc(), precedingFire,
-            builder.create<ConstantOp>(func.getLoc(),
-                                       UIntType::get(builder.getContext(), 1),
-                                       APInt(1, 1)));
-        ready = builder.create<AndPrimOp>(func.getLoc(), ready, notFired);
+        auto [it, inserted] = ctx.getNonFiringPrefixes().try_emplace(
+            std::make_pair(unblocked, precedingFire));
+        if (inserted) {
+          Value one = builder.create<ConstantOp>(
+              func.getLoc(), UIntType::get(builder.getContext(), 1), APInt(1, 1));
+          Value notFired = builder.create<XorPrimOp>(
+              func.getLoc(), precedingFire, one);
+          it->second = unblocked
+                           ? builder.create<AndPrimOp>(func.getLoc(), unblocked,
+                                                       notFired)
+                           : notFired;
+        }
+        unblocked = it->second;
       }
     }
   }
-  return ready;
+  return unblocked ? builder.create<AndPrimOp>(func.getLoc(), ready, unblocked)
+                   : ready;
 }
 
 Value LowerCmt2ToFIRRTLPass::generateFireSignal(Cmt2FunctionLike func,

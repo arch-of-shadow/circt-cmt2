@@ -87,6 +87,13 @@ lookups for each converted module, while preserving regular-module preference
 and refreshing the cache when the set of FIRRTL modules changes. This avoids
 repeated walks through large source and generated module bodies.
 
+Priority arbitration builds the conjunction of preceding non-firings separately
+from each function's own guard and callee readiness. Prefixes are shared within
+one module conversion, avoiding quadratic replicated gate chains for a bank
+with many competing read sites. The Boolean readiness and firing conditions are
+unchanged; the prefix cache contains only dominating FIRRTL SSA values and is
+discarded after that module is converted.
+
 The emitted SystemVerilog may reference ModuleLibrary-backed extern modules.
 Simulation workspaces should include the referenced RTL modules (exact variants).
 
