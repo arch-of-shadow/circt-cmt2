@@ -71,9 +71,6 @@ int main() {
   loadStep->body([&](mlir::OpBuilder &builder) {
     // Read from register
     regInst->callValue("read", builder);
-    // Signal done
-    auto done = UInt::constant(1, 1, builder, procMod->getLoc());
-    loadStep->stepDone(done.getValue());
   });
 
   auto *storeStep = procMod->addProcStep("store");
@@ -81,9 +78,6 @@ int main() {
     // Write to register
     auto val = UInt::constant(42, 32, builder, procMod->getLoc());
     regInst->callMethod("write", {val.getValue()}, builder);
-    // Signal done
-    auto done = UInt::constant(1, 1, builder, procMod->getLoc());
-    storeStep->stepDone(done.getValue());
   });
 
   // Create a procedural rule

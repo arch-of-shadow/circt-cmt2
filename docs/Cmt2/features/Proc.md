@@ -21,7 +21,7 @@ clk/rst --->|  proc controller (FSM)    |----> enables/calls to datapath
             +---------------------------+
 ```
 
-- **Dynamic steps** complete when an explicit `done` condition becomes true.
+- **Dynamic steps** fire when their calls are ready and advance in the same cycle.
 - **Static steps** complete after a fixed number of cycles (optionally pipelined).
 
 Proc control composes steps with:
@@ -41,12 +41,12 @@ Use dynamic steps when completion depends on runtime state (e.g., FIFO not empty
 
 ```
 step wait_for_data:
-  done = !fifo_empty
-  body: data = fifo.dequeue()
+  body: data = fifo.dequeue()  // waits until dequeue is ready
 ```
 
 Key property: the controller may stay in the same “step state” for multiple
-cycles until `done` is asserted.
+cycles until the step's calls are ready. The step then fires atomically and
+advances the controller.
 
 ### Static steps (fixed latency)
 
