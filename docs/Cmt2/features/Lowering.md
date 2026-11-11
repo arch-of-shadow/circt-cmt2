@@ -81,6 +81,12 @@ Related user docs:
 
 ## SV Generation and ModuleLibrary RTL
 
+FIRRTL module lookup examines module declarations without traversing their
+bodies or the source Cmt2 circuit. Instance conversion caches external module
+lookups for each converted module, while preserving regular-module preference
+and refreshing the cache when the set of FIRRTL modules changes. This avoids
+repeated walks through large source and generated module bodies.
+
 The emitted SystemVerilog may reference ModuleLibrary-backed extern modules.
 Simulation workspaces should include the referenced RTL modules (exact variants).
 

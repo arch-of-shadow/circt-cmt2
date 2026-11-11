@@ -1698,38 +1698,33 @@ FModuleOp LowerCmt2ToFIRRTLPass::findFIRRTLModule(StringRef moduleName,
   FModuleOp result;
 
   // Search for FIRRTL module in circuits
-  searchRoot->walk([&](firrtl::CircuitOp circuit) {
-    // First search for regular modules (FModuleOp)
-    circuit.walk([&](FModuleOp mod) {
+  searchRoot->walk<WalkOrder::PreOrder>([&](Operation *op) {
+    if (isa<cmt2::CircuitOp, FModuleLike>(op))
+      return WalkResult::skip();
+    auto circuit = dyn_cast<firrtl::CircuitOp>(op);
+    if (!circuit)
+      return WalkResult::advance();
+    for (auto mod : circuit.getOps<FModuleOp>()) {
       if (mod.getModuleName() == moduleName) {
         result = mod;
         return WalkResult::interrupt();
       }
-      return WalkResult::advance();
-    });
-    if (result)
-      return WalkResult::interrupt();
-
-    // Also search for external modules (FExtModuleOp)
-    circuit.walk([&](firrtl::FExtModuleOp extMod) {
-      if (extMod.getModuleName() == moduleName) {
-        // For external modules, we create a stub FModuleOp to satisfy
-        // the interface requirements. The caller will handle this case.
-        return WalkResult::interrupt();
-      }
-      return WalkResult::advance();
-    });
-
-    return result ? WalkResult::interrupt() : WalkResult::advance();
+    }
+    return WalkResult::skip();
   });
 
   // If not found in circuits, search directly
   if (!result) {
-    searchRoot->walk([&](FModuleOp mod) {
-      if (mod.getModuleName() == moduleName) {
-        result = mod;
-        return WalkResult::interrupt();
+    searchRoot->walk<WalkOrder::PreOrder>([&](Operation *op) {
+      if (auto mod = dyn_cast<FModuleOp>(op)) {
+        if (mod.getModuleName() == moduleName) {
+          result = mod;
+          return WalkResult::interrupt();
+        }
+        return WalkResult::skip();
       }
+      if (isa<cmt2::CircuitOp, FModuleLike>(op))
+        return WalkResult::skip();
       return WalkResult::advance();
     });
   }
@@ -1742,15 +1737,19 @@ firrtl::FExtModuleOp LowerCmt2ToFIRRTLPass::findFIRRTLExtModule(
   firrtl::FExtModuleOp result;
 
   // Search for FIRRTL external module in circuits
-  searchRoot->walk([&](firrtl::CircuitOp circuit) {
-    circuit.walk([&](firrtl::FExtModuleOp extMod) {
+  searchRoot->walk<WalkOrder::PreOrder>([&](Operation *op) {
+    if (isa<cmt2::CircuitOp, FModuleLike>(op))
+      return WalkResult::skip();
+    auto circuit = dyn_cast<firrtl::CircuitOp>(op);
+    if (!circuit)
+      return WalkResult::advance();
+    for (auto extMod : circuit.getOps<firrtl::FExtModuleOp>()) {
       if (extMod.getModuleName() == moduleName) {
         result = extMod;
         return WalkResult::interrupt();
       }
-      return WalkResult::advance();
-    });
-    return result ? WalkResult::interrupt() : WalkResult::advance();
+    }
+    return WalkResult::skip();
   });
 
   return result;
