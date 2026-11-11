@@ -155,22 +155,21 @@ void ConflictMatrixAnalysis::runAnalysis() {
   InstanceGraph instanceGraph(circuit);
   CallInfoView callInfo(circuit);
 
-  // Build module map for efficient lookup
-  DenseMap<StringAttr, ModuleOp> moduleMap;
+  // Resolve target module identities once, without caching mutable matrices.
+  SymbolTableCollection symbols;
+  DenseMap<StringAttr, DenseMap<StringAttr, StringAttr>> moduleInstanceMap;
   circuit.walk([&](ModuleOp module) {
-    moduleMap[module.getSymNameAttr()] = module;
-  });
-
-  // Build instance map for each module for O(1) lookup
-  DenseMap<StringAttr, DenseMap<StringAttr, InstanceOp>> moduleInstanceMap;
-  circuit.walk([&](ModuleOp module) {
-    DenseMap<StringAttr, InstanceOp> instanceMap;
+    DenseMap<StringAttr, StringAttr> instanceMap;
     for (auto &op : module.getBody().front().getOperations()) {
       if (auto instance = dyn_cast<InstanceOp>(op)) {
-        instanceMap[instance.getInstanceNameAttr()] = instance;
+        auto target = dyn_cast_or_null<Cmt2ModuleLike>(symbols.lookupSymbolIn(
+            instance->getParentOfType<CircuitOp>(),
+            instance.getModuleNameAttr().getAttr()));
+        if (target)
+          instanceMap[instance.getInstanceNameAttr()] = target.moduleNameAttr();
       }
     }
-    moduleInstanceMap[module.getSymNameAttr()] = instanceMap;
+    moduleInstanceMap[module.getSymNameAttr()] = std::move(instanceMap);
   });
 
   // Use InstanceGraph to get modules in topological order (bottom-up)
@@ -259,12 +258,12 @@ void ConflictMatrixAnalysis::parseModuleLikeMatrix(
     }
   }
 
-  matrices[moduleName] = matrix;
+  matrices[moduleName] = std::move(matrix);
 }
 
 void ConflictMatrixAnalysis::inferModuleMatrix(
     ModuleOp module, const CallInfoView &callInfo,
-    const DenseMap<StringAttr, InstanceOp> &instanceMap) {
+    const DenseMap<StringAttr, StringAttr> &instanceModules) {
   StringAttr moduleName = module.getSymNameAttr();
   LLVM_DEBUG(llvm::dbgs() << "Inferring matrix for module: @"
                           << moduleName.getValue() << "\n");
@@ -276,9 +275,14 @@ void ConflictMatrixAnalysis::inferModuleMatrix(
   const ModuleCallInfo *modCallInfo = callInfo.getModuleCallInfo(moduleName.getValue());
   if (!modCallInfo) {
     // No calls in this module, all functions are conflict-free
-    matrices[moduleName] = matrix;
+    matrices[moduleName] = std::move(matrix);
     return;
   }
+
+  ModuleCallBuckets callBuckets;
+  for (const auto &[entity, calls] : *modCallInfo)
+    for (const auto &call : calls)
+      callBuckets[entity][call.calleeInstance.getLeafReference()].push_back(&call);
 
   // Collect all function names, isAction, hasArgs in this module
   SmallVector<std::tuple<StringAttr, bool, bool>> functionNames;
@@ -297,7 +301,7 @@ void ConflictMatrixAnalysis::inferModuleMatrix(
       auto &[fxName, isAction, hasArgs] = functionNames[i];
       auto &[fyName, isActionY, hasArgsY] = functionNames[j];
 
-      Relationship rel = inferRelationship(fxName, fyName, isAction && isActionY, hasArgs && hasArgsY, *modCallInfo, instanceMap, matrix);
+      Relationship rel = inferRelationship(fxName, fyName, isAction && isActionY, hasArgs && hasArgsY, *modCallInfo, callBuckets, instanceModules, matrix);
       matrix.setRelationship(fxName, fyName, rel);
 
       LLVM_DEBUG({
@@ -322,13 +326,14 @@ void ConflictMatrixAnalysis::inferModuleMatrix(
     }
   }
 
-  matrices[moduleName] = matrix;
+  matrices[moduleName] = std::move(matrix);
 }
 
 Relationship ConflictMatrixAnalysis::inferRelationship(
     StringAttr fxName, StringAttr fyName, bool isAction, bool hasArguments, 
     const ModuleCallInfo &callInfo,
-    const DenseMap<StringAttr, InstanceOp> &instanceMap,
+    const ModuleCallBuckets &callBuckets,
+    const DenseMap<StringAttr, StringAttr> &instanceModules,
     const ModuleConflictMatrix& matrix) {
   // If same function, default to ConflictFree
   if (fxName == fyName) {
@@ -348,7 +353,7 @@ Relationship ConflictMatrixAnalysis::inferRelationship(
   }
 
   const EntityCallInfo &callsFx = fxCallsIt->second;
-  const EntityCallInfo &callsFy = fyCallsIt->second;
+  const auto &bucketsFy = callBuckets.find(fyCallsIt->first)->second;
 
   auto existing_relation = matrix.getRelationship(fxName, fyName);
 
@@ -359,36 +364,23 @@ Relationship ConflictMatrixAnalysis::inferRelationship(
 
   // Apply inference rules
   for (const auto &cx : callsFx) {
-    for (const auto &cy : callsFy) {
-      // Get instance names (leaf references)
-      StringAttr cxInstance = cx.calleeInstance.getLeafReference();
-      StringAttr cyInstance = cy.calleeInstance.getLeafReference();
-
-      // Check if calls are to the same instance
-      if (cxInstance != cyInstance)
-        continue;
-
-      // Look up the instance using the pre-built instance map (O(1) lookup)
-      auto instIt = instanceMap.find(cxInstance);
-      if (instIt == instanceMap.end())
-        continue;
-
-      InstanceOp instance = instIt->second;
-
-      // Get the referenced module's conflict matrix
-      auto refModule = instance.getReferencedModule();
-      if (!refModule)
-        continue;
-
-      StringAttr refModuleName = refModule.moduleNameAttr();
-      const auto *refMatrix = getModuleMatrix(refModuleName);
-
-      if (!refMatrix)
-        continue;
+    // Keep the original outer call order and the matching inner call order.
+    // In particular, do not deduplicate calls or iterate unordered buckets.
+    StringAttr cxInstance = cx.calleeInstance.getLeafReference();
+    auto bucket = bucketsFy.find(cxInstance);
+    if (bucket == bucketsFy.end())
+      continue;
+    auto instIt = instanceModules.find(cxInstance);
+    if (instIt == instanceModules.end())
+      continue;
+    const auto *refMatrix = getModuleMatrix(instIt->second);
+    if (!refMatrix)
+      continue;
+    for (const auto *cy : bucket->second) {
 
       // Get method names (leaf references)
       StringAttr cxMethod = cx.calleeEntity.getLeafReference();
-      StringAttr cyMethod = cy.calleeEntity.getLeafReference();
+      StringAttr cyMethod = cy->calleeEntity.getLeafReference();
 
       // Get relationship between the two methods in the instance's module
       Relationship instRel = refMatrix->getRelationship(cxMethod, cyMethod);

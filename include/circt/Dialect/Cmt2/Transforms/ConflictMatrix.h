@@ -96,15 +96,20 @@ private:
   /// Parse conflict matrix from module attributes
   void parseModuleLikeMatrix(Cmt2ModuleLike module);
 
+  // Preserve call order and multiplicity within each resolved-instance bucket.
+  using CallBuckets = DenseMap<StringAttr, SmallVector<const CallInfo *>>;
+  using ModuleCallBuckets = DenseMap<mlir::SymbolRefAttr, CallBuckets>;
+
   /// Infer conflict matrix for a regular module
   void inferModuleMatrix(ModuleOp module, const CallInfoView &callInfo,
-                         const DenseMap<StringAttr, InstanceOp> &instanceMap);
+                         const DenseMap<StringAttr, StringAttr> &instanceModules);
 
   /// Apply inference rules to determine relationship between fx and fy
   Relationship inferRelationship(StringAttr fxName, StringAttr fyName,
                                  bool isAction, bool hasArguments,
                                  const ModuleCallInfo &callInfo,
-                                 const DenseMap<StringAttr, InstanceOp> &instanceMap,
+                                 const ModuleCallBuckets &callBuckets,
+                                 const DenseMap<StringAttr, StringAttr> &instanceModules,
                                  const ModuleConflictMatrix& matrix);
 
   CircuitOp circuit;

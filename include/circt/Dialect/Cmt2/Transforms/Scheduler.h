@@ -95,6 +95,11 @@ public:
   /// Get the schedule result for a module
   const ModuleScheduleResult *getModuleSchedule(StringAttr moduleName) const;
 
+  /// Reuse the read-only conflict analysis; valid for this scheduler's lifetime.
+  const ConflictMatrixAnalysis &getConflictAnalysis() const {
+    return conflictAnalysis;
+  }
+
   /// Check if analysis has been computed for a module
   bool hasModuleSchedule(StringAttr moduleName) const;
 

@@ -62,19 +62,22 @@ public:
 
 private:
   /// Build the call info for a single module
-  void buildModuleCallInfo(ModuleOp module);
+  void buildModuleCallInfo(ModuleOp module, mlir::SymbolTableCollection &symbols);
 
   /// Process a rule/method/value operation to extract call information
   void processEntity(mlir::Operation *entity, mlir::SymbolRefAttr entityName,
-                     ModuleOp currentModule, ModuleCallInfo &moduleInfo);
+                     ModuleOp currentModule, ModuleCallInfo &moduleInfo,
+                     mlir::SymbolTableCollection &symbols);
 
   /// Determine the type of the callee (Method or Value)
-  CallType determineCalleeType(CallOp callOp, ModuleOp currentModule);
+  CallType determineCalleeType(CallOp callOp, ModuleOp currentModule,
+                              mlir::SymbolTableCollection &symbols);
 
   /// Determine the type of the callee with explicit instance and method refs
   CallType determineCalleeType(CallOp callOp, ModuleOp currentModule,
                                 mlir::SymbolRefAttr calleeInstance,
-                                mlir::SymbolRefAttr calleeEntity);
+                                mlir::SymbolRefAttr calleeEntity,
+                                mlir::SymbolTableCollection &symbols);
 
   /// The circuit operation for symbol lookup
   CircuitOp circuit;

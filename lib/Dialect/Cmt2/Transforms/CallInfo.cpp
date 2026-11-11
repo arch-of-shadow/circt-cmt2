@@ -17,15 +17,18 @@ using namespace circt;
 using namespace cmt2;
 
 CallInfoView::CallInfoView(CircuitOp circuit) : circuit(circuit) {
+  // Shared only during this read-only construction, never across IR mutation.
+  mlir::SymbolTableCollection symbols;
   // Iterate through all modules in the circuit
   for (auto &op : circuit.getOps()) {
     if (auto module = llvm::dyn_cast<ModuleOp>(op)) {
-      buildModuleCallInfo(module);
+      buildModuleCallInfo(module, symbols);
     }
   }
 }
 
-void CallInfoView::buildModuleCallInfo(ModuleOp module) {
+void CallInfoView::buildModuleCallInfo(
+    ModuleOp module, mlir::SymbolTableCollection &symbols) {
   ModuleCallInfo moduleInfo;
   llvm::StringRef moduleName = module.getSymName();
 
@@ -35,13 +38,13 @@ void CallInfoView::buildModuleCallInfo(ModuleOp module) {
 
     if (auto rule = llvm::dyn_cast<RuleOp>(op)) {
       entityName = mlir::SymbolRefAttr::get(rule.getSymNameAttr());
-      processEntity(rule, entityName, module, moduleInfo);
+      processEntity(rule, entityName, module, moduleInfo, symbols);
     } else if (auto method = llvm::dyn_cast<MethodOp>(op)) {
       entityName = mlir::SymbolRefAttr::get(method.getSymNameAttr());
-      processEntity(method, entityName, module, moduleInfo);
+      processEntity(method, entityName, module, moduleInfo, symbols);
     } else if (auto value = llvm::dyn_cast<ValueOp>(op)) {
       entityName = mlir::SymbolRefAttr::get(value.getSymNameAttr());
-      processEntity(value, entityName, module, moduleInfo);
+      processEntity(value, entityName, module, moduleInfo, symbols);
     }
   }
 
@@ -50,9 +53,10 @@ void CallInfoView::buildModuleCallInfo(ModuleOp module) {
 }
 
 void CallInfoView::processEntity(mlir::Operation *entity,
-                                   mlir::SymbolRefAttr entityName,
-                                   ModuleOp currentModule,
-                                   ModuleCallInfo &moduleInfo) {
+                                 mlir::SymbolRefAttr entityName,
+                                 ModuleOp currentModule,
+                                 ModuleCallInfo &moduleInfo,
+                                 mlir::SymbolTableCollection &symbols) {
   EntityCallInfo calls;
 
   // Walk through all operations in the entity's regions
@@ -62,7 +66,7 @@ void CallInfoView::processEntity(mlir::Operation *entity,
     mlir::SymbolRefAttr methodOrValueAttr = callOp.getMethodOrValueAttr();
 
     // Check if this is an interface call by looking up InterfaceDefOp
-    if (auto interfaceDef = mlir::SymbolTable::lookupNearestSymbolFrom<InterfaceDefOp>(
+    if (auto interfaceDef = symbols.lookupNearestSymbolFrom<InterfaceDefOp>(
             currentModule, calleeAttr)) {
       // This is an interface call - resolve it to actual instance.method
       // InterfaceDefOp has methods attribute: [[@inst, @instMethod, @ifaceMethod], ...]
@@ -78,7 +82,8 @@ void CallInfoView::processEntity(mlir::Operation *entity,
             auto instanceMethodRef = llvm::cast<mlir::SymbolRefAttr>(arrayAttr[1]);
 
             // Determine the call type using the resolved instance and method
-            CallType callType = determineCalleeType(callOp, currentModule, instanceRef, instanceMethodRef);
+            CallType callType = determineCalleeType(
+                callOp, currentModule, instanceRef, instanceMethodRef, symbols);
             CallInfo info(instanceRef, instanceMethodRef, callType);
             calls.push_back(info);
             return; // Found and processed the interface call
@@ -88,7 +93,7 @@ void CallInfoView::processEntity(mlir::Operation *entity,
     }
 
     // Not an interface call - process normally
-    CallType callType = determineCalleeType(callOp, currentModule);
+    CallType callType = determineCalleeType(callOp, currentModule, symbols);
     CallInfo info(calleeAttr, methodOrValueAttr, callType);
     calls.push_back(info);
   });
@@ -99,9 +104,9 @@ void CallInfoView::processEntity(mlir::Operation *entity,
   }
 }
 
-CallType CallInfoView::determineCalleeType(CallOp callOp, ModuleOp currentModule,
-                                             mlir::SymbolRefAttr calleeInstance,
-                                             mlir::SymbolRefAttr calleeEntity) {
+CallType CallInfoView::determineCalleeType(
+    CallOp callOp, ModuleOp currentModule, mlir::SymbolRefAttr calleeInstance,
+    mlir::SymbolRefAttr calleeEntity, mlir::SymbolTableCollection &symbols) {
 
   // Find the target module where the callee entity is defined
   Cmt2ModuleLike targetModule = nullptr;
@@ -111,27 +116,21 @@ CallType CallInfoView::determineCalleeType(CallOp callOp, ModuleOp currentModule
     targetModule = currentModule;
   } else {
     // Find the instance and resolve to its target module
-    auto instance = mlir::SymbolTable::lookupNearestSymbolFrom<InstanceOp>(
+    auto instance = symbols.lookupNearestSymbolFrom<InstanceOp>(
         currentModule, calleeInstance);
     if (instance) {
       // Get the module being instantiated
       auto moduleNameAttr = instance.getModuleNameAttr().getAttr();
-      // Try ModuleOp first
-      if (auto module = mlir::SymbolTable::lookupNearestSymbolFrom<ModuleOp>(
-              circuit, moduleNameAttr)) {
-        targetModule = module;
-      }
-      // Then try ExtModuleFirrtlOp
-      else if (auto extModule = mlir::SymbolTable::lookupNearestSymbolFrom<ExtModuleFirrtlOp>(
-              circuit, moduleNameAttr)) {
-        targetModule = extModule;
-      }
+      auto *target = symbols.lookupNearestSymbolFrom(circuit, moduleNameAttr);
+      if (llvm::isa_and_nonnull<ModuleOp, ExtModuleFirrtlOp>(target))
+        targetModule = llvm::cast<Cmt2ModuleLike>(target);
     }
   }
 
   // Look up the callee entity in the target module using the interface
   if (targetModule) {
-    Cmt2FunctionLike function = targetModule.lookupFunctionLike(calleeEntity.getLeafReference());
+    auto function = llvm::dyn_cast_or_null<Cmt2FunctionLike>(
+        symbols.lookupSymbolIn(targetModule.getOperation(), calleeEntity));
     if (function) {
       if (function.getFunctionKind() == FunctionKind::Method) {
         return CallType::MethodCall;
@@ -145,8 +144,10 @@ CallType CallInfoView::determineCalleeType(CallOp callOp, ModuleOp currentModule
   return CallType::MethodCall;
 }
 
-CallType CallInfoView::determineCalleeType(CallOp callOp, ModuleOp currentModule) {
-  return determineCalleeType(callOp, currentModule, callOp.getCalleeAttr(), callOp.getMethodOrValueAttr());
+CallType CallInfoView::determineCalleeType(
+    CallOp callOp, ModuleOp currentModule, mlir::SymbolTableCollection &symbols) {
+  return determineCalleeType(callOp, currentModule, callOp.getCalleeAttr(),
+                             callOp.getMethodOrValueAttr(), symbols);
 }
 
 const ModuleCallInfo *

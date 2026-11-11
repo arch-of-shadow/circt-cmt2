@@ -59,10 +59,12 @@
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/IRMapping.h"
 #include "mlir/IR/ImplicitLocOpBuilder.h"
+#include "mlir/IR/SymbolTable.h"
 #include "mlir/Pass/Pass.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/PostOrderIterator.h"
+#include "llvm/ADT/ScopeExit.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/ErrorHandling.h"
@@ -178,6 +180,22 @@ public:
   void runOnOperation() override;
 
 private:
+  // Only original CMT2 symbol tables are indexed. They remain read-only while
+  // FIRRTL operations are created, and this pointer is cleared before erase.
+  SymbolTableCollection *sourceSymbols = nullptr;
+
+  // FIRRTL module/instance port lists are final when first queried. Entries
+  // exist only during convertCircuit and are cleared on success and failure.
+  DenseMap<Operation *, DenseMap<StringAttr, size_t>> portIndices;
+
+  Cmt2ModuleLike getReferencedModule(cmt2::InstanceOp inst) {
+    auto circuit = inst->getParentOfType<cmt2::CircuitOp>();
+    if (!circuit)
+      return nullptr;
+    return sourceSymbols->lookupSymbolIn<Cmt2ModuleLike>(
+        circuit, inst.getModuleNameAttr().getAttr());
+  }
+
   // Main conversion entry points
   LogicalResult convertCircuit(cmt2::CircuitOp circuit);
   LogicalResult
@@ -278,7 +296,6 @@ private:
       ModuleConversionContext &ctx, ImplicitLocOpBuilder &builder);
 
   // Interface helpers
-  bool isInterfaceCall(CallOp callOp, cmt2::ModuleOp module);
   InterfaceOp getInterfaceForDecl(InterfaceDeclOp decl);
   void createInterfacePorts(cmt2::ModuleOp module, OpBuilder &builder,
                             SmallVectorImpl<PortInfo> &ports);
@@ -321,7 +338,14 @@ LogicalResult LowerCmt2ToFIRRTLPass::convertCircuit(cmt2::CircuitOp circuit) {
 
   // Run analyses on the circuit to gather scheduling and dependency information
   SchedulerAnalysis scheduler(circuit);
-  ConflictMatrixAnalysis conflictAnalysis(circuit);
+  const auto &conflictAnalysis = scheduler.getConflictAnalysis();
+
+  auto symbols = std::make_unique<SymbolTableCollection>();
+  sourceSymbols = symbols.get();
+  auto clearLookups = llvm::make_scope_exit([&] {
+    sourceSymbols = nullptr;
+    portIndices.clear();
+  });
 
   // Build instance graph to determine conversion order (bottom-up)
   InstanceGraph instanceGraph(circuit);
@@ -384,7 +408,10 @@ LogicalResult LowerCmt2ToFIRRTLPass::convertCircuit(cmt2::CircuitOp circuit) {
 
   // firrtlCircuit.print(llvm::dbgs());
 
-  // Erase the original cmt2 circuit
+  // Drop source tables before deleting their operations. FIRRTL tables are
+  // not indexed, so creating modules and renaming the FIRRTL circuit is safe.
+  sourceSymbols = nullptr;
+  symbols.reset();
   circuit.erase();
   return success();
 }
@@ -465,15 +492,8 @@ LogicalResult LowerCmt2ToFIRRTLPass::convertModule(
   for (const auto &group : schedule->getGroups()) {
     for (auto funcName : group.getFunctions()) {
       // Find the function operation
-      Cmt2FunctionLike func;
-      for (auto &op : module.getBodyRegion().front()) {
-        if (auto f = dyn_cast<Cmt2FunctionLike>(op)) {
-          if (f.functionNameAttr() == funcName) {
-            func = f;
-            break;
-          }
-        }
-      }
+      auto func = sourceSymbols->lookupSymbolIn<Cmt2FunctionLike>(
+          module, funcName);
 
       if (!func) {
         return module.emitError("Function not found: ") << funcName;
@@ -554,6 +574,11 @@ LogicalResult LowerCmt2ToFIRRTLPass::createInstances(
     ImplicitLocOpBuilder &builder,
     const DenseMap<StringAttr, FModuleOp> &convertedModules) {
 
+  // The set/order of FIRRTL modules is fixed throughout instance creation.
+  // Limit this cache to that epoch: the next convertModule inserts a module,
+  // which could change findFIRRTLModule's first-match lookup semantics.
+  DenseMap<StringAttr, FModuleOp> externalModules;
+
   // For each cmt2.instance, create a corresponding firrtl.instance
   for (auto &op : module.getBodyRegion().front()) {
     auto instOp = dyn_cast<cmt2::InstanceOp>(op);
@@ -563,7 +588,7 @@ LogicalResult LowerCmt2ToFIRRTLPass::createInstances(
     LLVM_DEBUG(llvm::dbgs()
                << "create instance " << instOp.getSymName() << "\n");
 
-    auto referencedModule = instOp.getReferencedModule();
+    auto referencedModule = getReferencedModule(instOp);
     if (!referencedModule)
       return instOp.emitError("Referenced module not found: ")
              << instOp.getModuleName();
@@ -574,8 +599,12 @@ LogicalResult LowerCmt2ToFIRRTLPass::createInstances(
     if (auto extModOp =
             dyn_cast<ExtModuleFirrtlOp>(referencedModule.getOperation())) {
       targetModuleName = extModOp.getExtModuleName();
-      firrtlMod = findFIRRTLModule(targetModuleName,
-                                   module->getParentOfType<mlir::ModuleOp>());
+      auto name = builder.getStringAttr(targetModuleName);
+      auto [it, inserted] = externalModules.try_emplace(name);
+      if (inserted)
+        it->second = findFIRRTLModule(
+            targetModuleName, module->getParentOfType<mlir::ModuleOp>());
+      firrtlMod = it->second;
       if (!firrtlMod)
         return instOp.emitError("FIRRTL module not found: ")
                << targetModuleName;
@@ -717,25 +746,10 @@ LogicalResult LowerCmt2ToFIRRTLPass::processInterfaceBinding(
   auto declRef = cast<mlir::SymbolRefAttr>(interfaceBindAttr[1]);
 
   // Find InterfaceDefOp in current module
-  InterfaceDefOp interfaceDef;
-  for (auto &op : module.getBodyRegion().front()) {
-    if (auto def = dyn_cast<InterfaceDefOp>(op)) {
-      if (def.getSymNameAttr() == defRef.getLeafReference()) {
-        interfaceDef = def;
-        break;
-      }
-    }
-  }
-
-  InterfaceDeclOp interfaceDecl;
-  for (auto &op : referencedModule.getBodyRegion().front()) {
-    if (auto decl = dyn_cast<InterfaceDeclOp>(op)) {
-      if (decl.getSymNameAttr() == declRef.getLeafReference()) {
-        interfaceDecl = decl;
-        break;
-      }
-    }
-  }
+  auto interfaceDef = sourceSymbols->lookupSymbolIn<InterfaceDefOp>(
+      module, defRef.getLeafReference());
+  auto interfaceDecl = sourceSymbols->lookupSymbolIn<InterfaceDeclOp>(
+      referencedModule, declRef.getLeafReference());
 
   // Find InterfaceOp to get method signatures
   InterfaceOp iface = getInterfaceForDecl(interfaceDecl);
@@ -770,14 +784,8 @@ LogicalResult LowerCmt2ToFIRRTLPass::processInterfaceBinding(
 
   } else {
     // There must be an interface-decl with the name defRef
-    InterfaceDeclOp defDecl;
-    for (auto &op : module.getBodyRegion().front()) {
-      if (auto itfcDecl = dyn_cast<InterfaceDeclOp>(op)) {
-        if (itfcDecl.getSymNameAttr() == defRef.getLeafReference()) {
-          defDecl = itfcDecl;
-        }
-      }
-    }
+    auto defDecl = sourceSymbols->lookupSymbolIn<InterfaceDeclOp>(
+        module, defRef.getLeafReference());
 
     if (!defDecl) {
       return instOp.emitError("InterfaceDef/Decl not found: ") << defRef;
@@ -997,13 +1005,8 @@ void LowerCmt2ToFIRRTLPass::mapFunctionArgumentsToPorts(
           getFunctionPortName(func, PortKind::Argument, idx);
 
       // Find the corresponding port in the FIRRTL module
-      for (size_t portIdx = 0; portIdx < firrtlModule.getNumPorts();
-           ++portIdx) {
-        if (firrtlModule.getPortName(portIdx) == argPortName) {
-          ctx.getIRMapping().map(blockArg, firrtlModule.getArgument(portIdx));
-          break;
-        }
-      }
+      if (auto portIdx = getPortIndex(firrtlModule, argPortName))
+        ctx.getIRMapping().map(blockArg, firrtlModule.getArgument(*portIdx));
     }
   }
 }
@@ -1028,23 +1031,16 @@ Value LowerCmt2ToFIRRTLPass::generateReadySignal(
     auto requireReady = [&](Value calleeReady) {
       ready = builder.create<AndPrimOp>(call.getLoc(), ready, calleeReady);
     };
-    InterfaceDeclOp interfaceDecl;
-    for (auto &op : ctx.getCmt2Module().getBodyRegion().front()) {
-      if (auto decl = dyn_cast<InterfaceDeclOp>(op)) {
-        if (decl.getSymNameAttr() == call.getCallee().getLeafReference()) {
-          interfaceDecl = decl;
-          break;
-        }
-      }
-    }
+    auto interfaceDecl = sourceSymbols->lookupSymbolIn<InterfaceDeclOp>(
+        ctx.getCmt2Module(), call.getCallee().getLeafReference());
 
     if (interfaceDecl) {
       // Interface call - get ready from interface port
 
       // get the callee function
       auto iface = getInterfaceForDecl(interfaceDecl);
-      auto func =
-          iface.getFunctionOfName(call.getMethodOrValue().getLeafReference());
+      auto func = sourceSymbols->lookupSymbolIn<Cmt2FunctionLike>(
+          iface, call.getMethodOrValue().getLeafReference());
       std::string readyPortName =
           getItfcDeclFunctionPortName(interfaceDecl, func, PortKind::Help, 0);
 
@@ -1058,36 +1054,16 @@ Value LowerCmt2ToFIRRTLPass::generateReadySignal(
       auto methodName = call.getMethodOrValue().getLeafReference();
       firrtl::InstanceOp firrtlInst = ctx.getInstance(instanceName);
 
-      cmt2::InstanceOp cmt2Inst;
+      auto cmt2Inst = sourceSymbols->lookupSymbolIn<cmt2::InstanceOp>(
+          ctx.getCmt2Module(), instanceName);
 
-      for (auto &op : ctx.getCmt2Module().getBodyRegion().front()) {
-        if (auto inst = dyn_cast<cmt2::InstanceOp>(op)) {
-          if (inst.getSymNameAttr() == instanceName) {
-            cmt2Inst = inst;
-            break;
-          }
-        }
-      }
-
-      auto referencedModule = cmt2Inst.getReferencedModule();
+      auto referencedModule = getReferencedModule(cmt2Inst);
 
       if (auto extModOp =
               dyn_cast<ExtModuleFirrtlOp>(referencedModule.getOperation())) {
         // External FIRRTL module - use bind operations
-        Cmt2FunctionLike bindFunc;
-        for (auto &bodyOp : extModOp.getBodyRegion().front()) {
-          if (auto bindMethod = dyn_cast<BindMethodOp>(bodyOp)) {
-            if (bindMethod.getSymNameAttr() == methodName) {
-              bindFunc = bindMethod;
-              break;
-            }
-          } else if (auto bindValue = dyn_cast<BindValueOp>(bodyOp)) {
-            if (bindValue.getSymNameAttr() == methodName) {
-              bindFunc = bindValue;
-              break;
-            }
-          }
-        }
+        auto bindFunc = sourceSymbols->lookupSymbolIn<Cmt2FunctionLike>(
+            extModOp, methodName);
 
         std::optional<std::string> readyName;
         if (auto bindMethod = dyn_cast<BindMethodOp>(bindFunc.getOperation())) {
@@ -1108,15 +1084,8 @@ Value LowerCmt2ToFIRRTLPass::generateReadySignal(
         }
       } else if (auto cmt2Mod = dyn_cast<cmt2::ModuleOp>(
                      referencedModule.getOperation())) {
-        Cmt2FunctionLike targetFunc;
-        for (auto &op : cmt2Mod.getBodyRegion().front()) {
-          if (auto func = dyn_cast<Cmt2FunctionLike>(op)) {
-            if (func.functionNameAttr() == methodName) {
-              targetFunc = func;
-              break;
-            }
-          }
-        }
+        auto targetFunc = sourceSymbols->lookupSymbolIn<Cmt2FunctionLike>(
+            cmt2Mod, methodName);
 
         std::string readyPortName =
             getFunctionPortName(targetFunc, PortKind::Help, 0);
@@ -1169,14 +1138,10 @@ Value LowerCmt2ToFIRRTLPass::generateFireSignal(Cmt2FunctionLike func,
       StringAttr enablePortName =
           builder.getStringAttr(func.functionName().str() + "_enable");
 
-      for (size_t portIdx = 0; portIdx < firrtlModule.getNumPorts();
-           ++portIdx) {
-        if (firrtlModule.getPortName(portIdx) == enablePortName) {
-          enableSignal = firrtlModule.getArgument(portIdx);
-          ctx.getSignalTracker().setEnable(func.functionNameAttr(),
-                                           enableSignal);
-          break;
-        }
+      if (auto portIdx =
+              getPortIndex(firrtlModule, enablePortName.getValue().str())) {
+        enableSignal = firrtlModule.getArgument(*portIdx);
+        ctx.getSignalTracker().setEnable(func.functionNameAttr(), enableSignal);
       }
 
       // Default to 0 if not found (method never fires)
@@ -1315,25 +1280,9 @@ LowerCmt2ToFIRRTLPass::convertCallOp(CallOp callOp,
   StringAttr methodName = callOp.getMethodOrValue().getLeafReference();
 
   // Check if this is an interface call first
-  if (isInterfaceCall(callOp, ctx.getCmt2Module())) {
-    // Find the InterfaceDeclOp
-    InterfaceDeclOp interfaceDecl;
-    for (auto &op : ctx.getCmt2Module().getBodyRegion().front()) {
-      if (auto decl = dyn_cast<InterfaceDeclOp>(op)) {
-        if (decl.getSymNameAttr() == instanceName) {
-          interfaceDecl = decl;
-          break;
-        }
-      }
-    }
-
-    if (!interfaceDecl) {
-      return callOp.emitError("Interface declaration not found: ")
-             << instanceName;
-    }
-
+  if (auto interfaceDecl = sourceSymbols->lookupSymbolIn<InterfaceDeclOp>(
+          ctx.getCmt2Module(), instanceName))
     return connectInterfaceCall(callOp, interfaceDecl, ctx, builder);
-  }
 
   // Look up the FIRRTL instance
   firrtl::InstanceOp firrtlInst = ctx.getInstance(instanceName);
@@ -1342,21 +1291,14 @@ LowerCmt2ToFIRRTLPass::convertCallOp(CallOp callOp,
   }
 
   // Find the cmt2 instance to get the referenced module
-  cmt2::InstanceOp cmt2Inst;
-  for (auto &op : ctx.getCmt2Module().getBodyRegion().front()) {
-    if (auto inst = dyn_cast<cmt2::InstanceOp>(op)) {
-      if (inst.getSymNameAttr() == instanceName) {
-        cmt2Inst = inst;
-        break;
-      }
-    }
-  }
+  auto cmt2Inst = sourceSymbols->lookupSymbolIn<cmt2::InstanceOp>(
+      ctx.getCmt2Module(), instanceName);
 
   if (!cmt2Inst) {
     return callOp.emitError("Cmt2 instance not found: ") << instanceName;
   }
 
-  auto referencedModule = cmt2Inst.getReferencedModule();
+  auto referencedModule = getReferencedModule(cmt2Inst);
   if (!referencedModule) {
     return callOp.emitError("Referenced module not found for instance: ")
            << instanceName;
@@ -1366,20 +1308,8 @@ LowerCmt2ToFIRRTLPass::convertCallOp(CallOp callOp,
   if (auto extModOp =
           dyn_cast<ExtModuleFirrtlOp>(referencedModule.getOperation())) {
     // External FIRRTL module - use bind operations
-    Cmt2FunctionLike bindFunc;
-    for (auto &bodyOp : extModOp.getBodyRegion().front()) {
-      if (auto bindMethod = dyn_cast<BindMethodOp>(bodyOp)) {
-        if (bindMethod.getSymNameAttr() == methodName) {
-          bindFunc = bindMethod;
-          break;
-        }
-      } else if (auto bindValue = dyn_cast<BindValueOp>(bodyOp)) {
-        if (bindValue.getSymNameAttr() == methodName) {
-          bindFunc = bindValue;
-          break;
-        }
-      }
-    }
+    auto bindFunc = sourceSymbols->lookupSymbolIn<Cmt2FunctionLike>(
+        extModOp, methodName);
 
     if (!bindFunc) {
       return callOp.emitError("Bind operation not found for: ") << methodName;
@@ -1396,15 +1326,8 @@ LowerCmt2ToFIRRTLPass::convertCallOp(CallOp callOp,
                  dyn_cast<cmt2::ModuleOp>(referencedModule.getOperation())) {
     // Regular cmt2 module - directly access method/value ports
     // Find the function in the module to determine if it's a method or value
-    Cmt2FunctionLike targetFunc;
-    for (auto &op : cmt2Mod.getBodyRegion().front()) {
-      if (auto func = dyn_cast<Cmt2FunctionLike>(op)) {
-        if (func.functionNameAttr() == methodName) {
-          targetFunc = func;
-          break;
-        }
-      }
-    }
+    auto targetFunc = sourceSymbols->lookupSymbolIn<Cmt2FunctionLike>(
+        cmt2Mod, methodName);
 
     if (!targetFunc) {
       return callOp.emitError("Function not found in module: ") << methodName;
@@ -1695,22 +1618,28 @@ FModuleOp LowerCmt2ToFIRRTLPass::findFIRRTLModule(StringRef moduleName,
 std::optional<size_t>
 LowerCmt2ToFIRRTLPass::getPortIndex(firrtl::InstanceOp &inst,
                                     std::string portName) {
-  for (size_t i = 0; i < inst.getNumResults(); ++i) {
-    if (inst.getPortName(i).getValue() == portName) {
-      return i;
-    }
-  }
+  auto [it, inserted] = portIndices.try_emplace(inst.getOperation());
+  auto &indices = it->second;
+  if (inserted)
+    for (size_t i = 0; i < inst.getNumResults(); ++i)
+      indices.try_emplace(inst.getPortName(i), i);
+  auto port = indices.find(StringAttr::get(inst.getContext(), portName));
+  if (port != indices.end())
+    return port->second;
   return std::nullopt;
 }
 
 std::optional<size_t>
 LowerCmt2ToFIRRTLPass::getPortIndex(firrtl::FModuleOp &fMod,
                                     std::string portName) {
-  for (size_t i = 0; i < fMod.getNumPorts(); ++i) {
-    if (fMod.getPortName(i) == portName) {
-      return i;
-    }
-  }
+  auto [it, inserted] = portIndices.try_emplace(fMod.getOperation());
+  auto &indices = it->second;
+  if (inserted)
+    for (size_t i = 0; i < fMod.getNumPorts(); ++i)
+      indices.try_emplace(fMod.getPortNameAttr(i), i);
+  auto port = indices.find(StringAttr::get(fMod.getContext(), portName));
+  if (port != indices.end())
+    return port->second;
   return std::nullopt;
 }
 
@@ -1720,7 +1649,7 @@ cmt2::ModuleOp LowerCmt2ToFIRRTLPass::findTopModule(cmt2::CircuitOp circuit) {
   for (auto &op : circuit.getBodyRegion().front()) {
     if (auto module = dyn_cast<cmt2::ModuleOp>(op)) {
       module.walk([&](cmt2::InstanceOp inst) {
-        if (auto refModule = inst.getReferencedModule()) {
+        if (auto refModule = getReferencedModule(inst)) {
           instantiatedModules.insert(refModule.moduleNameAttr());
         }
       });
@@ -1750,30 +1679,26 @@ LogicalResult LowerCmt2ToFIRRTLPass::connectInterfaceBinding(
     ModuleConversionContext &ctx, ImplicitLocOpBuilder &builder) {
 
   // Find the interface method/value definition
-  Cmt2FunctionLike ifaceFunc =
-      iface.getFunctionOfName(builder.getStringAttr(declFuncName));
+  auto ifaceFunc = sourceSymbols->lookupSymbolIn<Cmt2FunctionLike>(
+      iface, builder.getStringAttr(declFuncName));
 
   auto funcType = ifaceFunc.getFunctionType();
 
   Location loc = declInst.getLoc();
   auto module = ctx.getCmt2Module();
   auto firrtlMod = ctx.getFIRRTLModule();
-  auto defCmt2Inst = module.getInstanceOfName(defEntity.getValue());
-  auto defDecl = module.getItfcDeclOfName(defEntity.getValue());
+  auto defCmt2Inst =
+      sourceSymbols->lookupSymbolIn<cmt2::InstanceOp>(module, defEntity);
+  auto defDecl =
+      sourceSymbols->lookupSymbolIn<InterfaceDeclOp>(module, defEntity);
 
   firrtl::InstanceOp defInst;
   Cmt2FunctionLike defFunc;
   if (defCmt2Inst) {
     defInst = ctx.getInstance(defEntity);
-    if (auto defMod = dyn_cast<Cmt2ModuleLike>(
-            defCmt2Inst.getReferencedModule().getOperation())) {
-      for (auto &op : defMod.body().front()) {
-        if (auto func = dyn_cast<Cmt2FunctionLike>(op)) {
-          if (func.functionName() == defFuncName)
-            defFunc = func;
-        }
-      }
-    }
+    if (auto defMod = getReferencedModule(defCmt2Inst))
+      defFunc = sourceSymbols->lookupSymbolIn<Cmt2FunctionLike>(
+          defMod.getOperation(), builder.getStringAttr(defFuncName));
   } else if (defDecl) {
 
   } else {
@@ -1888,37 +1813,13 @@ LogicalResult LowerCmt2ToFIRRTLPass::connectInterfaceBinding(
 // Interface Helpers
 //===----------------------------------------------------------------------===//
 
-bool LowerCmt2ToFIRRTLPass::isInterfaceCall(CallOp callOp,
-                                            cmt2::ModuleOp module) {
-  StringAttr calleeName = callOp.getCallee().getRootReference();
-
-  // Check if the callee is an InterfaceDeclOp in the module
-  for (auto &op : module.getBodyRegion().front()) {
-    if (auto decl = dyn_cast<InterfaceDeclOp>(op)) {
-      if (decl.getSymNameAttr() == calleeName) {
-        return true;
-      }
-    }
-  }
-
-  return false;
-}
-
 InterfaceOp LowerCmt2ToFIRRTLPass::getInterfaceForDecl(InterfaceDeclOp decl) {
   auto circuit = decl->getParentOfType<cmt2::CircuitOp>();
   if (!circuit)
     return nullptr;
 
-  // Look up the interface in the circuit
-  for (auto &op : circuit.getBodyRegion().front()) {
-    if (auto iface = dyn_cast<InterfaceOp>(op)) {
-      if (iface.getSymNameAttr() == decl.getInterface().getLeafReference()) {
-        return iface;
-      }
-    }
-  }
-
-  return nullptr;
+  return sourceSymbols->lookupSymbolIn<InterfaceOp>(
+      circuit, decl.getInterface().getLeafReference());
 }
 
 void LowerCmt2ToFIRRTLPass::createInterfacePorts(
@@ -2050,7 +1951,8 @@ LogicalResult LowerCmt2ToFIRRTLPass::connectInterfaceCall(
            << declName;
   }
 
-  Cmt2FunctionLike targetFunc = iface.getFunctionOfName(funcName);
+  auto targetFunc =
+      sourceSymbols->lookupSymbolIn<Cmt2FunctionLike>(iface, funcName);
 
   if (!targetFunc) {
     return callOp.emitError("Method/value not found in interface: ")
